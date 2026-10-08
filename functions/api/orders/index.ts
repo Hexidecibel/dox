@@ -4,6 +4,7 @@ import {
   requireTenantAccess,
   BadRequestError,
   ConflictError,
+  ForbiddenError,
   errorToResponse,
 } from '../../lib/permissions';
 import { parseShipDate, requireTenantCustomer } from '../../lib/order-items';
@@ -144,7 +145,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
-    requireRole(user, 'super_admin', 'org_admin', 'user');
+    // ANY LOGIN MAY OPEN AN ORDER (migration 0138). AJ: "any user with a
+    // portal login can build the order" -- a salesperson on a read-only
+    // account places a document order. What a read-only account still may not
+    // do is put COA lines on it (below, and POST ./:id/items), edit or delete
+    // the order, or send anything.
+    requireRole(user, 'super_admin', 'org_admin', 'user', 'reader');
 
     const body = (await context.request.json()) as {
       order_number?: string;
@@ -165,6 +171,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!body.order_number?.trim()) {
       throw new BadRequestError('order_number is required');
+    }
+    if (user.role === 'reader' && Array.isArray(body.items) && body.items.length > 0) {
+      throw new ForbiddenError(
+        'A read-only account can open an order and add documents for items to it. It cannot add COA lines.',
+      );
     }
 
     let tenantId = body.tenant_id || null;

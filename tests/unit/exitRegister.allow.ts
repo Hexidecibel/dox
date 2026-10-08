@@ -141,9 +141,11 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
     path: 'functions/lib/order-send.ts',
     classification: 'exit',
     checked_by: 'judgeSharedFile',
-    signature: { bucket: 2, gets: 8, readers: 1, checks: 4 },
+    signature: { bucket: 2, gets: 15, readers: 1, checks: 4 },
     reason:
-      'An order\'s attachments, first send and resend. The plan judges each line (`order_send`), and runParts judges every stored file again immediately before its bytes are read.',
+      'An order\'s attachments, first send and resend. The plan judges each line (`order_send`), and runParts judges every stored file again immediately before its bytes are read. ' +
+      'Document lines (0138) added seven `.get(` calls and NO read: all seven are Map lookups in the plan (the per-line outcome, the packed file by key, the entry by key, the gate\'s row and refusal by document id). ' +
+      'A document line\'s file is never read here unless it is a certificate of analysis, which travels the same attachment path as a COA pick; every other document leaves on a link minted from ids that loadExportDocuments returned for this exit and this actor, and storedFileRefusal judges a link file exactly as it judges an attachment before the link is minted. `readers` and `checks` did not move.',
   },
 
   // ---- not exits ---------------------------------------------------------

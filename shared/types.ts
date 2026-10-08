@@ -3295,6 +3295,10 @@ export interface OrderGetResponse {
   suggestions?: unknown[];
   /** Every send of this order's documents, newest first (migration 0134). */
   sends?: OrderSendSummary[];
+  /** The order's document lines (migration 0138), as they stand for the caller. */
+  documents?: ApiOrderDocument[];
+  /** Whether THIS caller may release or refuse a line waiting for QA. */
+  can_release_qa?: boolean;
 }
 
 // === Order Item Row & API Types ===
@@ -3455,6 +3459,22 @@ export interface OrderSendPlanFile {
   lines: OrderSendLineRef[];
   /** Plain words the sender must read: per-lot page fallback, link instead of attachment. */
   notes: string[];
+  /** The document lines (0138) this file stands for. Absent on a COA line's file. */
+  document_lines?: OrderSendDocumentLineRef[];
+  /**
+   * For a `link` file: how many days the link lives. Absent or null = a file
+   * too large to attach, on a link that does not expire (0134). 30 = a
+   * document order's link (0138).
+   */
+  link_days?: number | null;
+}
+
+/** One document line a planned file stands for. */
+export interface OrderSendDocumentLineRef {
+  order_document_id: string;
+  product_name: string | null;
+  supplier_name: string | null;
+  document_type_name: string | null;
 }
 
 export interface OrderSendPlanPart {
@@ -3509,7 +3529,20 @@ export interface OrderSendPreview {
      */
     sharing_refusal?: SharingRefusalReason;
     document_id?: string;
+    /**
+     * Set when this is a DOCUMENT line (0138), not a COA line. `order_item_id`
+     * is then empty; the same line is in `documents.will_not_go`.
+     */
+    order_document_id?: string;
+    supplier_name?: string | null;
+    document_type_name?: string | null;
   }[];
+  /**
+   * The order's document lines (0138) in the three groups the review screen
+   * shows. Absent when the order has none, so an order of COAs alone previews
+   * exactly as it did before.
+   */
+  documents?: OrderSendDocumentsPlan;
   warnings: string[];
   /** Why this order cannot be sent as it stands, or null. */
   blocked: { code: string; message: string } | null;
@@ -3549,6 +3582,10 @@ export interface OrderSendFileRecord {
   document_title: string | null;
   lot_label: string | null;
   sent_ok: boolean;
+  /** Days a `link` file's link lives; null = does not expire (0134). */
+  link_days?: number | null;
+  /** The document lines (0138) the file stood for. */
+  order_document_ids?: string[];
 }
 
 /** One send, as the order page and "Sent documents" list it. */
@@ -3570,13 +3607,249 @@ export interface OrderSendSummary {
   files: OrderSendFileRecord[];
   /** Whether THIS caller may press "resend failed parts". */
   can_resend: boolean;
+  /**
+   * What kind of record this is (0138). `send` = an ordinary send;
+   * `qa_request` = nothing could go yet, QA was asked; `qa_release` = the mail
+   * a QA release produced, and `sent_by` is the person who released.
+   */
+  kind: OrderSendKind;
 }
+
+export type OrderSendKind = 'send' | 'qa_request' | 'qa_release';
 
 export interface OrderSendResponse {
   send: OrderSendSummary;
   /** True only when every email was accepted. */
   sent: boolean;
   order_status: string;
+  /** What happened to the order's document lines (0138). Absent when it has none. */
+  documents?: OrderSendDocumentsOutcome;
+}
+
+// === Document orders (migration 0138) ===
+//
+// An "order" is internal: documents already on file, for a customer. A
+// "request" stays what it is, the external ask to a supplier. Nothing here
+// drafts or sends anything to a supplier.
+
+export type OrderDocumentResolution = 'found' | 'missing' | 'expired';
+export type OrderDocumentReleaseStatus = 'none' | 'pending_qa' | 'released' | 'refused';
+/** What a send would do with a line, for the person asking. */
+export type OrderDocumentDisposition = 'goes_now' | 'waits_for_qa' | 'will_not_go';
+/** Why a line will not go. Null on a line that goes or waits. */
+export type OrderDocumentReason =
+  | 'missing'
+  | 'expired'
+  | 'inactive'
+  | 'no_file'
+  | 'locked'
+  | 'refused'
+  | 'already_released'
+  | 'stale';
+/** `link` = on the order's 30-day link; `attachment` = attached like a COA pick. */
+export type OrderDocumentDelivery = 'link' | 'attachment';
+
+/** One document line of an order, as `GET /api/orders/:id` returns it. */
+export interface ApiOrderDocument {
+  id: string;
+  order_id: string;
+  product_id: string;
+  product_name: string | null;
+  supplier_id: string;
+  supplier_name: string | null;
+  /** The pair's plant as recorded NOW (`product_suppliers.facility_id`). Display only, never stored on the line. */
+  facility: { id: string; name: string; plant_code: string | null } | null;
+  document_type_id: string;
+  document_type_name: string | null;
+  document_id: string | null;
+  document_title: string | null;
+  /** 'active' | 'archived' | 'deleted' -- a line can outlive its document. */
+  document_status: string | null;
+  version_number: number | null;
+  /** As it stands NOW: a document found when the line was added may have expired since. */
+  resolution: OrderDocumentResolution;
+  resolution_note: string | null;
+  /** The document's own due date, resolved now. */
+  document_due_date: string | null;
+  resolved_at: string;
+  /** The rule when the line was resolved. Shown for comparison; decides nothing. */
+  rule_at_resolve: SharingRule | null;
+  /** The document's rule NOW. Null when the line has no document. */
+  sharing_rule: SharingRule | null;
+  release_status: OrderDocumentReleaseStatus;
+  pending_at: string | null;
+  pending_requested_by_name: string | null;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  qa_notified_at: string | null;
+  last_sent_at: string | null;
+  added_by: string;
+  added_by_name: string | null;
+  created_at: string;
+  /** Brand owner and producer both recorded and different. Display only. */
+  private_label: boolean;
+  /** What sales should know before sharing it. Warns, never blocks. */
+  advisory: string | null;
+  /** A fresh resolve would give a different answer than the line holds. */
+  stale: boolean;
+  stale_note: string | null;
+  /** What Send would do with this line for the CALLER, judged against the live rule. */
+  disposition: OrderDocumentDisposition;
+  disposition_reason: OrderDocumentReason | null;
+  /** One sentence a screen can print as it stands. */
+  disposition_text: string;
+  delivery: OrderDocumentDelivery;
+}
+
+/** POST /api/orders/:id/documents */
+export interface OrderDocumentsAddRequest {
+  /** Item-and-supplier pairs from the approved item list. */
+  items: { product_id: string; supplier_id: string }[];
+  document_type_ids: string[];
+  /** True = say what would resolve and write nothing. */
+  dry_run?: boolean;
+}
+
+export type OrderDocumentAddOutcome = 'added' | 'already_on_order' | 'would_add';
+
+/** What one (item, supplier, type) resolved to. */
+export interface OrderDocumentProposal {
+  product_id: string;
+  product_name: string | null;
+  supplier_id: string;
+  supplier_name: string | null;
+  document_type_id: string;
+  document_type_name: string | null;
+  resolution: OrderDocumentResolution;
+  resolution_note: string | null;
+  document_id: string | null;
+  document_title: string | null;
+  document_due_date: string | null;
+  sharing_rule: SharingRule | null;
+  private_label: boolean;
+  advisory: string | null;
+  outcome: OrderDocumentAddOutcome;
+  /** The line written, or already there. Absent on a dry run. */
+  order_document_id?: string;
+}
+
+export interface OrderDocumentsAddResponse {
+  lines: OrderDocumentProposal[];
+  /** What was asked for and not added, each with its reason. Never a silent drop. */
+  refused: {
+    product_id: string;
+    supplier_id: string;
+    document_type_id?: string;
+    product_name?: string | null;
+    supplier_name?: string | null;
+    document_type_name?: string | null;
+    reason: string;
+  }[];
+  dry_run: boolean;
+}
+
+/** One document line on the send review screen. */
+export interface OrderSendDocumentLine {
+  order_document_id: string;
+  product_name: string | null;
+  supplier_name: string | null;
+  facility_name: string | null;
+  document_type_name: string | null;
+  document_id: string | null;
+  document_title: string | null;
+  sharing_rule: SharingRule | null;
+  reason: OrderDocumentReason | null;
+  text: string;
+  delivery: OrderDocumentDelivery;
+  /** The private-label advisory, for the sender. Never in the customer's mail. */
+  advisory: string | null;
+  stale_note: string | null;
+  /** QA will be told about this line when the order is sent (and has not been already). */
+  notifies_qa: boolean;
+}
+
+export interface OrderSendDocumentsPlan {
+  goes_now: OrderSendDocumentLine[];
+  waits_for_qa: OrderSendDocumentLine[];
+  will_not_go: OrderSendDocumentLine[];
+  /** How long the link the documents leave on lives. */
+  link_days: number;
+  /** True when nothing reaches the customer now: the send only asks QA. */
+  only_asks_qa: boolean;
+}
+
+/** Whether QA was told, and how. */
+export interface OrderDocumentQaNotice {
+  /** How many lines the notice was about. */
+  line_count: number;
+  sent: boolean;
+  /** `owner_route` = the QA route; `routing_gap` = no QA route, administrators told instead. */
+  via: 'owner_route' | 'routing_gap' | 'none';
+  recipients: string[];
+}
+
+export interface OrderSendDocumentsOutcome {
+  /** Lines that left with this send. */
+  sent: number;
+  /** Lines now waiting for QA. */
+  pending_qa: number;
+  /** Lines that did not go, with the reason. */
+  not_sent: number;
+  qa_notice: OrderDocumentQaNotice | null;
+}
+
+/** POST /api/orders/:id/documents/release */
+export interface OrderDocumentsReleaseRequest {
+  line_ids: string[];
+}
+
+export interface OrderDocumentsReleaseResponse {
+  released: string[];
+  /** Lines that were not released, each with the reason. They stay waiting. */
+  refused: { order_document_id: string; reason: string }[];
+  /** The mail(s) the release produced: one per distinct set of recipients. */
+  sends: OrderSendSummary[];
+  order_status: string;
+}
+
+/** POST /api/orders/:id/documents/:lineId/refuse */
+export interface OrderDocumentRefuseRequest {
+  note: string;
+}
+
+/** One line waiting for QA, across orders. */
+export interface PendingOrderDocument {
+  id: string;
+  order_id: string;
+  order_number: string;
+  customer_name: string | null;
+  product_name: string | null;
+  supplier_name: string | null;
+  facility_name: string | null;
+  document_type_name: string | null;
+  document_id: string | null;
+  document_title: string | null;
+  document_status: string | null;
+  /** The document's rule NOW. */
+  sharing_rule: SharingRule | null;
+  requested_by_name: string | null;
+  requested_at: string | null;
+  /** Who the release will mail: the recipients of the send that asked. */
+  recipients: string[];
+  private_label: boolean;
+  advisory: string | null;
+  /** Whether Release would go through as things stand, and if not why. */
+  releasable: boolean;
+  blocked_reason: string | null;
+}
+
+/** GET /api/order-documents/pending */
+export interface PendingOrderDocumentsResponse {
+  /** Whether the caller may release or refuse. False = the list is empty. */
+  can_release: boolean;
+  count: number;
+  lines: PendingOrderDocument[];
 }
 
 // === Unified Activity Feed ===

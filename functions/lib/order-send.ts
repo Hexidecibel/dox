@@ -51,6 +51,22 @@
  * strictest rule of every document cut from it -- including lots that are not
  * on this order. When that is stricter than the sender may pass, the per-lot
  * page goes instead and the review screen says so.
+ *
+ * DOCUMENT LINES (migration 0138, decision C-044). An order may also carry
+ * lines that ask for a supplier's documents (functions/lib/order-documents.ts).
+ * They ride in THE SAME PLAN and the same send:
+ *   - a document that may go leaves on ONE link that works for 30 days, in the
+ *     first email, beside the attached certificates. Never the non-expiring
+ *     link: that one is only for a customer's certificate too large to attach;
+ *   - a certificate of analysis on a document line goes ATTACHED, exactly as
+ *     a COA pick does, whole original and all;
+ *   - a document that needs QA approval the sender cannot give is HELD
+ *     (`pending_qa`) and is in no file, no link and no email of this send;
+ *   - locked, missing, expired: listed as not sent, with the reason.
+ * The link is minted in the name of whoever presses send, because a link
+ * serves a `qa` document only while its minter may release QA documents
+ * (C-045). `storedFileRefusal` judges a link file exactly as it judges an
+ * attachment, so a resend re-asks the rule for these too.
  */
 
 import { generateId, logAudit } from './db';
@@ -83,6 +99,15 @@ import {
 } from './sharing-rule';
 import { judgeExit, sharingRefusalMessage, type ExitActor } from '../../shared/sharingRule';
 import { loadOrderLines, type OrderWriteRow } from './order-items';
+import {
+  countDocumentLinesBehind,
+  loadJudgedOrderDocuments,
+  markLinesPendingQa,
+  markLinesSent,
+  type JudgedOrderDocument,
+} from './order-documents';
+import { notifyQaAboutOrderDocuments, type QaNoticeItem } from './order-document-notices';
+import { ORDER_DOCUMENT_LINK_DAYS } from '../../shared/orderDocuments';
 import { loadOrderCustomerContext } from './customer-coa';
 import {
   ORDER_SEND_MAX_PARTS,
@@ -97,7 +122,12 @@ import {
 } from '../../shared/orderSend';
 import type {
   ApiOrderItem,
+  OrderDocumentReason,
+  OrderSendDocumentLine,
+  OrderSendDocumentLineRef,
+  OrderSendDocumentsOutcome,
   OrderSendFileRecord,
+  OrderSendKind,
   OrderSendLineRef,
   OrderSendPartResult,
   OrderSendPlanFile,
@@ -127,9 +157,21 @@ export interface PlannedFile extends OrderSendPlanFile {
   source_queue_id: string | null;
 }
 
+/** What the send does about the order's document lines besides the files. */
+export interface PlannedOrderDocuments {
+  /** Lines held for QA by this send. */
+  pending_line_ids: string[];
+  /** What QA is told about, for lines not already told for that cause. */
+  notices: QaNoticeItem[];
+  going: number;
+  not_sent: number;
+}
+
 export interface OrderSendPlan {
   preview: OrderSendPreview;
   files: PlannedFile[];
+  /** Null when the order has no document lines. */
+  documents: PlannedOrderDocuments | null;
 }
 
 interface Entry {
@@ -145,6 +187,19 @@ interface Entry {
   lines: OrderSendLineRef[];
   lot_labels: string[];
   notes: string[];
+  /** The document lines (0138) this file stands for. */
+  document_lines: OrderSendDocumentLineRef[];
+  /** Set on a file that leaves on the order's 30-day link. */
+  link_days: number | null;
+}
+
+function documentLineRef(l: JudgedOrderDocument): OrderSendDocumentLineRef {
+  return {
+    order_document_id: l.row.id,
+    product_name: l.api.product_name,
+    supplier_name: l.api.supplier_name,
+    document_type_name: l.api.document_type_name,
+  };
 }
 
 function lineRef(line: ApiOrderItem): OrderSendLineRef {
@@ -219,14 +274,43 @@ export async function planOrderSend(
     }
   }
 
-  const docIds = [...new Set(sendable.map((l) => l.coa_document_id as string))];
+  // The order's document lines (0138), each judged against the LIVE rule for
+  // this sender. The stored `rule_at_resolve` is not read here.
+  const documentLines = await loadJudgedOrderDocuments(db, order.tenant_id, order.id, args.actor);
+  const documentOutcome = new Map<
+    string,
+    { group: 'goes_now' | 'waits_for_qa' | 'will_not_go'; reason: OrderDocumentReason | null; text: string }
+  >();
+  for (const l of documentLines) {
+    documentOutcome.set(l.row.id, {
+      group: l.judgement.disposition,
+      reason: l.judgement.reason,
+      text: l.judgement.text,
+    });
+  }
+  const documentsGoing = documentLines.filter((l) => l.judgement.disposition === 'goes_now' && l.row.document_id);
+
+  const coaDocIds = new Set(sendable.map((l) => l.coa_document_id as string));
+  const attachedDocumentIds = new Set(
+    documentsGoing.filter((l) => l.judgement.delivery === 'attachment').map((l) => l.row.document_id as string),
+  );
+  const docIds = [...new Set([...coaDocIds, ...documentsGoing.map((l) => l.row.document_id as string)])];
+  // ONE GATE for everything that leaves on this order, COA line or document
+  // line: `loadExportDocuments` returns no row the rule does not pass.
   const { rows, refused } = await loadExportDocuments(db, order.tenant_id, docIds, {
     exit: 'order_send',
     actor: args.actor,
   });
   const rowById = new Map(rows.map((r) => [r.document_id, r]));
   const refusedById = new Map(refused.map((r) => [r.document_id, r]));
-  const originals = await resolveWholeOriginals(db, files, order.tenant_id, rows.map((r) => r.document_id));
+  // Whole originals matter only for what is ATTACHED; a linked document is
+  // served by the link as itself.
+  const originals = await resolveWholeOriginals(
+    db,
+    files,
+    order.tenant_id,
+    rows.map((r) => r.document_id).filter((id) => coaDocIds.has(id) || attachedDocumentIds.has(id)),
+  );
 
   // The whole certificate holds every lot cut from it, on this order or not
   // (C-042). Judged once per original.
@@ -252,31 +336,13 @@ export async function planOrderSend(
   }
 
   const entries = new Map<string, Entry>();
-  for (const line of sendable) {
-    const docId = line.coa_document_id as string;
-    const row = rowById.get(docId);
-    const refusal = refusedById.get(docId);
-    if (refusal) {
-      // Held back by the sharing rule: said, with the reason, never dropped.
-      linesNotSent.push({
-        order_item_id: line.id,
-        product_name: line.product_name_resolved ?? line.product_name ?? null,
-        lot_number: lotRowLabel(line.lot_row_number, line.sub_lot_code) ?? line.lot_number ?? null,
-        reason: refusal.message,
-        sharing_refusal: refusal.reason,
-        document_id: docId,
-      });
-      continue;
-    }
-    if (!row || !row.r2_key) {
-      linesNotSent.push({
-        order_item_id: line.id,
-        product_name: line.product_name_resolved ?? line.product_name ?? null,
-        lot_number: line.lot_number ?? null,
-        reason: 'The document on this line has no file on record.',
-      });
-      continue;
-    }
+
+  /**
+   * The file an ATTACHED document travels as: the whole original when there is
+   * one and it may go, else the document's own file. Shared by COA lines and
+   * by a certificate of analysis on a document line, so both go the same way.
+   */
+  const attachedEntry = (docId: string, row: ExportDocumentRow): Entry => {
     const resolution = originals.get(docId) ?? { state: 'not_split' as const };
     const notes: string[] = [];
     let useOriginal = resolution.state === 'on_file';
@@ -323,6 +389,8 @@ export async function planOrderSend(
           lines: [],
           lot_labels: [],
           notes: [],
+          document_lines: [],
+          link_days: null,
         };
       } else {
         entry = {
@@ -337,23 +405,115 @@ export async function planOrderSend(
           lines: [],
           lot_labels: [],
           notes: [],
+          document_lines: [],
+          link_days: null,
         };
       }
       entries.set(key, entry);
     }
     if (!entry.document_ids.includes(docId)) entry.document_ids.push(docId);
+    for (const n of notes) if (!entry.notes.includes(n)) entry.notes.push(n);
+    return entry;
+  };
+
+  for (const line of sendable) {
+    const docId = line.coa_document_id as string;
+    const row = rowById.get(docId);
+    const refusal = refusedById.get(docId);
+    if (refusal) {
+      // Held back by the sharing rule: said, with the reason, never dropped.
+      linesNotSent.push({
+        order_item_id: line.id,
+        product_name: line.product_name_resolved ?? line.product_name ?? null,
+        lot_number: lotRowLabel(line.lot_row_number, line.sub_lot_code) ?? line.lot_number ?? null,
+        reason: refusal.message,
+        sharing_refusal: refusal.reason,
+        document_id: docId,
+      });
+      continue;
+    }
+    if (!row || !row.r2_key) {
+      linesNotSent.push({
+        order_item_id: line.id,
+        product_name: line.product_name_resolved ?? line.product_name ?? null,
+        lot_number: line.lot_number ?? null,
+        reason: 'The document on this line has no file on record.',
+      });
+      continue;
+    }
+    const entry = attachedEntry(docId, row);
     const ref = lineRef(line);
     entry.lines.push(ref);
     if (ref.lot_label && !entry.lot_labels.includes(ref.lot_label)) entry.lot_labels.push(ref.lot_label);
-    for (const n of notes) if (!entry.notes.includes(n)) entry.notes.push(n);
+  }
+
+  // Document lines that go now. The gate above is the authority: a line the
+  // judgement let through and the gate did not (the rule moved between the two
+  // reads) is put where the gate says it belongs.
+  for (const l of documentsGoing) {
+    const docId = l.row.document_id as string;
+    const row = rowById.get(docId);
+    const refusal = refusedById.get(docId);
+    if (refusal) {
+      documentOutcome.set(
+        l.row.id,
+        refusal.reason === 'needs_qa'
+          ? { group: 'waits_for_qa', reason: null, text: refusal.message }
+          : { group: 'will_not_go', reason: 'locked', text: refusal.message },
+      );
+      continue;
+    }
+    if (!row || !row.r2_key) {
+      documentOutcome.set(l.row.id, {
+        group: 'will_not_go',
+        reason: 'no_file',
+        text: 'The document on this line has no file on record.',
+      });
+      continue;
+    }
+    const ref = documentLineRef(l);
+    if (l.judgement.delivery === 'attachment') {
+      attachedEntry(docId, row).document_lines.push(ref);
+      continue;
+    }
+    // Already attached because the same document is on a COA line: it goes
+    // once, attached, and this line is covered by that file.
+    const attachedKey = `document:${docId}:${row.version_number}`;
+    const already = entries.get(attachedKey);
+    if (already) {
+      already.document_lines.push(ref);
+      continue;
+    }
+    const key = `doclink:${docId}`;
+    let entry = entries.get(key);
+    if (!entry) {
+      entry = {
+        key,
+        source: 'document',
+        r2_key: row.r2_key,
+        bytes: Number(row.file_size) || 0,
+        source_queue_id: null,
+        name_row: row,
+        base_row: row,
+        document_ids: [docId],
+        lines: [],
+        lot_labels: [],
+        notes: [],
+        document_lines: [],
+        link_days: ORDER_DOCUMENT_LINK_DAYS,
+      };
+      entries.set(key, entry);
+    }
+    entry.document_lines.push(ref);
   }
 
   const list = [...entries.values()];
   for (const e of list) {
     if (e.source === 'original') {
       e.name_row = { ...e.name_row, lot_label: e.lot_labels.length ? e.lot_labels.join('; ') : null };
-      if (e.lines.length > 1) {
-        e.notes.unshift(`One certificate covers ${e.lines.length} lines of this order. It is attached once, whole.`);
+      const covered = e.lines.length + e.document_lines.length;
+      if (covered > 1) {
+        e.notes.unshift(`One certificate covers ${covered} lines of this order. It is attached once, whole.`);
       } else {
         e.notes.unshift('The whole certificate is attached, not only this lot\'s page.');
       }
@@ -361,13 +521,18 @@ export async function planOrderSend(
   }
 
   const names = exportFileNames(list.map((e) => e.name_row));
-  const packed = packOrderSendFiles(list.map((e) => ({ key: e.key, bytes: e.bytes })));
+  // Only what is ATTACHED is packed into emails. A document on the 30-day link
+  // weighs nothing in any of them; it is announced in the first.
+  const packed = packOrderSendFiles(
+    list.filter((e) => e.link_days === null).map((e) => ({ key: e.key, bytes: e.bytes })),
+  );
+  const packedByKey = new Map(packed.files.map((f) => [f.key, f]));
   const baseSubject = (args.subject ?? '').trim() || defaultOrderSubject(args.tenantName, order);
 
   const planned: PlannedFile[] = list.map((e, i) => {
-    const p = packed.files[i];
+    const p = packedByKey.get(e.key) ?? { delivery: 'link' as const, part_number: 1 };
     const notes = [...e.notes];
-    if (p.delivery === 'link') {
+    if (p.delivery === 'link' && e.link_days === null) {
       notes.push(
         `At ${humanBytes(e.bytes)} this file is too large to attach. It goes as a link in the first email; the link does not expire and can be revoked.`,
       );
@@ -386,11 +551,68 @@ export async function planOrderSend(
       lot_label: e.source === 'original' ? e.name_row.lot_label : e.base_row.lot_label,
       lines: e.lines,
       notes,
+      ...(e.document_lines.length > 0 ? { document_lines: e.document_lines } : {}),
+      ...(e.link_days !== null ? { link_days: e.link_days } : {}),
       r2_key: e.r2_key,
       version_number: e.base_row.version_number,
       source_queue_id: e.source_queue_id,
     };
   });
+
+  // The three groups of document lines, as the review screen shows them.
+  const toPlanLine = (l: JudgedOrderDocument): OrderSendDocumentLine => {
+    const o = documentOutcome.get(l.row.id)!;
+    const cause = o.group === 'waits_for_qa' ? 'pending_qa' : o.reason === 'missing' || o.reason === 'expired' ? o.reason : null;
+    return {
+      order_document_id: l.row.id,
+      product_name: l.api.product_name,
+      supplier_name: l.api.supplier_name,
+      facility_name: l.api.facility?.name ?? null,
+      document_type_name: l.api.document_type_name,
+      document_id: l.api.document_id,
+      document_title: l.api.document_title,
+      sharing_rule: l.api.sharing_rule,
+      reason: o.reason,
+      text: o.text,
+      delivery: l.judgement.delivery,
+      advisory: l.api.advisory,
+      stale_note: l.api.stale_note,
+      notifies_qa: cause !== null && (l.row.qa_notified_at === null || l.row.qa_notified_cause !== cause),
+    };
+  };
+  const documentPlanLines = documentLines.map((l) => ({ l, o: documentOutcome.get(l.row.id)!, line: toPlanLine(l) }));
+  const docsGoNow = documentPlanLines.filter((x) => x.o.group === 'goes_now');
+  const docsWaiting = documentPlanLines.filter((x) => x.o.group === 'waits_for_qa');
+  const docsNotGoing = documentPlanLines.filter((x) => x.o.group === 'will_not_go');
+  for (const x of docsNotGoing) {
+    linesNotSent.push({
+      order_item_id: '',
+      order_document_id: x.l.row.id,
+      product_name: x.l.api.product_name,
+      lot_number: null,
+      supplier_name: x.l.api.supplier_name,
+      document_type_name: x.l.api.document_type_name,
+      reason: x.o.text,
+      ...(x.o.reason === 'locked' ? { sharing_refusal: 'locked' as const } : {}),
+      ...(x.l.api.document_id ? { document_id: x.l.api.document_id } : {}),
+    });
+  }
+  const documentNotices: QaNoticeItem[] = documentPlanLines
+    .filter((x) => x.line.notifies_qa)
+    .map((x) => ({
+      order_document_id: x.l.row.id,
+      cause: x.o.group === 'waits_for_qa' ? ('pending_qa' as const) : (x.o.reason as 'missing' | 'expired'),
+      product_name: x.l.api.product_name,
+      supplier_name: x.l.api.supplier_name,
+      facility_name: x.l.api.facility?.name ?? null,
+      document_type_name: x.l.api.document_type_name,
+      document_title: x.l.api.document_title,
+      due_date: x.l.api.document_due_date,
+    }));
+  // A send with nothing to put in front of the customer still does something
+  // when it asks QA: it holds documents for release, or reports ones that are
+  // missing or expired.
+  const asksQa = docsWaiting.length > 0 || documentNotices.length > 0;
 
   const warnings: string[] = [];
   if (linesNotSent.length > 0) {
@@ -403,7 +625,10 @@ export async function planOrderSend(
       `These files do not fit in one email. They will go as ${packed.part_count} emails, numbered "1 of ${packed.part_count}" onward.`,
     );
   }
-  const linkDocs = new Set(planned.filter((f) => f.delivery === 'link').flatMap((f) => f.document_ids));
+  const linkDocs = new Set(
+    planned.filter((f) => f.delivery === 'link' && !f.link_days).flatMap((f) => f.document_ids),
+  );
+  const documentLinkDocs = new Set(planned.filter((f) => f.link_days).flatMap((f) => f.document_ids));
 
   // What the customer's own record says (migration 0135): who receives COAs,
   // and what they need for each item on this order. INFORMATION ONLY -- it
@@ -438,14 +663,22 @@ export async function planOrderSend(
     );
   }
 
+  const onlyAsksQa = planned.length === 0 && asksQa;
   let blocked: OrderSendPreview['blocked'] = null;
-  if (planned.length === 0) {
+  if (planned.length === 0 && !asksQa) {
     const heldByRule = linesNotSent.length > 0 && linesNotSent.every((l) => l.sharing_refusal);
     blocked = {
       code: 'nothing_to_send',
       message: heldByRule
         ? 'Every document on this order is held back by its sharing rule, so there is nothing to send. See the list below.'
-        : 'No line of this order has an active document on it, so there is nothing to send.',
+        : documentLines.length > 0
+          ? 'Nothing on this order can go, and QA has already been told about what is waiting, missing or expired. See the list below.'
+          : 'No line of this order has an active document on it, so there is nothing to send.',
+    };
+  } else if (documentLinkDocs.size > EXPORT_MAX_DOCUMENTS) {
+    blocked = {
+      code: 'too_many_linked',
+      message: `${documentLinkDocs.size} documents would go on one link, and one link covers at most ${EXPORT_MAX_DOCUMENTS}. Send the order in two goes.`,
     };
   } else if (packed.refusal) {
     blocked = { code: 'too_many_parts', message: packed.refusal };
@@ -456,16 +689,28 @@ export async function planOrderSend(
     };
   }
 
-  const parts = Array.from({ length: packed.part_count }, (_, i) => ({
+  // A send that only asks QA has no email to the customer at all.
+  const partCount = onlyAsksQa ? 0 : packed.part_count;
+  const parts = Array.from({ length: partCount }, (_, i) => ({
     part_number: i + 1,
-    subject: partSubject(baseSubject, i + 1, packed.part_count),
+    subject: partSubject(baseSubject, i + 1, partCount),
     bytes: packed.part_bytes[i] ?? 0,
     file_count: planned.filter((f) => f.part_number === i + 1).length,
   }));
 
+  // What leaves, and -- when the order has document lines -- what happens to
+  // each of them. An order of COAs alone hashes exactly what it always did.
+  const fileFacts = planned.map((f) => [f.key, f.file_name, f.bytes, f.delivery, f.part_number, f.document_ids]);
   const fingerprint = (
     await sha256Hex(
-      JSON.stringify(planned.map((f) => [f.key, f.file_name, f.bytes, f.delivery, f.part_number, f.document_ids])),
+      JSON.stringify(
+        documentLines.length === 0
+          ? fileFacts
+          : {
+              files: fileFacts,
+              documents: documentPlanLines.map((x) => [x.l.row.id, x.l.row.document_id, x.o.group, x.o.reason]),
+            },
+      ),
     )
   ).slice(0, 24);
 
@@ -490,15 +735,38 @@ export async function planOrderSend(
     // The public shape: storage keys and queue ids stay on this side.
     files: planned.map(({ r2_key: _r, version_number: _v, source_queue_id: _q, ...pub }) => pub),
     parts,
-    part_count: packed.part_count,
+    part_count: partCount,
     total_bytes: planned.reduce((sum, f) => sum + f.bytes, 0),
     lines_not_sent: linesNotSent,
+    ...(documentLines.length > 0
+      ? {
+          documents: {
+            goes_now: docsGoNow.map((x) => x.line),
+            waits_for_qa: docsWaiting.map((x) => x.line),
+            will_not_go: docsNotGoing.map((x) => x.line),
+            link_days: ORDER_DOCUMENT_LINK_DAYS,
+            only_asks_qa: onlyAsksQa,
+          },
+        }
+      : {}),
     warnings,
     blocked,
     limits: { max_part_bytes: ORDER_SEND_MAX_PART_BYTES, max_parts: ORDER_SEND_MAX_PARTS },
     fingerprint,
   };
-  return { preview, files: planned };
+  return {
+    preview,
+    files: planned,
+    documents:
+      documentLines.length > 0
+        ? {
+            pending_line_ids: docsWaiting.map((x) => x.l.row.id),
+            notices: documentNotices,
+            going: docsGoNow.length,
+            not_sent: docsNotGoing.length,
+          }
+        : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +809,10 @@ export function buildOrderDocumentsEmail(params: {
   attached: OrderEmailFile[];
   linked: OrderEmailFile[];
   linkUrl: string | null;
+  /** Documents of a document order (0138): on their own link, which runs out. */
+  documents?: OrderEmailFile[];
+  documentsLinkUrl?: string | null;
+  documentsLinkDays?: number | null;
 }): { html: string } {
   const facts = [
     `Order ${params.orderNumber}`,
@@ -575,6 +847,18 @@ export function buildOrderDocumentsEmail(params: {
         </p>
         <p style="margin:0 0 24px;color:#666;font-size:13px;">This link does not expire.</p>`
       : '';
+  const documents = params.documents ?? [];
+  // The generated name and the outward-facing title, never a supplier's
+  // internal note, the rule, or who approved it.
+  const documentsBlock =
+    documents.length && params.documentsLinkUrl
+      ? `<p style="margin:0 0 8px;color:#555;">Documents for this order &mdash; open ${documents.length === 1 ? 'it' : 'them'} with the link below (${documents.length}):</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">${documents.map(fileRow).join('')}</table>
+        <p style="margin:0 0 24px;text-align:center;">
+          <a href="${escapeHtml(params.documentsLinkUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
+        </p>
+        <p style="margin:0 0 24px;color:#666;font-size:13px;">This link works for ${params.documentsLinkDays ?? 30} days.</p>`
+      : '';
   const partLine =
     params.partCount > 1
       ? `<p style="margin:0 0 16px;color:#555;line-height:1.6;">This is email ${params.partNumber} of ${params.partCount}. The documents for this order did not fit in one message.</p>`
@@ -600,6 +884,7 @@ export function buildOrderDocumentsEmail(params: {
         ${params.message ? `<p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid #1A365D;color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.message)}</p>` : ''}
         ${attachedBlock}
         ${linkedBlock}
+        ${documentsBlock}
         <p style="margin:0;color:#666;font-size:13px;line-height:1.6;">
           Reply to this email to reach ${escapeHtml(params.senderName)} directly.
         </p>
@@ -639,6 +924,10 @@ interface StoredFile {
   source_queue_id: string | null;
   export_link_id: string | null;
   sent_ok: number;
+  /** JSON list of the order_documents rows the file stands for (0138), or NULL. */
+  order_document_ids?: string | null;
+  /** Days a link file's link lives; NULL = an oversize file's non-expiring link. */
+  link_days?: number | null;
 }
 
 interface StoredSend {
@@ -656,6 +945,12 @@ interface StoredSend {
   parts: string | null;
   status: OrderSendStatus;
   created_at: string;
+  /** NULL = an ordinary send (0138). */
+  kind?: string | null;
+}
+
+function sendKind(raw: string | null | undefined): OrderSendKind {
+  return raw === 'qa_request' || raw === 'qa_release' ? raw : 'send';
 }
 
 function parseJsonArray<T>(raw: string | null | undefined): T[] {
@@ -784,7 +1079,11 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
     const attempts = (prior?.attempts ?? 0) + 1;
     const inPart = all.filter((f) => f.part_number === part);
     const attachedFiles = inPart.filter((f) => f.delivery === 'attachment');
-    const linkedFiles = inPart.filter((f) => f.delivery === 'link');
+    // Two kinds of link, never mixed: a certificate too large to attach rides
+    // a link that does not expire (0134); a document order's documents ride
+    // one that runs out (0138).
+    const linkedFiles = inPart.filter((f) => f.delivery === 'link' && f.link_days == null);
+    const documentFiles = inPart.filter((f) => f.delivery === 'link' && f.link_days != null);
 
     const fail = (error: string, status = 0): OrderSendPartResult => ({
       part_number: part,
@@ -861,6 +1160,26 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       linkUrl = exportLinkUrl(ctx.origin, link.token);
     }
 
+    // The document order's link: every document the rule passed a moment ago,
+    // minted in the name of whoever is pressing the button, and it runs out.
+    let documentsLinkId: string | null = null;
+    let documentsLinkUrl: string | null = null;
+    const documentsLinkDays = documentFiles[0]?.link_days ?? null;
+    if (documentFiles.length > 0) {
+      const ids = [...new Set(documentFiles.flatMap((f) => parseJsonArray<string>(f.document_ids)))];
+      const link = await mintExportLink(db, {
+        tenantId: send.tenant_id,
+        documentIds: ids,
+        createdBy: ctx.actorUserId,
+        recipients,
+        onBehalfOf: null,
+        message: send.message,
+        ttlDays: documentsLinkDays ?? ORDER_DOCUMENT_LINK_DAYS,
+      });
+      documentsLinkId = link.id;
+      documentsLinkUrl = exportLinkUrl(ctx.origin, link.token);
+    }
+
     const email = buildOrderDocumentsEmail({
       tenantName: ctx.tenantName,
       senderName: ctx.sender.name || ctx.sender.email,
@@ -874,6 +1193,9 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       attached: attachedFiles,
       linked: linkedFiles,
       linkUrl,
+      documents: documentFiles,
+      documentsLinkUrl,
+      documentsLinkDays,
     });
     const outcome = await sendEmailDetailed(ctx.apiKey, {
       to: recipients,
@@ -887,6 +1209,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
 
     if (!outcome.ok) {
       if (linkId) await revokeExportLink(db, linkId);
+      if (documentsLinkId) await revokeExportLink(db, documentsLinkId);
       results.push(fail(outcome.error ?? 'The mail provider refused the message.', outcome.status));
       continue;
     }
@@ -894,6 +1217,30 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       .prepare('UPDATE order_send_files SET sent_ok = 1, export_link_id = COALESCE(?, export_link_id) WHERE send_id = ? AND part_number = ?')
       .bind(linkId, send.id, part)
       .run();
+    if (documentsLinkId) {
+      await db
+        .prepare('UPDATE order_send_files SET export_link_id = ? WHERE send_id = ? AND part_number = ? AND link_days IS NOT NULL')
+        .bind(documentsLinkId, send.id, part)
+        .run();
+    }
+    // The document lines these files stood for went with this email.
+    const sentLineIds = inPart.flatMap((f) => parseJsonArray<string>(f.order_document_ids));
+    if (sentLineIds.length > 0) {
+      try {
+        await markLinesSent(db, {
+          tenantId: send.tenant_id,
+          lineIds: sentLineIds,
+          sendId: send.id,
+          exportLinkId: documentsLinkId,
+          actorUserId: ctx.actorUserId,
+          qaReleasedDocumentIds: partQaReleased,
+        });
+      } catch (err) {
+        // The email has gone. The send record says so; the line's own status
+        // under-claims rather than undoing a send that happened.
+        console.error('[order-send] marking document lines sent failed:', err instanceof Error ? err.message : String(err));
+      }
+    }
     for (const id of partQaReleased) qaReleasedIds.add(id);
     results.push({
       part_number: part,
@@ -958,6 +1305,10 @@ async function markDeliveredIfSent(db: D1Database, send: StoredSend, actor: Exit
     actor,
   );
   if (held.refused.length > 0) return null;
+  // A document line (0138) that did not go with this send and was not released
+  // by QA -- waiting, missing, expired, locked, refused -- is a line left
+  // behind, exactly as a COA line with no certificate is.
+  if ((await countDocumentLinesBehind(db, send.tenant_id, send.order_id, send.id)) > 0) return null;
   await db
     .prepare(`UPDATE orders SET status = 'delivered', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`)
     .bind(send.order_id, send.tenant_id)
@@ -1034,18 +1385,22 @@ export async function executeOrderSend(
     message: string | null;
     clientIp: string | null;
   },
-): Promise<{ sendId: string; orderStatus: string }> {
+): Promise<{ sendId: string; orderStatus: string; documents: OrderSendDocumentsOutcome | null }> {
   const { db } = ctx;
   const { order, plan } = args;
   const sendId = generateId();
   const customerName = plan.preview.order.customer_name;
+  // Nothing reaches the customer with this send: it holds documents for QA
+  // and reports what is missing or expired. Recorded as its own kind so the
+  // history never reads as though something was sent.
+  const kind: OrderSendKind = plan.files.length === 0 ? 'qa_request' : 'send';
 
   await db
     .prepare(
       `INSERT INTO order_sends
          (id, tenant_id, order_id, order_number, customer_id, customer_name, sent_by,
-          recipients, subject, message, part_count, parts, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'failed')`,
+          recipients, subject, message, part_count, parts, status, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'failed', ?)`,
     )
     .bind(
       sendId,
@@ -1059,17 +1414,19 @@ export async function executeOrderSend(
       args.subject,
       args.message,
       plan.preview.part_count,
+      kind === 'send' ? null : kind,
     )
     .run();
 
-  await db.batch(
+  if (plan.files.length > 0) await db.batch(
     plan.files.map((f, i) =>
       db
         .prepare(
           `INSERT INTO order_send_files
              (id, send_id, tenant_id, position, document_id, version_number, document_ids,
-              document_title, lot_label, file_name, bytes, part_number, delivery, source, source_queue_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              document_title, lot_label, file_name, bytes, part_number, delivery, source, source_queue_id,
+              order_document_ids, link_days)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           generateId(),
@@ -1087,14 +1444,52 @@ export async function executeOrderSend(
           f.delivery,
           f.source,
           f.source_queue_id,
+          f.document_lines && f.document_lines.length > 0
+            ? JSON.stringify(f.document_lines.map((l) => l.order_document_id))
+            : null,
+          f.link_days ?? null,
         ),
     ),
   );
 
+  // Lines held for QA are marked BEFORE anything is mailed, with this send as
+  // the one that asked: the release will mail these recipients.
+  if (plan.documents && plan.documents.pending_line_ids.length > 0) {
+    await markLinesPendingQa(db, {
+      tenantId: order.tenant_id,
+      orderId: order.id,
+      lineIds: plan.documents.pending_line_ids,
+      sendId,
+      requestedBy: ctx.sender.id,
+    });
+  }
+
   const send = (await db.prepare('SELECT * FROM order_sends WHERE id = ?').bind(sendId).first<StoredSend>())!;
   const run = await runParts(ctx, send, Array.from({ length: send.part_count }, (_, i) => i + 1));
   const delivered = await markDeliveredIfSent(db, send, ctx.actor);
-  await auditSend(db, send, ctx.sender.id, args.clientIp, run.results, false);
+  if (kind === 'send') await auditSend(db, send, ctx.sender.id, args.clientIp, run.results, false);
+  else {
+    try {
+      await logAudit(
+        db,
+        ctx.sender.id,
+        send.tenant_id,
+        'order.documents_qa_requested',
+        'order_send',
+        send.id,
+        JSON.stringify({
+          order_id: send.order_id,
+          order_number: send.order_number,
+          recipients: args.recipients,
+          pending_line_ids: plan.documents?.pending_line_ids ?? [],
+          note: 'Nothing was sent to the customer. QA was asked.',
+        }),
+        args.clientIp,
+      );
+    } catch {
+      // The record itself says what happened.
+    }
+  }
   // A QA releaser sending a document that needs QA approval IS the approval.
   await auditQaRelease(db, {
     userId: ctx.sender.id,
@@ -1105,7 +1500,32 @@ export async function executeOrderSend(
     resourceId: send.id,
     clientIp: args.clientIp,
   });
-  return { sendId, orderStatus: delivered ?? order.status };
+
+  // QA is told once per line per cause: what is waiting for them, and what
+  // was ordered and is missing or expired. Nothing is drafted to a supplier.
+  let documents: OrderSendDocumentsOutcome | null = null;
+  if (plan.documents) {
+    const sentLines = await db
+      .prepare('SELECT COUNT(*) AS n FROM order_documents WHERE tenant_id = ? AND order_id = ? AND last_send_id = ?')
+      .bind(order.tenant_id, order.id, sendId)
+      .first<{ n: number }>();
+    const notice = await notifyQaAboutOrderDocuments(db, ctx.apiKey, {
+      tenantId: order.tenant_id,
+      tenantName: ctx.tenantName,
+      appUrl: ctx.origin,
+      order: { id: order.id, order_number: order.order_number, customer_name: customerName },
+      requestedBy: { id: ctx.sender.id, name: ctx.sender.name ?? null, email: ctx.sender.email },
+      items: plan.documents.notices,
+      clientIp: args.clientIp,
+    });
+    documents = {
+      sent: Number(sentLines?.n) || 0,
+      pending_qa: plan.documents.pending_line_ids.length,
+      not_sent: plan.documents.not_sent,
+      qa_notice: notice,
+    };
+  }
+  return { sendId, orderStatus: delivered ?? order.status, documents };
 }
 
 /** Send again exactly the parts that did not go. Returns null when none failed. */
@@ -1118,6 +1538,9 @@ export async function resendFailedParts(
     .bind(args.sendId, args.tenantId)
     .first<StoredSend>();
   if (!send) return null;
+  // A QA release is not resent from its record: the release claimed lines and
+  // gave them back when its mail failed, so the retry is pressing Release.
+  if (sendKind(send.kind) === 'qa_release') return { orderStatus: null, attempted: 0 };
   const done = new Set(parseJsonArray<OrderSendPartResult>(send.parts).filter((p) => p.ok).map((p) => p.part_number));
   const failed = Array.from({ length: send.part_count }, (_, i) => i + 1).filter((n) => !done.has(n));
   if (failed.length === 0) return { orderStatus: null, attempted: 0 };
@@ -1220,6 +1643,8 @@ export async function loadOrderSends(
         document_title: f.document_title,
         lot_label: f.lot_label,
         sent_ok: Number(f.sent_ok) === 1,
+        ...(f.delivery === 'link' ? { link_days: f.link_days ?? null } : {}),
+        ...(f.order_document_ids ? { order_document_ids: parseJsonArray<string>(f.order_document_ids) } : {}),
       });
       filesBySend.set(f.send_id, list);
     }
@@ -1241,6 +1666,11 @@ export async function loadOrderSends(
     part_count: r.part_count,
     parts: parseJsonArray<OrderSendPartResult>(r.parts),
     files: filesBySend.get(r.id) ?? [],
-    can_resend: r.status !== 'sent' && user.role !== 'reader' && (isAdmin(user) || r.sent_by === user.id),
+    can_resend:
+      sendKind(r.kind) !== 'qa_release' &&
+      r.status !== 'sent' &&
+      user.role !== 'reader' &&
+      (isAdmin(user) || r.sent_by === user.id),
+    kind: sendKind(r.kind),
   }));
 }

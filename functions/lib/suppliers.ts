@@ -359,6 +359,11 @@ export interface MergeSuppliersResult {
  *     renewal_requests (0133)
  *   Contacts (0133): supplier_contacts, one per address, one document contact
  *   Facilities (0135): supplier_facilities, one per name; items re-pointed
+ *   Document order lines (0138): order_documents, one per (order, item,
+ *     supplier, type). Its supplier_id has NO ON DELETE action, so the loser
+ *     could not be deleted at all while a line named it: the lines move, and
+ *     where the winner already has the same line on the same order the
+ *     winner's is the one kept.
  *
  * THE REQUEST TABLES WERE MISSING FROM THIS LIST UNTIL 0133, and every one of
  * them references suppliers ON DELETE CASCADE. A merge therefore DELETED every
@@ -579,6 +584,38 @@ export async function mergeSuppliers(
     // Spec limits (0084) and required analytes (0109): moved, and a row the
     // winner already covers is recorded in the audit row below, never dropped.
     const droppedSpecWatch = await moveSpecWatch(db, tenantId, winnerId, loserId, reassigned);
+
+    // Document order lines (0138). UNIQUE(order, item, supplier, type): move
+    // what does not collide, and drop the loser's copy of a line the winner
+    // already has on the same order -- the same thing was asked for twice.
+    // Guarded: a database that has not run 0138 has no such table.
+    try {
+      const before = await db
+        .prepare('SELECT COUNT(*) AS c FROM order_documents WHERE supplier_id = ? AND tenant_id = ?')
+        .bind(loserId, tenantId)
+        .first<{ c: number }>();
+      const beforeN = before?.c ?? 0;
+      if (beforeN > 0) {
+        await db
+          .prepare('UPDATE OR IGNORE order_documents SET supplier_id = ? WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(winnerId, loserId, tenantId)
+          .run();
+        const after = await db
+          .prepare('SELECT COUNT(*) AS c FROM order_documents WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(loserId, tenantId)
+          .first<{ c: number }>();
+        const leftover = after?.c ?? 0;
+        if (leftover > 0) {
+          await db
+            .prepare('DELETE FROM order_documents WHERE supplier_id = ? AND tenant_id = ?')
+            .bind(loserId, tenantId)
+            .run();
+        }
+        reassigned.order_documents = (reassigned.order_documents || 0) + (beforeN - leftover);
+      }
+    } catch {
+      // Pre-0138 database.
+    }
 
     // Renewal cycles (0133) are keyed (document, due date), not on the
     // supplier, so they move as they are. Guarded like the contacts below: a

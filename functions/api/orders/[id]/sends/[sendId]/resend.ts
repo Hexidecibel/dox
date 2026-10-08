@@ -47,6 +47,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       await loadOrderSends(context.env.DB, user, { tenantId: order.tenant_id, orderId: order.id })
     ).find((s) => s.id === sendId);
     if (!before) throw new NotFoundError('Send not found');
+    if (before.kind === 'qa_release') {
+      // A release that failed gave its documents back to the waiting list.
+      // The retry is a release, with the rule asked again, not a resend.
+      throw new ConflictError(
+        'This was a QA release, and it is not resent from here. The documents are waiting for QA again: release them from there.',
+      );
+    }
     if (before.status === 'sent') {
       throw new ConflictError('Every email of this send already went. There is nothing to resend.');
     }

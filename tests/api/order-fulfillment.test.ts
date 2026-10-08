@@ -20,7 +20,8 @@
  *   6. TOO BIG IS SPLIT, SHOWN AND RECORDED: numbered emails, a non-expiring
  *      link for a single oversize file, a refusal with the number past the
  *      cap, and a `partial` send whose failed parts can be sent again.
- *   7. A READ-ONLY ACCOUNT CANNOT BUILD OR SEND.
+ *   7. A READ-ONLY ACCOUNT CANNOT PICK A CERTIFICATE OR SEND. (It may open an
+ *      order since 0138, to build a document order: tests/api/order-documents.)
  */
 
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
@@ -350,8 +351,17 @@ describe('POST /api/orders -- an order a person builds', () => {
     expect((await newOrder({ ship_date: 'next friday' })).status).toBe(400);
   });
 
-  it('a read-only account cannot create an order', async () => {
-    expect((await newOrder({}, asUser('reader'))).status).toBe(403);
+  // CHANGED WITH MIGRATION 0138. This used to assert 403: until document
+  // orders a read-only account could not open an order at all. AJ's ruling for
+  // document orders is "any user with a portal login can build the order", so
+  // a reader may now OPEN one -- and still may not put COA lines on it, here
+  // or through POST ./:id/items (pinned further down).
+  it('a read-only account may open an order, and may not put COA lines on it', async () => {
+    const opened = await newOrder({}, asUser('reader'));
+    expect(opened.status).toBe(201);
+    expect(opened.body.order.created_by).toBe(seed.readerId);
+    const withLines = await newOrder({ items: [{ product_name: 'Cream', lot_number: '10426203' }] }, asUser('reader'));
+    expect(withLines.status).toBe(403);
   });
 });
 

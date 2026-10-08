@@ -8,6 +8,8 @@ import {
 import { sanitizeString } from '../../lib/validation';
 import { loadOrderLines, parseShipDate, requireTenantCustomer } from '../../lib/order-items';
 import { loadOrderSends } from '../../lib/order-send';
+import { loadOrderDocuments } from '../../lib/order-documents';
+import { exitActorForRequest } from '../../lib/sharing-rule';
 import type { Env, User } from '../../lib/types';
 
 /**
@@ -73,6 +75,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(orderId)
       .all();
 
+    // The document lines (migration 0138), judged for THIS caller against the
+    // live sharing rule: the page shows what a send by them would do.
+    const actor = await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id as string);
+    const documents = await loadOrderDocuments(context.env.DB, order.tenant_id as string, orderId, actor);
+
     return new Response(
       JSON.stringify({
         order,
@@ -82,6 +89,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
           tenantId: order.tenant_id as string,
           orderId,
         }),
+        documents,
+        can_release_qa: actor.method === 'jwt' && actor.canReleaseQa,
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );
