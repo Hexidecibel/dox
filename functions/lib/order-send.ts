@@ -117,6 +117,7 @@ import {
   ORDER_SEND_MAX_PART_BYTES,
   humanBytes,
   lotRowLabel,
+  describeSendOutcome,
   missingRequirementWarning,
   packOrderSendFiles,
   partSubject,
@@ -132,6 +133,7 @@ import type {
   OrderSendFileRecord,
   OrderSendKind,
   OrderSendLineRef,
+  OrderSendOutcome,
   OrderSendPartResult,
   OrderSendPlanFile,
   OrderSendPreview,
@@ -1196,15 +1198,19 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       inPart.push(f);
     }
     if (inPart.length === 0) {
-      // Nothing is left to put in this email. No mail is sent, and the part is
-      // closed so it is not offered for resend for ever.
+      // Nothing is left to put in this email. No mail is sent -- and the part
+      // is NOT `ok`: nothing left. It is `withdrawn`, which is terminal (it is
+      // never offered for resend) and is never counted as sent. The first cut
+      // recorded it `ok: true`, and a send in which no mail ever left read
+      // "Sent".
       results.push({
         part_number: part,
-        ok: true,
+        ok: false,
         status: 0,
         error: null,
         sent_at: null,
         attempts,
+        withdrawn: true,
         note: 'Nothing was left to send in this email, so no email was sent.',
       });
       continue;
@@ -1399,8 +1405,12 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
     const old = previous.find((p) => p.part_number === n);
     merged.push(fresh ?? old ?? { part_number: n, ok: false, status: 0, error: 'Not attempted.', sent_at: null, attempts: 0 });
   }
-  const okCount = merged.filter((p) => p.ok).length;
-  const status: OrderSendStatus = okCount === merged.length ? 'sent' : okCount === 0 ? 'failed' : 'partial';
+  // `sent` only when every email went. A send whose emails were all withdrawn
+  // is stored `failed`, and one where some went and the rest were withdrawn is
+  // `partial`: `order_sends.status` is CHECKed by migration 0134 and is not
+  // widened, so the truthful word ("withdrawn, nothing sent") is read from the
+  // per-email record by `describeSendOutcome`, the same function, everywhere.
+  const status: OrderSendStatus = describeSendOutcome(merged).status;
   await db
     .prepare(`UPDATE order_sends SET parts = ?, status = ?, updated_at = datetime('now') WHERE id = ?`)
     .bind(JSON.stringify(merged), status, send.id)
@@ -1684,7 +1694,12 @@ export async function resendFailedParts(
   // A QA release is not resent from its record: the release claimed lines and
   // gave them back when its mail failed, so the retry is pressing Release.
   if (sendKind(send.kind) === 'qa_release') return { orderStatus: null, attempted: 0, notResent: [] };
-  const done = new Set(parseJsonArray<OrderSendPartResult>(send.parts).filter((p) => p.ok).map((p) => p.part_number));
+  // Emails that went, and emails that were withdrawn, are both finished.
+  const done = new Set(
+    parseJsonArray<OrderSendPartResult>(send.parts)
+      .filter((p) => p.ok || p.withdrawn)
+      .map((p) => p.part_number),
+  );
   const failed = Array.from({ length: send.part_count }, (_, i) => i + 1).filter((n) => !done.has(n));
   if (failed.length === 0) return { orderStatus: null, attempted: 0, notResent: [] };
   const run = await runParts(ctx, send, failed);
@@ -1794,7 +1809,19 @@ export async function loadOrderSends(
     }
   }
 
-  return rows.map((r) => ({
+  return rows.map((r) => {
+    const kind = sendKind(r.kind);
+    const parts = parseJsonArray<OrderSendPartResult>(r.parts);
+    // Every email of the send, including one never attempted (a Function that
+    // died after writing the record): that one can still be tried.
+    const everyPart = Array.from({ length: r.part_count }, (_, i) => {
+      const p = parts.find((x) => x.part_number === i + 1);
+      return { ok: Boolean(p?.ok), withdrawn: Boolean(p?.withdrawn) };
+    });
+    const described = describeSendOutcome(everyPart);
+    // A QA release's record is written by the release, not derived here.
+    const outcome: OrderSendOutcome = kind === 'qa_release' ? r.status : described.outcome;
+    return {
     id: r.id,
     order_id: r.order_id,
     order_number: r.order_number,
@@ -1808,13 +1835,18 @@ export async function loadOrderSends(
     subject: r.subject,
     message: r.message,
     part_count: r.part_count,
-    parts: parseJsonArray<OrderSendPartResult>(r.parts),
+    parts,
     files: filesBySend.get(r.id) ?? [],
+    // Only while an email that did not go can still be tried: never for a
+    // send whose remaining emails were all withdrawn.
     can_resend:
-      sendKind(r.kind) !== 'qa_release' &&
+      kind !== 'qa_release' &&
       r.status !== 'sent' &&
+      described.retryable &&
       user.role !== 'reader' &&
       (isAdmin(user) || r.sent_by === user.id),
-    kind: sendKind(r.kind),
-  }));
+    kind,
+    outcome,
+    };
+  });
 }

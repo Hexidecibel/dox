@@ -43,6 +43,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       documentId: body?.document_id,
       pendingSendId: body?.pending_send_id,
       clientIp: getClientIp(context.request),
+      // The person who asked is told, with the note (one internal mail).
+      notify: {
+        apiKey: context.env.RESEND_API_KEY,
+        origin: new URL(context.request.url).origin,
+        tenantName:
+          (
+            await context.env.DB.prepare('SELECT name FROM tenants WHERE id = ?')
+              .bind(order.tenant_id)
+              .first<{ name: string }>()
+          )?.name ?? 'Documents',
+        actor: { id: user.id, name: user.name ?? null, email: user.email },
+      },
     });
     return json({ success: true });
   } catch (err) {

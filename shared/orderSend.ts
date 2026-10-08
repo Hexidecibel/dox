@@ -11,7 +11,10 @@ import type {
   OrderLineDateState,
   OrderSendDelivery,
   OrderSendItemRequirement,
+  OrderSendOutcome,
+  OrderSendPartResult,
   OrderSendPreview,
+  OrderSendStatus,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -186,6 +189,32 @@ export function packOrderSendFiles(
         `Send the order in two goes, or take some lines off it.`
       : null;
   return { files, part_count: partCount, part_bytes: partBytes, refusal };
+}
+
+/**
+ * The stored status and the word a screen leads with, from the per-email
+ * record (see `OrderSendOutcome`). ONE FUNCTION, so the status the send path
+ * writes and the outcome every reader shows cannot disagree.
+ *
+ * An email is one of three things: it went (`ok`), it was WITHDRAWN on a
+ * resend (nothing left to put in it; it will never go), or it did not go and
+ * can be tried again. A send is `sent` only when every email went.
+ */
+export function describeSendOutcome(
+  parts: ReadonlyArray<Pick<OrderSendPartResult, 'ok' | 'withdrawn'>>,
+): { status: OrderSendStatus; outcome: OrderSendOutcome; retryable: boolean } {
+  const went = parts.filter((p) => p.ok).length;
+  const withdrawn = parts.filter((p) => !p.ok && p.withdrawn).length;
+  const retryable = parts.length - went - withdrawn;
+  if (went === parts.length) return { status: 'sent', outcome: 'sent', retryable: false };
+  if (retryable > 0) {
+    const status: OrderSendStatus = went === 0 ? 'failed' : 'partial';
+    return { status, outcome: status, retryable: true };
+  }
+  // Nothing is left to try: every email either went or was withdrawn.
+  return went === 0
+    ? { status: 'failed', outcome: 'withdrawn', retryable: false }
+    : { status: 'partial', outcome: 'sent_rest_withdrawn', retryable: false };
 }
 
 /** "<subject> (2 of 3)" -- a single-email send keeps its subject untouched. */

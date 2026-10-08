@@ -167,6 +167,8 @@ interface DocOpts {
   status?: string;
   tenantId?: string;
   withFile?: boolean;
+  /** The file size ON RECORD (what the send packs by). The stored bytes stay small. */
+  size?: number;
 }
 
 async function makeDoc(typeId: string | null, opts: DocOpts = {}): Promise<{ id: string; title: string; fileName: string }> {
@@ -203,7 +205,7 @@ async function makeDoc(typeId: string | null, opts: DocOpts = {}): Promise<{ id:
          (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by)
        VALUES (?, ?, 1, ?, ?, 'application/pdf', ?, ?)`,
     )
-    .bind(generateTestId(), id, fileName, 64, key, own ? seed.orgAdminId : seed.orgAdmin2Id)
+    .bind(generateTestId(), id, fileName, opts.size ?? 64, key, own ? seed.orgAdminId : seed.orgAdmin2Id)
     .run();
   if (opts.withFile !== false) await files.put(key, new TextEncoder().encode(`PDF-BYTES-${id}`.padEnd(64, '.')));
   for (const productId of opts.products ?? []) {
@@ -1097,7 +1099,7 @@ describe('QA releasing and refusing held documents', () => {
       expect(body.refused).toEqual([]);
       expect(body.sends).toHaveLength(1);
 
-      const fresh = h.mails.slice(before);
+      const fresh = toCustomer(h.mails.slice(before));
       expect(fresh).toHaveLength(1);
       expect(fresh[0].to).toEqual([CUSTOMER_EMAIL, 'second@harborbakery.example']);
       // Replies go to the salesperson who sent the order.
@@ -1140,7 +1142,7 @@ describe('QA releasing and refusing held documents', () => {
       const twice = await release(h.order, [h.letterLine.id]);
       expect(twice.status).toBe(409);
       expect(twice.body.refused[0].reason).toContain('already been released');
-      expect(h.mails.slice(before)).toHaveLength(1);
+      expect(toCustomer(h.mails.slice(before))).toHaveLength(1);
     } finally {
       await db.prepare(`UPDATE customers SET email = ? WHERE id = ?`).bind(CUSTOMER_EMAIL, customerId).run();
     }
@@ -1158,7 +1160,7 @@ describe('QA releasing and refusing held documents', () => {
     );
     expect(res.status).toBe(200);
     expect(res.body.released).toEqual([h.planLine.id]);
-    expect(h.mails.slice(before)).toHaveLength(1);
+    expect(toCustomer(h.mails.slice(before))).toHaveLength(1);
     expect((await lineRow(h.letterLine.id)).release_status).toBe('pending_qa');
     // One document still waits, so the order is not delivered.
     expect(res.body.order_status).not.toBe('delivered');
@@ -1350,7 +1352,7 @@ describe('a release is pinned to what QA saw (C-059, C-060)', () => {
     const before = mails.length;
     const released = await release(order, [line.id]);
     expect(released.status).toBe(200);
-    const fresh = mails.slice(before);
+    const fresh = toCustomer(mails.slice(before));
     expect(fresh).toHaveLength(1);
     expect(fresh[0].to).toEqual([CUSTOMER_EMAIL]);
     expect(await linksHolding(plan.id)).toHaveLength(1);
@@ -1373,7 +1375,7 @@ describe('a release is pinned to what QA saw (C-059, C-060)', () => {
 
     const before = mails.length;
     expect((await release(order, [held.id])).status).toBe(200);
-    expect(mails.slice(before)[0].to).toEqual([CUSTOMER_EMAIL]);
+    expect(toCustomer(mails.slice(before))[0].to).toEqual([CUSTOMER_EMAIL]);
   });
 
   it('a line refreshed to a newer document and sent again is NOT released on what QA saw before', async () => {
@@ -1521,7 +1523,7 @@ describe('a resend of an old failed send does not override later decisions (C-06
     expect((await linksHolding(f.plan.id)).filter((l) => l.revoked_at === null)).toEqual([]);
     expect(again.body.send.files[0]).toMatchObject({ sent_ok: false });
     expect(again.body.send.files[0].not_sent_reason).toContain('refused');
-    expect(again.body.send.parts[0]).toMatchObject({ ok: true, sent_at: null });
+    expect(again.body.send.parts[0]).toMatchObject({ ok: false, withdrawn: true, sent_at: null });
     expect(again.body.send.parts[0].note).toContain('no email was sent');
 
     const row = await lineRow(f.line.id);
@@ -1750,7 +1752,7 @@ describe('a release that does not finish (C-063)', () => {
     const res = await release(s.order, [s.line.id]);
     expect(res.status).toBe(200);
     expect(res.body.released).toEqual([s.line.id]);
-    expect(s.mails.slice(before)).toHaveLength(1);
+    expect(toCustomer(s.mails.slice(before))).toHaveLength(1);
     expect((await linkById(s.link.id))!.revoked_at).not.toBeNull();
     const live = (await linksHolding(s.plan.id)).filter((l) => l.revoked_at === null);
     expect(live).toHaveLength(1);
@@ -1851,7 +1853,7 @@ describe('a release at scale (C-062)', () => {
     const res = await release(order, all.map((l) => l.id));
     expect(res.status).toBe(200);
     expect(res.body.released).toHaveLength(50);
-    expect(mails.slice(before)).toHaveLength(1);
+    expect(toCustomer(mails.slice(before))).toHaveLength(1);
     expect(await linksHolding(plan.id)).toHaveLength(1);
     const left = await db.prepare(`SELECT COUNT(*) AS n FROM order_documents WHERE order_id = ? AND release_status != 'released'`).bind(order).first<{ n: number }>();
     expect(left!.n).toBe(0);
@@ -2044,5 +2046,322 @@ describe('the rail count (C-066)', () => {
       expect((await count(who)).body).toEqual({ can_release: false, count: 0 });
     }
     expect((await count('other_tenant')).body).toEqual({ can_release: true, count: 0 });
+  });
+});
+
+// ===========================================================================
+// What the record says must be true (decisions C-067..C-070)
+// ===========================================================================
+
+const USER_EMAIL = 'user@test.com';
+const toAsker = (mails: CapturedMail[]) => mails.filter((m) => m.to.includes(USER_EMAIL));
+
+/** One `qa` line, sent by a plain user: waiting for QA. */
+async function oneWaiting(name: string) {
+  const pair = await makePair(name);
+  const plan = await makeDoc(types.haccp, { products: [pair.product_id], title: `${name} plan` });
+  const order = await newOrder();
+  await addDocs(order, [pair], [types.haccp]);
+  stubMail();
+  const sent = await send(order, 'user');
+  expect(sent.status).toBe(200);
+  vi.unstubAllGlobals();
+  const [line] = await lines(order);
+  return { order, plan, pair, line, askingSendId: sent.body.send.id };
+}
+
+describe('a release somebody else undoes while its mail is going out (C-067)', () => {
+  it('is not recorded as sent and is not answered "released"', async () => {
+    const w = await oneWaiting('Undone Mid Flight Item');
+    const sent: CapturedMail[] = [];
+    // The provider is slow. While it is, an administrator sees a release that
+    // has been "in progress" too long and puts it back.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(url).includes('resend.com')) return new Response('{}', { status: 200 });
+        const mail = JSON.parse(String(init?.body)) as CapturedMail;
+        if (mail.to.includes(CUSTOMER_EMAIL) && sent.filter((m) => m.to.includes(CUSTOMER_EMAIL)).length === 0) {
+          await db.prepare(`UPDATE order_documents SET releasing_at = datetime('now', '-10 minutes') WHERE id = ?`).bind(w.line.id).run();
+          const back = await giveBackOne(
+            as('org_admin', `http://localhost/api/orders/${w.order}/documents/${w.line.id}/give-back`, {
+              method: 'POST', params: { id: w.order, lineId: w.line.id },
+            }),
+          );
+          expect(back.status).toBe(200);
+        }
+        sent.push(mail);
+        return new Response('{}', { status: 200 });
+      }),
+    );
+
+    const res = await release(w.order, [w.line.id]);
+    // The mail went. The release did not hold.
+    expect(toCustomer(sent)).toHaveLength(1);
+    expect(res.status).toBe(409);
+    expect(res.body.released).toEqual([]);
+    expect(res.body.refused[0].code).toBe('undone');
+    expect(res.body.refused[0].reason).toContain('Org Admin put this release back');
+    expect(res.body.refused[0].reason).toContain('The customer holds a link that no longer opens');
+
+    const record = (await readOrder(w.order, 'qa')).sends!.find((s) => s.kind === 'qa_release')!;
+    expect(record.status).not.toBe('sent');
+    expect(record.files.every((f) => !f.sent_ok)).toBe(true);
+    expect(record.parts[0]).toMatchObject({ ok: false, code: 'undone', undone_by_name: 'Org Admin' });
+    expect(record.parts[0].error).toContain('The email was sent, but Org Admin put this release back');
+
+    // The line is waiting, the link is dead, and nobody was told it was released.
+    expect(await lineRow(w.line.id)).toMatchObject({ release_status: 'pending_qa', release_send_id: null, decided_by: null });
+    expect((await linksHolding(w.plan.id)).every((l) => l.revoked_at !== null)).toBe(true);
+    expect(toAsker(sent)).toHaveLength(0);
+    expect(await orderStatus(w.order)).not.toBe('delivered');
+    expect((await audits('order.documents_release_undone', record.id))[0].details).toMatchObject({ mail_sent: true });
+
+    // Releasing it now is an honest second release: one more mail, one live link.
+    const again = await release(w.order, [w.line.id]);
+    expect(again.status).toBe(200);
+    expect((await linksHolding(w.plan.id)).filter((l) => l.revoked_at === null)).toHaveLength(1);
+  });
+
+  it('a mail call that TIMES OUT is "outcome not recorded", not "failed": nothing is undone', async () => {
+    const w = await oneWaiting('Timed Out Item');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(url).includes('resend.com')) return new Response('{}', { status: 200 });
+        // The release sets a deadline on its mail call; other callers set none.
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        throw new DOMException('The operation timed out.', 'TimeoutError');
+      }),
+    );
+    const res = await release(w.order, [w.line.id]);
+    expect(res.status).toBe(409);
+    expect(res.body.refused[0].code).toBe('unfinished');
+    expect(res.body.refused[0].reason).toContain('not known whether the email went');
+
+    const row = await lineRow(w.line.id);
+    expect(row.release_status).toBe('releasing');
+    const record = (await readOrder(w.order, 'qa')).sends!.find((s) => s.id === row.release_send_id)!;
+    expect(record.status).toBe('partial');
+    expect(record.parts[0]).toMatchObject({ ok: false, code: 'unrecorded', error: RELEASE_OUTCOME_UNRECORDED });
+    // The link is still live: the mail may have gone, and it can be found and withdrawn.
+    expect((await linksHolding(w.plan.id)).filter((l) => l.revoked_at === null)).toHaveLength(1);
+  });
+
+  it('a mail call that THROWS does not say "nothing was sent": it says it may not have been, and withdraws the link', async () => {
+    const w = await oneWaiting('Threw Item');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        if (!String(url).includes('resend.com')) return new Response('{}', { status: 200 });
+        throw new Error('socket hang up');
+      }),
+    );
+    const res = await release(w.order, [w.line.id]);
+    expect(res.status).toBe(409);
+    expect(res.body.refused[0].reason).toContain('The mail may not have been sent; the link was withdrawn.');
+    expect(res.body.refused[0].reason).not.toContain('Nothing was sent');
+    const record = (await readOrder(w.order, 'qa')).sends!.find((s) => s.kind === 'qa_release')!;
+    expect(record.status).toBe('failed');
+    expect(record.parts[0].error).toContain('The mail may not have been sent; the link was withdrawn.');
+    expect(record.parts[0].error).toContain('socket hang up');
+    expect((await linksHolding(w.plan.id)).every((l) => l.revoked_at !== null)).toBe(true);
+    expect((await lineRow(w.line.id)).release_status).toBe('pending_qa');
+  });
+});
+
+describe('a send in which nothing left never reads "sent" (C-068)', () => {
+  it('every file withdrawn: stored failed, called withdrawn, and nothing is left to resend', async () => {
+    const pair = await makePair('All Withdrawn Item');
+    await makeDoc(types.spec, { products: [pair.product_id] });
+    const order = await newOrder('org_admin');
+    await addDocs(order, [pair], [types.spec], 'org_admin');
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin');
+    expect(failed.status).toBe(502);
+    vi.unstubAllGlobals();
+    const [line] = await lines(order);
+    await call(removeDocument, as('org_admin', `http://localhost/api/orders/${order}/documents/${line.id}`, {
+      method: 'DELETE', params: { id: order, lineId: line.id },
+    }));
+
+    const mails = stubMail();
+    const again = await resend(order, failed.body.send.id, 'org_admin');
+    expect(mails).toHaveLength(0);
+    expect(again.body.sent).toBe(false);
+    expect(again.body.send.status).toBe('failed');
+    expect(again.body.send.outcome).toBe('withdrawn');
+    expect(again.body.send.parts[0]).toMatchObject({ ok: false, withdrawn: true, sent_at: null });
+    expect(again.body.send.can_resend).toBe(false);
+    expect(again.body.order_status).not.toBe('delivered');
+
+    const more = await resend(order, failed.body.send.id, 'org_admin');
+    expect(more.status).toBe(409);
+    expect(more.body.error).toContain('Nothing is left to resend');
+    expect(mails).toHaveLength(0);
+  });
+
+  it('some emails went and the rest were withdrawn: partial, called so, nothing left to resend, not delivered', async () => {
+    const supplier = await makeSupplier('Two Emails Dairy');
+    const one = await makePair('Two Emails Item One', { supplier });
+    const two = await makePair('Two Emails Item Two', { supplier });
+    // Two certificates of analysis of 8 MB each do not fit one 15 MB email.
+    await makeDoc(types.coa, { supplier, products: [one.product_id], size: 8 * 1024 * 1024 });
+    await makeDoc(types.coa, { supplier, products: [two.product_id], size: 8 * 1024 * 1024 });
+    const order = await newOrder('org_admin');
+    await addDocs(order, [one, two], [types.coa], 'org_admin');
+    const mails = stubMail((m) => m.subject.includes('(2 of 2)'));
+    const first = await send(order, 'org_admin');
+    expect(first.status).toBe(200);
+    expect(first.body.send).toMatchObject({ status: 'partial', outcome: 'partial', can_resend: true, part_count: 2 });
+    vi.unstubAllGlobals();
+
+    // The line whose certificate was in the email that failed is taken off.
+    const second = (await lines(order)).find((l) => l.product_id === two.product_id)!;
+    await call(removeDocument, as('org_admin', `http://localhost/api/orders/${order}/documents/${second.id}`, {
+      method: 'DELETE', params: { id: order, lineId: second.id },
+    }));
+    const later = stubMail();
+    const again = await resend(order, first.body.send.id, 'org_admin');
+    expect(later).toHaveLength(0);
+    expect(mails).toHaveLength(1);
+    expect(again.body.send.status).toBe('partial');
+    expect(again.body.send.outcome).toBe('sent_rest_withdrawn');
+    expect(again.body.send.can_resend).toBe(false);
+    expect(again.body.sent).toBe(false);
+    expect(again.body.send.parts.map((p) => [p.ok, Boolean(p.withdrawn)])).toEqual([[true, false], [false, true]]);
+    expect((await resend(order, first.body.send.id, 'org_admin')).status).toBe(409);
+  });
+});
+
+describe('lines nobody may pull out from under a decision (C-069)', () => {
+  it('nobody removes or refreshes a line in the middle of a release', async () => {
+    const w = await oneWaiting('Mid Release Guard Item');
+    await db.prepare(`UPDATE order_documents SET release_status = 'releasing', releasing_at = datetime('now', '-30 minutes') WHERE id = ?`).bind(w.line.id).run();
+    for (const who of ['user', 'qa', 'org_admin', 'reader'] as const) {
+      const gone = await call<{ error?: string }>(removeDocument, as(who, `http://localhost/api/orders/${w.order}/documents/${w.line.id}`, {
+        method: 'DELETE', params: { id: w.order, lineId: w.line.id },
+      }));
+      expect(gone.status).toBe(409);
+      expect(gone.body.error).toContain('in the middle of a release');
+      expect((await refresh(w.order, w.line.id, who)).status).toBe(409);
+    }
+    expect((await lineRow(w.line.id)).release_status).toBe('releasing');
+    // Put back, it is an ordinary waiting line again and a sender may remove it.
+    await call(giveBackOne, as('qa', `http://localhost/api/orders/${w.order}/documents/${w.line.id}/give-back`, { method: 'POST', params: { id: w.order, lineId: w.line.id } }));
+    const after = await call(removeDocument, as('user', `http://localhost/api/orders/${w.order}/documents/${w.line.id}`, {
+      method: 'DELETE', params: { id: w.order, lineId: w.line.id },
+    }));
+    expect(after.status).toBe(200);
+  });
+
+  it('a reader cannot remove or refresh a REFUSED line; a sender who re-adds it asks QA with the earlier refusal in view', async () => {
+    const w = await oneWaiting('Refused History Item');
+    stubMail();
+    expect((await refuse(w.order, w.line.id, 'Superseded. Use the 2026 plan.')).status).toBe(200);
+
+    const removeAs = (who: Who) =>
+      call<{ error?: string }>(removeDocument, as(who, `http://localhost/api/orders/${w.order}/documents/${w.line.id}`, {
+        method: 'DELETE', params: { id: w.order, lineId: w.line.id },
+      }));
+    const asReader = await removeAs('reader');
+    expect(asReader.status).toBe(403);
+    expect(asReader.body.error).toContain('released or refused');
+    expect((await refresh(w.order, w.line.id, 'reader')).status).toBe(403);
+    expect((await lineRow(w.line.id)).release_status).toBe('refused');
+
+    // Somebody who may send takes it off, adds it again and sends.
+    expect((await removeAs('user')).status).toBe(200);
+    await addDocs(w.order, [w.pair], [types.haccp]);
+    expect((await send(w.order, 'user')).status).toBe(200);
+    const [fresh] = await lines(w.order);
+    expect(fresh.id).not.toBe(w.line.id);
+    expect(fresh.release_status).toBe('pending_qa');
+
+    const listed = (await pending('qa')).lines.find((l) => l.id === fresh.id)!;
+    expect(listed.earlier_refusals).toHaveLength(1);
+    expect(listed.earlier_refusals[0]).toMatchObject({
+      by_name: 'Quality Lead',
+      note: 'Superseded. Use the 2026 plan.',
+      document_id: w.plan.id,
+    });
+    expect(listed.earlier_refusals[0].at).toBeTruthy();
+    // A line with no such history carries none.
+    const other = await oneWaiting('No History Item');
+    expect((await pending('qa')).lines.find((l) => l.id === other.line.id)?.earlier_refusals).toEqual([]);
+  });
+});
+
+describe('the person who asked is told (C-070)', () => {
+  it('a release mails the asker once, internally, with the order, the documents and who they went to', async () => {
+    const w = await oneWaiting('Tell Asker Item');
+    const mails = stubMail();
+    const res = await release(w.order, [w.line.id]);
+    expect(res.status).toBe(200);
+    expect(res.body.requester_notice).toEqual({ sent: true, recipients: [USER_EMAIL] });
+
+    expect(toCustomer(mails)).toHaveLength(1);
+    const told = toAsker(mails);
+    expect(told).toHaveLength(1);
+    expect(told[0].to).toEqual([USER_EMAIL]);
+    expect(told[0].subject).toContain('QA released 1 document');
+    expect(told[0].html).toContain('Quality Lead released this document');
+    expect(told[0].html).toContain(CUSTOMER_EMAIL);
+    expect(told[0].html).toContain('HACCP Plan');
+    expect(told[0].html).toContain('Tell Asker Item');
+    expect(told[0].html).toContain(`/orders/${w.order}`);
+    // The customer's link is not in the internal note.
+    expect(told[0].html).not.toContain('/export/');
+    // Exactly two mails left: the customer's and the asker's.
+    expect(mails).toHaveLength(2);
+
+    const audit = (await audits('order.documents_requester_notified', w.order)).at(-1)!;
+    expect(audit.user_id).toBe(qaUserId);
+    expect(audit.details).toMatchObject({ decision: 'released', told_user_id: seed.userId, sent: true });
+  });
+
+  it('a refusal mails the asker the note; nothing goes to the customer', async () => {
+    const w = await oneWaiting('Tell Asker Refused Item');
+    const mails = stubMail();
+    expect((await refuse(w.order, w.line.id, 'Wrong plant. Ask for the Northfield one.')).status).toBe(200);
+    expect(mails).toHaveLength(1);
+    expect(mails[0].to).toEqual([USER_EMAIL]);
+    expect(mails[0].subject).toContain('QA refused a document');
+    expect(mails[0].html).toContain('Wrong plant. Ask for the Northfield one.');
+    expect(mails[0].html).toContain('Nothing was sent to the customer');
+    expect((await audits('order.documents_requester_notified', w.order)).at(-1)!.details).toMatchObject({ decision: 'refused' });
+  });
+
+  it('never the releaser themselves, never an inactive account, never somebody outside the organization', async () => {
+    // The asker is the person releasing.
+    const mine = await oneWaiting('Own Ask Item');
+    await db.prepare('UPDATE order_documents SET pending_requested_by = ? WHERE id = ?').bind(qaUserId, mine.line.id).run();
+    let mails = stubMail();
+    const own = await release(mine.order, [mine.line.id]);
+    expect(own.status).toBe(200);
+    expect(own.body.requester_notice).toBeUndefined();
+    expect(mails).toHaveLength(1);
+    expect(toCustomer(mails)).toHaveLength(1);
+    vi.unstubAllGlobals();
+
+    // The asker's account has been switched off.
+    const gone = await oneWaiting('Inactive Asker Item');
+    await db.prepare('UPDATE users SET active = 0 WHERE id = ?').bind(seed.userId).run();
+    try {
+      mails = stubMail();
+      expect((await release(gone.order, [gone.line.id])).status).toBe(200);
+      expect(toAsker(mails)).toHaveLength(0);
+      expect(mails).toHaveLength(1);
+    } finally {
+      await db.prepare('UPDATE users SET active = 1 WHERE id = ?').bind(seed.userId).run();
+    }
+    vi.unstubAllGlobals();
+
+    // The asker is an account of ANOTHER organization (a stale or forged id).
+    const foreign = await oneWaiting('Foreign Asker Item');
+    await db.prepare('UPDATE order_documents SET pending_requested_by = ? WHERE id = ?').bind(seed.orgAdmin2Id, foreign.line.id).run();
+    mails = stubMail();
+    expect((await refuse(foreign.order, foreign.line.id, 'No.')).status).toBe(200);
+    expect(mails).toHaveLength(0);
   });
 });

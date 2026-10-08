@@ -45,6 +45,14 @@ export interface SendEmailOptions {
    */
   fromName?: string;
   attachments?: EmailAttachment[];
+  /**
+   * Give up waiting for the provider after this long. OPT-IN, per call: an
+   * order send with 20 MB of attachments may legitimately take a long time,
+   * and no existing caller was given a deadline it did not ask for. A QA
+   * release sets one, because a line "mid-release for more than five minutes"
+   * is treated as unfinished and must never be a mail call still in flight.
+   */
+  timeoutMs?: number;
 }
 
 export interface SendEmailResult {
@@ -53,6 +61,11 @@ export interface SendEmailResult {
   status: number;
   /** The provider's error text (truncated), or the thrown message. */
   error: string | null;
+  /**
+   * The wait was abandoned (`timeoutMs`). NOT a refusal: the provider may
+   * still have accepted the message. The outcome is unknown.
+   */
+  timedOut?: boolean;
 }
 
 /**
@@ -104,12 +117,20 @@ export async function sendEmailDetailed(
           ? { attachments: options.attachments }
           : {}),
       }),
+      ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
     });
     if (res.ok) return { ok: true, status: res.status, error: null };
     const detail = await res.text().catch(() => '');
     return { ok: false, status: res.status, error: detail.slice(0, 500) || null };
   } catch (err) {
-    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
+    const name = (err as { name?: string } | null)?.name;
+    const timedOut = name === 'TimeoutError' || name === 'AbortError';
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : String(err),
+      ...(timedOut ? { timedOut: true } : {}),
+    };
   }
 }
 

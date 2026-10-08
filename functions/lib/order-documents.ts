@@ -38,7 +38,7 @@
  */
 
 import { generateId, logAudit } from './db';
-import { BadRequestError, ForbiddenError, NotFoundError } from './permissions';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from './permissions';
 import { loadSharingRules } from './sharing-rule';
 import {
   currentDocumentKey,
@@ -360,10 +360,23 @@ export interface OrderDocumentContext {
  * Everybody who may send may still do both.
  */
 function refuseReaderOnDecidedLine(ctx: OrderDocumentContext, row: OrderDocumentRow, verb: string): void {
+  // NOBODY removes or refreshes a line in the middle of a release. The
+  // release's record and its link are found through the line: taking the line
+  // away would strand the record at "outcome not recorded" for ever with a
+  // live link nobody can find. Finish it first -- release it again, or put it
+  // back -- and then the line is an ordinary one.
+  if (row.release_status === 'releasing') {
+    throw new ConflictError(
+      `This document is in the middle of a release, so it cannot be ${verb === 'remove' ? 'removed' : 'refreshed'} yet. ` +
+        'QA can release it again or put it back in the waiting list; after that it can be.',
+    );
+  }
   if (ctx.role !== 'reader') return;
-  if (row.release_status === 'pending_qa' || row.release_status === 'releasing' || row.release_status === 'released') {
+  // Nor does a read-only account undo QA's NO: removing a refused line and
+  // adding it again would erase the note and ask QA the same question afresh.
+  if (row.release_status === 'pending_qa' || row.release_status === 'released' || row.release_status === 'refused') {
     throw new ForbiddenError(
-      `A read-only account cannot ${verb} a document that is waiting for QA or that QA has released. Ask somebody who can send the order.`,
+      `A read-only account cannot ${verb} a document that is waiting for QA, or that QA has released or refused. Ask somebody who can send the order.`,
     );
   }
 }
@@ -1010,6 +1023,43 @@ export async function listPendingOrderDocuments(
     for (const r of res.results ?? []) orders.set(r.id, r);
   }
 
+  // WHAT QA ALREADY SAID NO TO, ON THE SAME ORDER. Somebody who may send can
+  // take a refused line off an order and add it again; that is allowed, and
+  // the new ask is a new line with no memory. The refusal is in the audit log
+  // (who, when, the note, for which item, supplier and type), so it is read
+  // from there and shown beside the new ask rather than kept on a row that a
+  // removal deletes.
+  const refusals = new Map<string, PendingOrderDocument['earlier_refusals']>();
+  for (const part of chunk([...new Set(rows.map((r) => r.order_id))])) {
+    const res = await db
+      .prepare(
+        `SELECT a.resource_id AS order_id, a.details AS details, a.created_at AS at, u.name AS by_name
+           FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+          WHERE a.tenant_id = ? AND a.action = 'order.document_release_refused'
+            AND a.resource_id IN (${part.map(() => '?').join(', ')})
+          ORDER BY a.id DESC`,
+      )
+      .bind(tenantId, ...part)
+      .all<{ order_id: string; details: string | null; at: string | null; by_name: string | null }>();
+    for (const r of res.results ?? []) {
+      let d: Record<string, unknown> = {};
+      try {
+        d = r.details ? (JSON.parse(r.details) as Record<string, unknown>) : {};
+      } catch {
+        continue;
+      }
+      const key = `${r.order_id}|${d.product_id}|${d.supplier_id}|${d.document_type_id}`;
+      const list = refusals.get(key) ?? [];
+      list.push({
+        by_name: r.by_name,
+        at: r.at,
+        note: typeof d.note === 'string' ? d.note : '',
+        document_id: typeof d.document_id === 'string' ? d.document_id : null,
+      });
+      refusals.set(key, list);
+    }
+  }
+
   return judged
     .sort((a, b) => (a.row.pending_at ?? '').localeCompare(b.row.pending_at ?? ''))
     .map((line) => {
@@ -1046,6 +1096,8 @@ export async function listPendingOrderDocuments(
         advisory: line.api.advisory,
         releasable: blocked === null,
         blocked_reason: blocked,
+        earlier_refusals:
+          refusals.get(`${line.row.order_id}|${line.row.product_id}|${line.row.supplier_id}|${line.row.document_type_id}`) ?? [],
       };
     });
 }

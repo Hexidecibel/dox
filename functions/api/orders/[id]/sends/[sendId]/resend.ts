@@ -57,6 +57,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (before.status === 'sent') {
       throw new ConflictError('Every email of this send already went. There is nothing to resend.');
     }
+    if (before.outcome === 'withdrawn' || before.outcome === 'sent_rest_withdrawn') {
+      throw new ConflictError(
+        'Nothing is left to resend. What did not go was withdrawn: the documents were refused, removed or changed since this send was reviewed.',
+      );
+    }
     if (!before.can_resend) {
       throw new ForbiddenError('Only the person who sent this, or an administrator, can resend it.');
     }

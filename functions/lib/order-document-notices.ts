@@ -253,3 +253,139 @@ export async function notifyQaAboutOrderDocuments(
     return notice;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Telling the person who asked (C-070)
+// ---------------------------------------------------------------------------
+
+export interface RequesterNoticeLine {
+  /** `order_documents.pending_requested_by`: who pressed the send that asked. */
+  requested_by: string | null;
+  document_type_name: string | null;
+  document_title: string | null;
+  product_name: string | null;
+  supplier_name: string | null;
+}
+
+export interface RequesterNoticeArgs {
+  tenantId: string;
+  tenantName: string;
+  appUrl: string;
+  order: { id: string; order_number: string; customer_name: string | null };
+  /** The QA person who decided. */
+  actor: { id: string; name: string | null; email: string };
+  decision: 'released' | 'refused';
+  /** Released: who the documents were mailed to. */
+  recipients?: string[];
+  /** Refused: QA's note. */
+  note?: string | null;
+  lines: RequesterNoticeLine[];
+  clientIp: string | null;
+}
+
+export function buildRequesterNoticeEmail(args: RequesterNoticeArgs, lines: RequesterNoticeLine[]): { subject: string; html: string } {
+  const released = args.decision === 'released';
+  const n = lines.length;
+  const subject = released
+    ? `${args.tenantName}: QA released ${n} document${n === 1 ? '' : 's'} on order ${args.order.order_number}`
+    : `${args.tenantName}: QA refused a document on order ${args.order.order_number}`;
+  const orderUrl = `${args.appUrl.replace(/\/$/, '')}/orders/${args.order.id}`;
+  const who = args.actor.name || args.actor.email;
+  const rows = lines
+    .map((l) => {
+      const what = [l.document_type_name ?? 'Document', l.supplier_name].filter(Boolean).map((x) => escapeHtml(String(x))).join(' &middot; ');
+      const detail = [l.product_name ? `For ${l.product_name}` : null, l.document_title ? `"${l.document_title}"` : null]
+        .filter(Boolean)
+        .map((x) => escapeHtml(String(x)))
+        .join(' &middot; ');
+      return `<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">
+        <div style="color:#333;font-weight:600;">${what}</div>
+        ${detail ? `<div style="color:#666;font-size:13px;">${detail}</div>` : ''}
+      </td></tr>`;
+    })
+    .join('');
+  const outcome = released
+    ? `<p style="margin:0 0 8px;color:#555;line-height:1.6;">${escapeHtml(who)} released ${n === 1 ? 'this document' : 'these documents'} and the portal mailed a link to: <strong>${escapeHtml((args.recipients ?? []).join(', '))}</strong>. The link works for 30 days.</p>`
+    : `<p style="margin:0 0 8px;color:#555;line-height:1.6;">${escapeHtml(who)} refused ${n === 1 ? 'this document' : 'these documents'} for this order. Nothing was sent to the customer.</p>
+       <p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid #1A365D;color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(args.note ?? '')}</p>`;
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr><td style="background:#1A365D;padding:24px 32px;">
+      <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Document order ${escapeHtml(args.order.order_number)}</h1>
+      <p style="margin:6px 0 0;color:#cbd5e0;font-size:13px;">${escapeHtml(args.tenantName)}${args.order.customer_name ? ` &middot; for ${escapeHtml(args.order.customer_name)}` : ''}</p>
+    </td></tr>
+    <tr><td style="padding:32px;">
+      ${outcome}
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">${rows}</table>
+      <p style="margin:0;color:#666;font-size:13px;line-height:1.6;">The order: <a href="${escapeHtml(orderUrl)}">${escapeHtml(orderUrl)}</a></p>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+  return { subject, html };
+}
+
+/**
+ * Tell the person who asked what QA decided: ONE internal mail per act, per
+ * asker. "Asker" is whoever pressed the send that put the line in front of QA.
+ *
+ * INTERNAL ONLY, BY CONSTRUCTION. The address is read from `users` for that
+ * user id, and only when the account is an ACTIVE user OF THIS ORGANIZATION.
+ * No address from the order, the customer or the request is ever used, so
+ * this cannot be turned into a mail to somebody outside. Never to the person
+ * who decided (a releaser who asked and released is not told what they did),
+ * and an inactive asker is skipped without a word.
+ *
+ * Never throws: QA's decision has already been recorded and mailed.
+ */
+export async function notifyRequesterOfDecision(
+  db: D1Database,
+  apiKey: string | undefined,
+  args: RequesterNoticeArgs,
+): Promise<{ sent: boolean; recipients: string[] } | null> {
+  const byAsker = new Map<string, RequesterNoticeLine[]>();
+  for (const line of args.lines) {
+    if (!line.requested_by || line.requested_by === args.actor.id) continue;
+    const list = byAsker.get(line.requested_by) ?? [];
+    list.push(line);
+    byAsker.set(line.requested_by, list);
+  }
+  if (byAsker.size === 0 || !apiKey) return null;
+  const told: string[] = [];
+  let attempted = false;
+  for (const [askerId, lines] of byAsker) {
+    try {
+      const asker = await db
+        .prepare('SELECT id, email FROM users WHERE id = ? AND tenant_id = ? AND active = 1')
+        .bind(askerId, args.tenantId)
+        .first<{ id: string; email: string | null }>();
+      if (!asker || !asker.email) continue;
+      attempted = true;
+      const mail = buildRequesterNoticeEmail(args, lines);
+      const ok = await sendEmail(apiKey, { to: asker.email, subject: mail.subject, html: mail.html });
+      if (ok) told.push(asker.email);
+      await logAudit(
+        db,
+        args.actor.id,
+        args.tenantId,
+        'order.documents_requester_notified',
+        'order',
+        args.order.id,
+        JSON.stringify({
+          order_number: args.order.order_number,
+          decision: args.decision,
+          told_user_id: asker.id,
+          sent: ok,
+          line_count: lines.length,
+        }),
+        args.clientIp,
+      );
+    } catch (err) {
+      console.error('[order-document-notices] requester notice failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
+  return attempted ? { sent: told.length > 0, recipients: told } : null;
+}

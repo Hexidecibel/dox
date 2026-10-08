@@ -3568,9 +3568,36 @@ export interface OrderSendPartResult {
   error: string | null;
   sent_at: string | null;
   attempts: number;
-  /** Set when a resend found nothing left to send in this email (0138). */
+  /** Plain words about this email, when there is something to say beyond `error`. */
   note?: string | null;
+  /**
+   * A RESEND found nothing left to put in this email (0138): every file in it
+   * had been withdrawn. No email was sent, none will be, and it is NOT `ok` --
+   * nothing left. Not retryable.
+   */
+  withdrawn?: boolean;
+  /**
+   * For a QA release's record (0138). `unrecorded` = the mail was handed over
+   * and its outcome was never written down; `undone` = somebody put the
+   * release back while its mail was going out (the link was withdrawn).
+   */
+  code?: 'unrecorded' | 'undone';
+  /** Who undid it, when `code` is `undone`. */
+  undone_by_name?: string | null;
 }
+
+/**
+ * What became of a send, in the one word a screen leads with. `status` is the
+ * stored column (`sent` / `partial` / `failed`, CHECKed by migration 0134 and
+ * not widened); this is read from it AND the per-email record, because two
+ * truthful outcomes have no status of their own:
+ *
+ *   withdrawn            nothing left at all: every email's files were
+ *                        withdrawn on a resend. Stored as `failed`.
+ *   sent_rest_withdrawn  some emails went; every other one was withdrawn.
+ *                        Stored as `partial`. Nothing is left to resend.
+ */
+export type OrderSendOutcome = 'sent' | 'partial' | 'failed' | 'withdrawn' | 'sent_rest_withdrawn';
 
 export interface OrderSendFileRecord {
   position: number;
@@ -3621,6 +3648,8 @@ export interface OrderSendSummary {
    * always sets it; absent reads as `send`.
    */
   kind?: OrderSendKind;
+  /** What to call the result. The server always sets it; absent reads as `status`. */
+  outcome?: OrderSendOutcome;
 }
 
 export type OrderSendKind = 'send' | 'qa_request' | 'qa_release';
@@ -3844,7 +3873,9 @@ export interface OrderDocumentsReleaseRequest {
 export interface OrderDocumentsReleaseResponse {
   released: string[];
   /** Lines that were not released, each with the reason. They stay waiting. */
-  refused: { order_document_id: string; reason: string; code?: 'changed' | 'in_progress' | 'unfinished' }[];
+  refused: { order_document_id: string; reason: string; code?: 'changed' | 'in_progress' | 'unfinished' | 'undone' }[];
+  /** Whether the person who asked was told (one internal mail per act). Absent when nobody was to be told. */
+  requester_notice?: { sent: boolean; recipients: string[] };
   /** The mail(s) the release produced: one per distinct set of recipients. */
   sends: OrderSendSummary[];
   order_status: string;
@@ -3891,6 +3922,11 @@ export interface PendingOrderDocument {
   /** Whether Release would go through as things stand, and if not why. */
   releasable: boolean;
   blocked_reason: string | null;
+  /**
+   * QA already refused this document type for this item and supplier ON THIS
+   * ORDER, before the line was taken off and asked for again. Newest first.
+   */
+  earlier_refusals: { by_name: string | null; at: string | null; note: string; document_id: string | null }[];
 }
 
 /** GET /api/order-documents/pending */

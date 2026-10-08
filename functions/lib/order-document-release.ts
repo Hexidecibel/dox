@@ -72,6 +72,7 @@ import {
   type OrderDocumentRow,
 } from './order-documents';
 import { buildOrderDocumentsEmail, loadOrderSends, ORDER_SEND_MAX_SUBJECT_CHARS } from './order-send';
+import { notifyRequesterOfDecision, type RequesterNoticeLine } from './order-document-notices';
 import type { OrderWriteRow } from './order-items';
 import {
   ORDER_DOCUMENT_LINK_DAYS,
@@ -97,6 +98,14 @@ const IN_CHUNK = 80;
 
 const CHANGED =
   'This document line changed since you opened it, so nothing was released. Reload the list and look at it again.';
+
+/**
+ * How long a release waits for the mail provider. Far under the five minutes
+ * after which a `releasing` line is treated as unfinished, so "mid-release for
+ * more than five minutes" can never be a mail call still in flight. A release
+ * mails one small message with a link and no attachment; a minute is generous.
+ */
+export const RELEASE_MAIL_TIMEOUT_MS = 60 * 1000;
 
 /** What a release record says while its email's outcome is not yet written down. */
 export const RELEASE_OUTCOME_UNRECORDED =
@@ -137,6 +146,16 @@ export interface ReleaseContext {
   user: Pick<User, 'id' | 'name' | 'email' | 'role'>;
   actor: ExitActor;
   clientIp: string | null;
+}
+
+function requesterLine(l: JudgedOrderDocument): RequesterNoticeLine {
+  return {
+    requested_by: l.row.pending_requested_by,
+    document_type_name: l.api.document_type_name,
+    document_title: l.api.document_title,
+    product_name: l.api.product_name,
+    supplier_name: l.api.supplier_name,
+  };
 }
 
 function recipientsKey(list: string[]): string {
@@ -198,6 +217,8 @@ export async function recoverUnfinishedRelease(
   clientIp: string | null,
 ): Promise<void> {
   const sendIds = [...new Set(rows.map((r) => r.release_send_id).filter((id): id is string => Boolean(id)))];
+  const undoer = await db.prepare('SELECT name, email FROM users WHERE id = ?').bind(userId).first<{ name: string | null; email: string | null }>();
+  const undoneBy = undoer?.name || undoer?.email || 'another user';
   for (const sendId of sendIds) {
     const send = await db
       .prepare(`SELECT id, status FROM order_sends WHERE id = ? AND tenant_id = ? AND order_id = ? AND kind = 'qa_release'`)
@@ -218,9 +239,11 @@ export async function recoverUnfinishedRelease(
             part_number: 1,
             ok: false,
             status: 0,
-            error: 'This release did not finish. Its link was withdrawn and the documents were put back in the waiting list.',
+            error: `This release did not finish. ${undoneBy} put it back: its link was withdrawn and the documents are in the waiting list again.`,
             sent_at: null,
             attempts: 1,
+            code: 'undone',
+            undone_by_name: undoneBy,
           },
         ]),
         sendId,
@@ -339,7 +362,7 @@ export async function releaseOrderDocuments(
   if (lines.length !== targets.length) throw new NotFoundError('Document line not found');
 
   const response: OrderDocumentsReleaseResponse = { released: [], refused: [], sends: [], order_status: order.status };
-  const refuse = (line: JudgedOrderDocument, reason: string, code?: 'changed' | 'in_progress' | 'unfinished') =>
+  const refuse = (line: JudgedOrderDocument, reason: string, code?: 'changed' | 'in_progress' | 'unfinished' | 'undone') =>
     response.refused.push({ order_document_id: line.row.id, reason, ...(code ? { code } : {}) });
 
   // 0. A release that did not finish is undone first (its link withdrawn, its
@@ -468,6 +491,7 @@ export async function releaseOrderDocuments(
 
   const qaDocs = new Set(gate.qa_released_ids);
   const producedSendIds: string[] = [];
+  const releasedGroups: { recipients: string[]; lines: JudgedOrderDocument[] }[] = [];
 
   for (const g of groups.values()) {
     const docIds = [...new Set(g.lines.map((l) => l.row.document_id as string))];
@@ -477,6 +501,8 @@ export async function releaseOrderDocuments(
     const sendId = generateId();
     let mintedLinkId: string | null = null;
     let mailed = false;
+    /** The message was handed to the mail call. From here "nothing was sent" is not ours to say. */
+    let handedOver = false;
     try {
       // The salesperson is who the customer has been talking to, so replies go
       // to the person who sent the order -- while that account still exists.
@@ -601,27 +627,52 @@ export async function releaseOrderDocuments(
         .prepare(`UPDATE order_sends SET status = 'partial', parts = ?, updated_at = datetime('now') WHERE id = ?`)
         .bind(
           JSON.stringify([
-            { part_number: 1, ok: false, status: 0, error: RELEASE_OUTCOME_UNRECORDED, sent_at: null, attempts: 1 },
+            { part_number: 1, ok: false, status: 0, error: RELEASE_OUTCOME_UNRECORDED, sent_at: null, attempts: 1, code: 'unrecorded' },
           ]),
           sendId,
         )
         .run();
 
+      handedOver = true;
       const outcome = await sendEmailDetailed(ctx.apiKey, {
         to: g.recipients,
         subject,
         html: email.html,
         replyTo: replyTo.email,
         fromName: viaSenderName(ctx.tenantName),
+        timeoutMs: RELEASE_MAIL_TIMEOUT_MS,
       });
 
+      if (!outcome.ok && outcome.timedOut) {
+        // THE PROVIDER DID NOT ANSWER IN TIME. That is not a refusal: the mail
+        // may have gone. Nothing is undone and nothing is claimed -- the record
+        // already says "outcome not recorded", the lines stay `releasing`, and
+        // in five minutes a releaser can release again or put them back
+        // (either withdraws this link first).
+        mailed = true; // nothing below may say "nothing was sent"
+        for (const line of g.lines) {
+          refuse(
+            line,
+            'The mail provider did not answer in time, so it is not known whether the email went. This document shows as "release did not finish". ' +
+              'In a few minutes it can be released again, which withdraws this link and sends a new one, or put back.',
+            'unfinished',
+          );
+        }
+        continue;
+      }
+
       if (!outcome.ok) {
-        // The provider said no: nothing left. Take the link back and put the
-        // lines back in front of QA.
+        // A refusal from the provider (a status) means nothing left. A request
+        // that never completed (status 0) means WE DO NOT KNOW -- so the words
+        // must not say "nothing was sent". Either way the link is withdrawn,
+        // which makes whatever may have gone harmless, and the lines wait again.
         await revokeExportLink(db, link.id);
         mintedLinkId = null;
         await giveBack(lineIds);
-        const error = outcome.error ?? 'The mail provider refused the message.';
+        const unknown = outcome.status === 0;
+        const error = unknown
+          ? `The mail may not have been sent; the link was withdrawn.${outcome.error ? ` (${outcome.error})` : ''}`
+          : outcome.error ?? 'The mail provider refused the message.';
         await db
           .prepare(`UPDATE order_sends SET status = 'failed', parts = ?, updated_at = datetime('now') WHERE id = ?`)
           .bind(
@@ -630,7 +681,12 @@ export async function releaseOrderDocuments(
           )
           .run();
         for (const line of g.lines) {
-          refuse(line, `The email could not be sent, so this document was not released. It is still waiting. (${error})`);
+          refuse(
+            line,
+            unknown
+              ? `${error} This document was not released and is still waiting.`
+              : `The email could not be sent, so this document was not released. It is still waiting. (${error})`,
+          );
         }
         try {
           await logAudit(
@@ -650,19 +706,35 @@ export async function releaseOrderDocuments(
       }
 
       mailed = true;
-      // ONE TRANSACTION: the record says sent and the lines say released
-      // together, or neither does. Tried twice; if it cannot be written the
-      // lines stay `releasing` and the record stays "outcome not recorded".
+      // ONE TRANSACTION, AND ONLY IF THIS RELEASE IS STILL THIS RELEASE. The
+      // record says sent and the lines say released together -- but each
+      // statement is conditional on the record still being `partial` and every
+      // line still being claimed by THIS release (`release_send_id`). While a
+      // mail call is slow, somebody else may have put the release back
+      // (revoking its link): the first cut then marked the record `sent` for a
+      // dead link, unconditionally, and answered "released". Now nothing is
+      // written, and the truth is said instead.
       const now = new Date().toISOString();
-      const finish = async (): Promise<void> => {
+      const finish = async (): Promise<boolean> => {
+        const stillOurs = `EXISTS (SELECT 1 FROM order_sends s WHERE s.id = ? AND s.status = 'sent')`;
         const stmts: D1PreparedStatement[] = [
-          db.prepare('UPDATE order_send_files SET sent_ok = 1 WHERE send_id = ?').bind(sendId),
           db
-            .prepare(`UPDATE order_sends SET status = 'sent', parts = ?, updated_at = datetime('now') WHERE id = ?`)
+            .prepare(
+              `UPDATE order_sends SET status = 'sent', parts = ?, updated_at = datetime('now')
+                WHERE id = ? AND kind = 'qa_release' AND status = 'partial'
+                  AND (SELECT COUNT(*) FROM order_documents od
+                        WHERE od.tenant_id = ? AND od.order_id = ? AND od.release_send_id = ?
+                          AND od.release_status = 'releasing') = ?`,
+            )
             .bind(
               JSON.stringify([{ part_number: 1, ok: true, status: outcome.status, error: null, sent_at: now, attempts: 1 }]),
               sendId,
+              order.tenant_id,
+              order.id,
+              sendId,
+              lineIds.length,
             ),
+          db.prepare(`UPDATE order_send_files SET sent_ok = 1 WHERE send_id = ? AND ${stillOurs}`).bind(sendId, sendId),
         ];
         for (const part of chunk(lineIds)) {
           stmts.push(
@@ -672,19 +744,70 @@ export async function releaseOrderDocuments(
                     SET release_status = 'released', decided_at = datetime('now'), releasing_at = NULL,
                         export_link_id = ?, last_sent_at = datetime('now'), updated_at = datetime('now')
                   WHERE tenant_id = ? AND order_id = ? AND release_status = 'releasing' AND release_send_id = ?
+                    AND ${stillOurs}
                     AND id IN (${part.map(() => '?').join(', ')})`,
               )
-              .bind(link.id, order.tenant_id, order.id, sendId, ...part),
+              .bind(link.id, order.tenant_id, order.id, sendId, sendId, ...part),
           );
         }
-        await db.batch(stmts);
+        const res = await db.batch(stmts);
+        return (res[0]?.meta?.changes ?? 0) > 0;
       };
+      let finished: boolean;
       try {
-        await finish();
+        finished = await finish();
       } catch {
-        await finish();
+        finished = await finish();
+      }
+      if (!finished) {
+        // SOMEBODY ELSE UNDID THIS RELEASE WHILE ITS MAIL WAS GOING OUT. The
+        // mail went; the link in it has been withdrawn. Say so, and by whom.
+        const record = await db
+          .prepare('SELECT parts FROM order_sends WHERE id = ?')
+          .bind(sendId)
+          .first<{ parts: string | null }>();
+        let undoneBy = 'another user';
+        try {
+          const prior = JSON.parse(record?.parts ?? '[]') as Array<{ undone_by_name?: string }>;
+          if (prior[0]?.undone_by_name) undoneBy = prior[0].undone_by_name;
+        } catch {
+          // Keep the default.
+        }
+        const error =
+          `The email was sent, but ${undoneBy} put this release back while it was going out, and its link was withdrawn. ` +
+          'The customer holds a link that no longer opens. The documents are waiting for QA again.';
+        await revokeExportLink(db, link.id);
+        await db
+          .prepare(
+            `UPDATE order_sends SET status = 'failed', parts = ?, updated_at = datetime('now')
+              WHERE id = ? AND kind = 'qa_release' AND status != 'sent'`,
+          )
+          .bind(
+            JSON.stringify([
+              { part_number: 1, ok: false, status: outcome.status, error, sent_at: now, attempts: 1, code: 'undone', undone_by_name: undoneBy },
+            ]),
+            sendId,
+          )
+          .run();
+        for (const line of g.lines) refuse(line, error, 'undone');
+        try {
+          await logAudit(
+            db,
+            user.id,
+            order.tenant_id,
+            'order.documents_release_undone',
+            'order_send',
+            sendId,
+            JSON.stringify({ order_id: order.id, order_number: order.order_number, order_document_ids: lineIds, undone_by: undoneBy, mail_sent: true }),
+            ctx.clientIp,
+          );
+        } catch {
+          // The record says what happened.
+        }
+        continue;
       }
       response.released.push(...lineIds);
+      releasedGroups.push({ recipients: g.recipients, lines: g.lines });
 
       try {
         await logAudit(
@@ -723,7 +846,11 @@ export async function releaseOrderDocuments(
     } catch (err) {
       console.error('[order-document-release] release failed:', err instanceof Error ? err.message : String(err));
       if (!mailed) {
-        // Nothing left the portal. Withdraw what was made and put the lines back.
+        // Before the hand-over nothing left the portal. After it, we do not
+        // know -- and the words say so. Either way the link is withdrawn.
+        const what = handedOver
+          ? 'The mail may not have been sent; the link was withdrawn.'
+          : 'The release could not be completed. Nothing was sent.';
         try {
           if (mintedLinkId) await revokeExportLink(db, mintedLinkId);
           await giveBack(lineIds);
@@ -734,7 +861,7 @@ export async function releaseOrderDocuments(
             )
             .bind(
               JSON.stringify([
-                { part_number: 1, ok: false, status: 0, error: 'The release could not be completed. Nothing was sent.', sent_at: null, attempts: 1 },
+                { part_number: 1, ok: false, status: 0, error: what, sent_at: null, attempts: 1 },
               ]),
               sendId,
             )
@@ -744,7 +871,12 @@ export async function releaseOrderDocuments(
         }
         for (const line of g.lines) {
           if (!response.refused.some((r) => r.order_document_id === line.row.id)) {
-            refuse(line, 'The release could not be completed, so this document is still waiting. Try again.');
+            refuse(
+              line,
+              handedOver
+                ? `${what} This document is still waiting. Try again.`
+                : 'The release could not be completed, so this document is still waiting. Try again.',
+            );
           }
         }
       } else if (!response.released.includes(lineIds[0])) {
@@ -765,6 +897,27 @@ export async function releaseOrderDocuments(
   }
 
   if (response.released.length > 0) response.order_status = await markDeliveredAfterRelease(db, order);
+  // THE PERSON WHO ASKED IS TOLD (C-070): one internal mail per act, per
+  // set of recipients -- never an outside address, never the releaser.
+  for (const g of releasedGroups) {
+    const told = await notifyRequesterOfDecision(db, ctx.apiKey, {
+      tenantId: order.tenant_id,
+      tenantName: ctx.tenantName,
+      appUrl: ctx.origin,
+      order: { id: order.id, order_number: order.order_number, customer_name: order.customer_name },
+      actor: { id: user.id, name: user.name ?? null, email: user.email },
+      decision: 'released',
+      recipients: g.recipients,
+      lines: g.lines.map(requesterLine),
+      clientIp: ctx.clientIp,
+    });
+    if (told) {
+      response.requester_notice = {
+        sent: (response.requester_notice?.sent ?? false) || told.sent,
+        recipients: [...(response.requester_notice?.recipients ?? []), ...told.recipients],
+      };
+    }
+  }
   if (producedSendIds.length > 0) {
     const sends = await loadOrderSends(db, user, { tenantId: order.tenant_id, orderId: order.id });
     const wanted = new Set(producedSendIds);
@@ -806,6 +959,8 @@ export async function refuseOrderDocument(
     documentId: unknown;
     pendingSendId: unknown;
     clientIp: string | null;
+    /** For the mail to the person who asked. Without a key nobody is mailed. */
+    notify?: { apiKey: string | undefined; origin: string; tenantName: string; actor: { id: string; name: string | null; email: string } };
   },
 ): Promise<void> {
   const note = typeof args.note === 'string' ? args.note.trim() : '';
@@ -855,4 +1010,37 @@ export async function refuseOrderDocument(
     }),
     args.clientIp,
   );
+  if (args.notify) {
+    const names = await db
+      .prepare(
+        `SELECT p.name AS product_name, s.name AS supplier_name, dt.name AS document_type_name, d.title AS document_title
+           FROM order_documents od
+           LEFT JOIN products p ON p.id = od.product_id AND p.tenant_id = od.tenant_id
+           LEFT JOIN suppliers s ON s.id = od.supplier_id AND s.tenant_id = od.tenant_id
+           LEFT JOIN document_types dt ON dt.id = od.document_type_id AND dt.tenant_id = od.tenant_id
+           LEFT JOIN documents d ON d.id = od.document_id AND d.tenant_id = od.tenant_id
+          WHERE od.id = ? AND od.tenant_id = ?`,
+      )
+      .bind(row.id, args.order.tenant_id)
+      .first<{ product_name: string | null; supplier_name: string | null; document_type_name: string | null; document_title: string | null }>();
+    await notifyRequesterOfDecision(db, args.notify.apiKey, {
+      tenantId: args.order.tenant_id,
+      tenantName: args.notify.tenantName,
+      appUrl: args.notify.origin,
+      order: { id: args.order.id, order_number: args.order.order_number, customer_name: args.order.customer_name },
+      actor: args.notify.actor,
+      decision: 'refused',
+      note,
+      lines: [
+        {
+          requested_by: row.pending_requested_by,
+          document_type_name: names?.document_type_name ?? null,
+          document_title: names?.document_title ?? null,
+          product_name: names?.product_name ?? null,
+          supplier_name: names?.supplier_name ?? null,
+        },
+      ],
+      clientIp: args.clientIp,
+    });
+  }
 }
