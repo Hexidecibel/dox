@@ -2,6 +2,24 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## KNOWN GAPS left by the sharing-rule re-review (2026-10-08)
+
+Found by the second adversarial review of 0137, none a path by which a locked file leaves today.
+
+- **The exit register misses an unlisted wrapper.** `tests/unit/exitRegister.scan.ts` sees a
+  reader function's definition but not a call that hands it a bucket a registered file already
+  holds (`readOriginal(files, key)` in `order-send.ts`, `kinds/coa.ts`, `document-export.ts`), and a
+  new file passing a property-held bucket to an unlisted wrapper is out of scope. Fix: fail when a
+  function with an `R2Bucket` parameter that reads is missing from `READER_FUNCTIONS`, and count
+  bucket names passed as arguments.
+- **A rejected or discarded duplicate arrival stays readable by an API key**
+  (`functions/api/queue/[id]/file.ts`): it has no documents and is not approved, so the staging
+  bytes of a duplicate of a locked document are served if the object is kept. Traced, not proven.
+- **Every worker file fetch now runs two extra queries**, one an `external_ref LIKE` that cannot use
+  an index. Fine at today's volume; measure before a large re-extraction.
+- **A link minted by a QA releaser while a document was free keeps serving it after it becomes
+  `qa`** (C-045 as written: the minter can release). The releaser never saw it as `qa`.
+
 ## KNOWN GAP: a login token in `?token=` is a 24-hour bearer URL to any file in the tenant (2026-10-08)
 
 **Not fixed, deliberately out of the sharing-rule batch (0137).** `functions/api/_middleware.ts`
