@@ -83,7 +83,9 @@ load_cred() {
   [ -n "${!key:-}" ] && return 0
   for f in .env .dev.vars; do
     [ -f "$f" ] || continue
-    val="$(grep "^${key}=" "$f" | head -1 | cut -d= -f2- | tr -d "\"'")"
+    # `|| true`: a key that is absent (browser login via `wrangler login` instead of
+    # a token) must not end the script under `set -e -o pipefail`.
+    val="$(grep "^${key}=" "$f" | head -1 | cut -d= -f2- | tr -d "\"'" || true)"
     if [ -n "$val" ]; then export "$key=$val"; return 0; fi
   done
 }
