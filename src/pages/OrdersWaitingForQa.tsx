@@ -22,7 +22,9 @@ import { EmptyState } from '../components/EmptyState';
 import { formatDateTime } from '../utils/format';
 import { SHARING_RULE_LABELS } from '../../shared/sharingRule';
 import { sharingRuleColor } from '../components/orders/OrderDocumentLines';
-import type { PendingOrderDocument, PendingOrderDocumentsResponse } from '../../shared/types';
+import { ReleaseDocumentsDialog, candidateFromPending } from '../components/orders/ReleaseDocumentsDialog';
+import { RELEASE_MAX_DOCUMENTS, announceQaWaitingChanged } from '../lib/qaWaiting';
+import type { OrderDocumentReleaseTarget, PendingOrderDocument, PendingOrderDocumentsResponse } from '../../shared/types';
 
 /**
  * Waiting for QA (migration 0138): every document held on an order because
@@ -47,6 +49,8 @@ export function OrdersWaitingForQa() {
   const [busy, setBusy] = useState(false);
   const [refusing, setRefusing] = useState<PendingOrderDocument | null>(null);
   const [note, setNote] = useState('');
+  // What QA is about to release: shown in full before anything is sent.
+  const [releasing, setReleasing] = useState<PendingOrderDocument[]>([]);
 
   const load = useCallback(
     (quiet = false) => {
@@ -64,12 +68,17 @@ export function OrdersWaitingForQa() {
     load();
   }, [load]);
 
-  const release = async (orderId: string, lineIds: string[]) => {
+  // The targets are what was on the screen: document, version and asking send
+  // for each line. The server releases a line only if they still hold; either
+  // way the list is reloaded, so a line that changed is shown as it is now.
+  const release = async (targets: OrderDocumentReleaseTarget[]) => {
+    const orderId = releasing[0]?.order_id;
+    if (!orderId) return;
     setBusy(true);
     setError('');
     setNotice('');
     try {
-      const res = await api.orders.releaseDocuments(orderId, lineIds);
+      const res = await api.orders.releaseDocuments(orderId, targets);
       const kept = res.refused.length;
       setNotice(
         `Released ${res.released.length} document${res.released.length === 1 ? '' : 's'} in one email.` +
@@ -77,6 +86,23 @@ export function OrdersWaitingForQa() {
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The release did not go through');
+    } finally {
+      setBusy(false);
+      setReleasing([]);
+      announceQaWaitingChanged();
+      load(true);
+    }
+  };
+
+  const giveBack = async (line: PendingOrderDocument) => {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await api.orders.giveBackDocument(line.order_id, line.id);
+      setNotice('Put back in the waiting list. The link from the unfinished release was withdrawn.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'That did not work');
     } finally {
       setBusy(false);
       load(true);
@@ -91,12 +117,16 @@ export function OrdersWaitingForQa() {
     setError('');
     setNotice('');
     try {
-      await api.orders.refuseDocument(line.order_id, line.id, note.trim());
+      await api.orders.refuseDocument(line.order_id, line.id, note.trim(), {
+        document_id: line.document_id ?? '',
+        pending_send_id: line.pending_send_id ?? '',
+      });
       setNotice('Refused. The note is on the order.');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The refusal did not go through');
     } finally {
       setBusy(false);
+      announceQaWaitingChanged();
       load(true);
     }
   };
@@ -172,10 +202,10 @@ export function OrdersWaitingForQa() {
                       variant="contained"
                       disabled={busy}
                       sx={{ textTransform: 'none' }}
-                      onClick={() => release(orderId, releasable.map((l) => l.id))}
+                      onClick={() => setReleasing(releasable)}
                       data-testid="waiting-release-all"
                     >
-                      Release all {releasable.length} in one email
+                      Review and release all {releasable.length}
                     </Button>
                   )}
                 </Stack>
@@ -198,20 +228,31 @@ export function OrdersWaitingForQa() {
                         <Chip size="small" variant="outlined" color={sharingRuleColor(line.sharing_rule)} label={SHARING_RULE_LABELS[line.sharing_rule]} />
                       )}
                       <Box sx={{ flex: 1 }} />
+                      {line.stuck && (
+                        <Button
+                          size="small"
+                          disabled={busy}
+                          sx={{ textTransform: 'none' }}
+                          onClick={() => giveBack(line)}
+                          data-testid="waiting-give-back"
+                        >
+                          Put back
+                        </Button>
+                      )}
                       <Button
                         size="small"
                         variant="outlined"
                         disabled={busy || !line.releasable}
                         sx={{ textTransform: 'none' }}
-                        onClick={() => release(orderId, [line.id])}
+                        onClick={() => setReleasing([line])}
                         data-testid="waiting-release"
                       >
-                        Release
+                        {line.release_status === 'releasing' ? 'Release again' : 'Release'}
                       </Button>
                       <Button
                         size="small"
                         color="error"
-                        disabled={busy}
+                        disabled={busy || line.release_status !== 'pending_qa'}
                         sx={{ textTransform: 'none' }}
                         onClick={() => {
                           setNote('');
@@ -226,6 +267,21 @@ export function OrdersWaitingForQa() {
                       <Link component={RouterLink} to={`/documents/${line.document_id}`} underline="hover" variant="caption">
                         {line.document_title ?? 'Open the document'}
                       </Link>
+                    )}
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }} data-testid="waiting-document-facts">
+                      {[
+                        line.version_number != null ? `Version ${line.version_number}` : null,
+                        line.document_approved_at ? `approved ${formatDateTime(line.document_approved_at)}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Typography>
+                    {line.release_status === 'releasing' && (
+                      <Typography variant="caption" sx={{ display: 'block', color: line.stuck ? 'error.main' : 'warning.dark' }} data-testid="waiting-releasing">
+                        {line.stuck
+                          ? 'A release of this document did not finish. It has not been recorded as sent. Release it again, or put it back.'
+                          : 'This document is being released right now.'}
+                      </Typography>
                     )}
                     {line.blocked_reason && (
                       <Typography variant="caption" sx={{ display: 'block', color: 'error.main' }} data-testid="waiting-blocked">
@@ -244,6 +300,16 @@ export function OrdersWaitingForQa() {
           })}
         </Stack>
       )}
+
+      <ReleaseDocumentsDialog
+        open={releasing.length > 0}
+        orderNumber={releasing[0]?.order_number}
+        candidates={releasing.map(candidateFromPending)}
+        busy={busy}
+        max={RELEASE_MAX_DOCUMENTS}
+        onClose={() => setReleasing([])}
+        onConfirm={release}
+      />
 
       <Dialog open={!!refusing} onClose={() => setRefusing(null)} maxWidth="sm" fullWidth>
         <DialogTitle>Refuse this document</DialogTitle>

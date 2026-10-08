@@ -31,7 +31,9 @@ import { api } from '../../lib/api';
 import { humanDay } from '../../../shared/orderSend';
 import { SHARING_RULE_LABELS, type SharingRule } from '../../../shared/sharingRule';
 import { RELEASE_STATUS_LABELS } from '../../../shared/orderDocuments';
-import type { ApiOrderDocument, OrderDocumentDisposition } from '../../../shared/types';
+import { RELEASE_MAX_DOCUMENTS, announceQaWaitingChanged } from '../../lib/qaWaiting';
+import { ReleaseDocumentsDialog, candidateFromOrderLine } from './ReleaseDocumentsDialog';
+import type { ApiOrderDocument, OrderDocumentDisposition, OrderDocumentReleaseTarget } from '../../../shared/types';
 
 /**
  * The document lines of an order (migration 0138): for each item and
@@ -51,6 +53,12 @@ export interface OrderDocumentLinesProps {
   documents: ApiOrderDocument[];
   /** Adding, removing and refreshing: any login, on an order that is not staged. */
   canBuild: boolean;
+  /**
+   * A read-only account: it may not remove or refresh a line that is waiting
+   * for QA, being released or released (the server refuses), so it is not
+   * offered those buttons on such a line.
+   */
+  readOnly?: boolean;
   /** The caller may release or refuse a document waiting for QA. */
   canRelease: boolean;
   onChanged: () => void;
@@ -75,6 +83,12 @@ const DISPOSITION_COLOR: Record<OrderDocumentDisposition, 'success' | 'warning' 
 /** The status chip: what QA decided when there is a decision, else what a send would do. */
 export function documentLineStatus(line: ApiOrderDocument): { label: string; color: 'success' | 'warning' | 'error' | 'default' } {
   if (line.release_status === 'pending_qa') return { label: RELEASE_STATUS_LABELS.pending_qa, color: 'warning' };
+  // Claimed and not recorded as sent: never worded as sent.
+  if (line.release_status === 'releasing') {
+    return line.release_stuck
+      ? { label: 'Release did not finish', color: 'error' }
+      : { label: RELEASE_STATUS_LABELS.releasing, color: 'warning' };
+  }
   if (line.release_status === 'refused') return { label: RELEASE_STATUS_LABELS.refused, color: 'error' };
   if (line.release_status === 'released') return { label: RELEASE_STATUS_LABELS.released, color: 'success' };
   if (line.disposition === 'will_not_go') {
@@ -87,12 +101,35 @@ export function documentLineStatus(line: ApiOrderDocument): { label: string; col
   return { label: DISPOSITION_LABEL[line.disposition], color: DISPOSITION_COLOR[line.disposition] };
 }
 
-export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, onChanged, onOpenDocument }: OrderDocumentLinesProps) {
+export function OrderDocumentLines({ orderId, documents, canBuild, readOnly = false, canRelease, onChanged, onOpenDocument }: OrderDocumentLinesProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [refusing, setRefusing] = useState<ApiOrderDocument | null>(null);
   const [note, setNote] = useState('');
+  // Release goes through a last look at exactly what is being approved.
+  const [releasing, setReleasing] = useState<ApiOrderDocument[]>([]);
+
+  const confirmRelease = async (targets: OrderDocumentReleaseTarget[]) => {
+    setBusy('release');
+    setError('');
+    setNotice('');
+    try {
+      const res = await api.orders.releaseDocuments(orderId, targets);
+      setNotice(
+        `Released ${res.released.length} document${res.released.length === 1 ? '' : 's'} in one email.` +
+          (res.refused.length > 0 ? ` ${res.refused.length} not released: ${res.refused[0].reason}` : ''),
+      );
+    } catch (e) {
+      // Includes "changed since you opened it": the reload below shows what is there now.
+      setError(e instanceof Error ? e.message : 'The release did not go through');
+    } finally {
+      setBusy(null);
+      setReleasing([]);
+      announceQaWaitingChanged();
+      onChanged();
+    }
+  };
 
   const act = async (lineId: string, run: () => Promise<unknown>, done?: string) => {
     setBusy(lineId);
@@ -111,6 +148,8 @@ export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, o
   };
 
   const waiting = documents.filter((d) => d.release_status === 'pending_qa');
+  const canBeReleased = (d: ApiOrderDocument) =>
+    d.release_status === 'pending_qa' || (d.release_status === 'releasing' && d.release_stuck);
 
   return (
     <Box sx={{ mb: 3 }} data-testid="order-document-lines">
@@ -134,16 +173,10 @@ export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, o
               size="small"
               sx={{ textTransform: 'none' }}
               disabled={busy !== null}
-              onClick={() =>
-                act(
-                  'all',
-                  () => api.orders.releaseDocuments(orderId, waiting.map((d) => d.id)),
-                  'Released. The documents were sent in one email.',
-                )
-              }
+              onClick={() => setReleasing(waiting)}
               data-testid="order-documents-release-all"
             >
-              Release all {waiting.length}
+              Review and release all {waiting.length}
             </Button>
           }
         >
@@ -255,20 +288,36 @@ export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, o
                     )}
                   </TableCell>
                   <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                    {canRelease && line.release_status === 'releasing' && line.release_stuck && (
+                      <Button
+                        size="small"
+                        sx={{ textTransform: 'none', mr: 0.5 }}
+                        disabled={busy !== null}
+                        onClick={() =>
+                          act(line.id, async () => {
+                            await api.orders.giveBackDocument(orderId, line.id);
+                            announceQaWaitingChanged();
+                          }, 'Put back in the waiting list. The link from the unfinished release was withdrawn.')
+                        }
+                        data-testid="order-document-give-back"
+                      >
+                        Put back
+                      </Button>
+                    )}
+                    {canRelease && canBeReleased(line) && (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        sx={{ textTransform: 'none', mr: 0.5 }}
+                        disabled={busy !== null}
+                        onClick={() => setReleasing([line])}
+                        data-testid="order-document-release"
+                      >
+                        {line.release_status === 'releasing' ? 'Release again' : 'Release'}
+                      </Button>
+                    )}
                     {canRelease && line.release_status === 'pending_qa' && (
                       <>
-                        <Button
-                          size="small"
-                          variant="contained"
-                          sx={{ textTransform: 'none', mr: 0.5 }}
-                          disabled={busy !== null}
-                          onClick={() =>
-                            act(line.id, () => api.orders.releaseDocuments(orderId, [line.id]), 'Released and sent.')
-                          }
-                          data-testid="order-document-release"
-                        >
-                          Release
-                        </Button>
                         <Button
                           size="small"
                           color="error"
@@ -284,7 +333,7 @@ export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, o
                         </Button>
                       </>
                     )}
-                    {canBuild && (
+                    {canBuild && !(readOnly && ['pending_qa', 'releasing', 'released'].includes(line.release_status)) && (
                       <>
                         <Tooltip title="Look again for the current document">
                           <span>
@@ -322,6 +371,15 @@ export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, o
         </Table>
       </TableContainer>
 
+      <ReleaseDocumentsDialog
+        open={releasing.length > 0}
+        candidates={releasing.map(candidateFromOrderLine)}
+        busy={busy === 'release'}
+        max={RELEASE_MAX_DOCUMENTS}
+        onClose={() => setReleasing([])}
+        onConfirm={confirmRelease}
+      />
+
       <Dialog open={!!refusing} onClose={() => setRefusing(null)} maxWidth="sm" fullWidth>
         <DialogTitle>Refuse this document</DialogTitle>
         <DialogContent>
@@ -355,7 +413,14 @@ export function OrderDocumentLines({ orderId, documents, canBuild, canRelease, o
               const line = refusing;
               if (!line) return;
               setRefusing(null);
-              void act(line.id, () => api.orders.refuseDocument(orderId, line.id, note.trim()));
+              void act(line.id, async () => {
+                // What QA saw goes with the refusal, as it does with a release.
+                await api.orders.refuseDocument(orderId, line.id, note.trim(), {
+                  document_id: line.document_id ?? '',
+                  pending_send_id: line.pending_send_id ?? '',
+                });
+                announceQaWaitingChanged();
+              });
             }}
             data-testid="order-document-refuse-confirm"
           >

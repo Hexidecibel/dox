@@ -48,6 +48,7 @@ vi.mock('../../lib/api', () => {
     refreshDocument: vi.fn(),
     releaseDocuments: vi.fn(),
     refuseDocument: vi.fn(),
+    giveBackDocument: vi.fn(),
     approvedList: vi.fn(),
     typesList: vi.fn(),
     pending: vi.fn(),
@@ -64,6 +65,7 @@ vi.mock('../../lib/api', () => {
         refreshDocument: m.refreshDocument,
         releaseDocuments: m.releaseDocuments,
         refuseDocument: m.refuseDocument,
+        giveBackDocument: m.giveBackDocument,
         addItems: vi.fn(),
         update: vi.fn(),
         delete: vi.fn(),
@@ -124,8 +126,12 @@ function docLine(over: Partial<ApiOrderDocument> = {}): ApiOrderDocument {
     rule_at_resolve: 'free',
     sharing_rule: 'free',
     release_status: 'none',
+    pending_send_id: null,
     pending_at: null,
     pending_requested_by_name: null,
+    pending_recipients: [],
+    document_approved_at: '2026-06-01 09:00:00',
+    release_stuck: false,
     decided_by_name: null,
     decided_at: null,
     decision_note: null,
@@ -152,6 +158,7 @@ beforeEach(() => {
   mocks.removeDocument.mockResolvedValue({ success: true });
   mocks.refreshDocument.mockResolvedValue({ changed: true, document: null });
   mocks.refuseDocument.mockResolvedValue({ success: true });
+  mocks.giveBackDocument.mockResolvedValue({ success: true });
   mocks.releaseDocuments.mockResolvedValue({ released: ['dl1'], refused: [], sends: [], order_status: 'pending' });
   mocks.typesList.mockResolvedValue({ documentTypes: [] });
   mocks.approvedList.mockResolvedValue({ items: [], total: 0, counts: { approved: 0, pending: 0, not_approved: 0 }, limit: 100, offset: 0 });
@@ -230,8 +237,18 @@ describe('OrderDocumentLines', () => {
     expect(screen.queryByTestId('order-document-remove')).not.toBeInTheDocument();
   });
 
+  const WAITING = {
+    sharing_rule: 'qa' as const,
+    release_status: 'pending_qa' as const,
+    disposition: 'waits_for_qa' as const,
+    pending_send_id: 'send-1',
+    pending_at: '2026-10-08 11:00:00',
+    pending_requested_by_name: 'Dana Reid',
+    pending_recipients: ['buyer@harborbakery.example'],
+  };
+
   it('offers Release and Refuse only to a person who may, and only on a waiting line', async () => {
-    const waiting = docLine({ sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' });
+    const waiting = docLine(WAITING);
     const { rerender } = render(wrap(<OrderDocumentLines {...props} documents={[waiting]} />));
     expect(screen.queryByTestId('order-document-release')).not.toBeInTheDocument();
     expect(screen.queryByTestId('order-document-refuse')).not.toBeInTheDocument();
@@ -241,7 +258,51 @@ describe('OrderDocumentLines', () => {
 
     rerender(wrap(<OrderDocumentLines {...props} canRelease documents={[waiting]} />));
     await userEvent.click(screen.getByTestId('order-document-release'));
-    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', ['dl1']);
+    // Nothing is released by the first click: QA is shown exactly what it is.
+    expect(mocks.releaseDocuments).not.toHaveBeenCalled();
+    const candidate = await screen.findByTestId('release-candidate');
+    expect(candidate).toHaveTextContent('Cream cheese specification');
+    expect(candidate).toHaveTextContent('Spec Sheet · version 1 · approved');
+    expect(candidate).toHaveTextContent('For Cream Cheese 3 lb · Northfield Creamery');
+    expect(candidate).toHaveTextContent('Asked by Dana Reid');
+    expect(within(candidate).getByTestId('release-candidate-recipients')).toHaveTextContent('Goes to buyer@harborbakery.example');
+
+    await userEvent.click(screen.getByTestId('release-confirm'));
+    // The release carries what was on the screen, not just the line id.
+    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', [
+      { id: 'dl1', document_id: 'd1', version_number: 1, pending_send_id: 'send-1' },
+    ]);
+  });
+
+  it('a release that did not finish is never worded as sent, and can be released again or put back', async () => {
+    const stuck = docLine({ ...WAITING, release_status: 'releasing', release_stuck: true, disposition_text: 'A release of this document did not finish.' });
+    const { rerender } = render(wrap(<OrderDocumentLines {...props} canRelease documents={[stuck]} />));
+    expect(screen.getByTestId('order-document-status')).toHaveTextContent('Release did not finish');
+    expect(screen.getByTestId('order-document-status')).not.toHaveTextContent('Sent');
+    expect(screen.getByTestId('order-document-release')).toHaveTextContent('Release again');
+    expect(screen.queryByTestId('order-document-refuse')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('order-document-give-back'));
+    expect(mocks.giveBackDocument).toHaveBeenCalledWith('o1', 'dl1');
+
+    // One in progress offers nothing.
+    rerender(wrap(<OrderDocumentLines {...props} canRelease documents={[docLine({ ...WAITING, release_status: 'releasing', release_stuck: false })]} />));
+    expect(screen.getByTestId('order-document-status')).toHaveTextContent('Being released');
+    expect(screen.queryByTestId('order-document-release')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('order-document-give-back')).not.toBeInTheDocument();
+  });
+
+  it('a read-only account is not offered remove or refresh on a line that is waiting or released', () => {
+    render(
+      wrap(
+        <OrderDocumentLines
+          {...props}
+          readOnly
+          documents={[docLine({ id: 'a' }), docLine({ ...WAITING, id: 'b' }), docLine({ ...WAITING, id: 'c', release_status: 'released' })]}
+        />,
+      ),
+    );
+    expect(screen.getAllByTestId('order-document-remove')).toHaveLength(1);
+    expect(screen.getAllByTestId('order-document-refresh')).toHaveLength(1);
   });
 
   it('a refusal needs a note before it can be sent', async () => {
@@ -251,7 +312,7 @@ describe('OrderDocumentLines', () => {
         <OrderDocumentLines
           {...props}
           canRelease
-          documents={[docLine({ sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' })]}
+          documents={[docLine(WAITING)]}
         />,
       ),
     );
@@ -259,15 +320,23 @@ describe('OrderDocumentLines', () => {
     expect(screen.getByTestId('order-document-refuse-confirm')).toBeDisabled();
     await user.type(screen.getByTestId('order-document-refuse-note'), 'Superseded. Ask for the 2026 plan.');
     await user.click(screen.getByTestId('order-document-refuse-confirm'));
-    expect(mocks.refuseDocument).toHaveBeenCalledWith('o1', 'dl1', 'Superseded. Ask for the 2026 plan.');
+    expect(mocks.refuseDocument).toHaveBeenCalledWith('o1', 'dl1', 'Superseded. Ask for the 2026 plan.', {
+      document_id: 'd1',
+      pending_send_id: 'send-1',
+    });
   });
 
   it('releases several waiting documents of one order in one act', async () => {
-    const waiting = (id: string) => docLine({ id, sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' });
+    const waiting = (id: string) => docLine({ ...WAITING, id, document_id: `doc-${id}` });
     render(wrap(<OrderDocumentLines {...props} canRelease documents={[waiting('a'), waiting('b'), docLine({ id: 'c' })]} />));
     await userEvent.click(screen.getByTestId('order-documents-release-all'));
+    expect(await screen.findAllByTestId('release-candidate')).toHaveLength(2);
+    await userEvent.click(screen.getByTestId('release-confirm'));
     expect(mocks.releaseDocuments).toHaveBeenCalledTimes(1);
-    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', ['a', 'b']);
+    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', [
+      { id: 'a', document_id: 'doc-a', version_number: 1, pending_send_id: 'send-1' },
+      { id: 'b', document_id: 'doc-b', version_number: 1, pending_send_id: 'send-1' },
+    ]);
   });
 });
 
@@ -565,6 +634,28 @@ describe('OrderSendHistory with document orders', () => {
     expect(screen.getByTestId('order-send-qa-request')).toHaveTextContent('Nothing was sent to the customer');
   });
 
+  it('a release whose outcome was never recorded says exactly that, not "sent" and not "not sent"', () => {
+    render(
+      wrap(
+        <OrderSendHistory
+          sends={[record({ status: 'partial', parts: [{ part_number: 1, ok: false, status: 0, error: 'The email was handed to the mail provider and its outcome was not recorded. This release did not finish.', sent_at: null, attempts: 1 }] })]}
+        />,
+      ),
+    );
+    const card = screen.getByTestId('order-send-card');
+    expect(card).toHaveTextContent('Release did not finish');
+    expect(card).toHaveTextContent('it is not known whether the email reached the customer');
+    expect(card).not.toHaveTextContent('Released by QA');
+    expect(screen.queryByTestId('order-send-resend')).not.toBeInTheDocument();
+  });
+
+  it('a file a resend left out says why', () => {
+    const r = record({ kind: 'send' });
+    r.files[0] = { ...r.files[0], sent_ok: false, not_sent_reason: 'Hazard-plan_1.pdf was not sent again: QA has since refused it for this order.' };
+    render(wrap(<OrderSendHistory sends={[r]} />));
+    expect(screen.getByTestId('order-send-file-withdrawn')).toHaveTextContent('QA has since refused it for this order');
+  });
+
   it('a failed release says the documents wait again, and offers no resend', () => {
     render(
       wrap(
@@ -628,6 +719,7 @@ describe('OrdersWaitingForQa', () => {
       id: 'dl2', order_id: 'o1', order_number: 'DO-41', customer_name: 'Harbor Bakery',
       product_name: 'Cream Cheese 3 lb', supplier_name: 'Northfield Creamery', facility_name: 'Plant 2',
       document_type_name: 'HACCP Plan', document_id: 'd2', document_title: 'Hazard plan', document_status: 'active',
+      version_number: 3, document_approved_at: '2026-06-01 09:00:00', pending_send_id: 'send-9', release_status: 'pending_qa', stuck: false,
       sharing_rule: 'qa', requested_by_name: 'Dana Reid', requested_at: '2026-10-08 11:00:00',
       recipients: ['buyer@harborbakery.example'], private_label: false, advisory: null, releasable: true, blocked_reason: null,
       ...over,
@@ -657,12 +749,29 @@ describe('OrdersWaitingForQa', () => {
     expect(screen.getByTestId('waiting-blocked')).toHaveTextContent('locked now');
     expect(screen.getAllByTestId('waiting-release')[2]).toBeDisabled();
 
-    // Released together, the releasable ones go in one call.
+    // Each line shows the version and approval date of the document a release would send.
+    expect(screen.getAllByTestId('waiting-document-facts')[0]).toHaveTextContent('Version 3 · approved');
+
+    // Released together, the releasable ones go in one call -- after a look at
+    // exactly what is being approved, and carrying it.
     mocks.releaseDocuments.mockResolvedValue({ released: ['dl2', 'dl5'], refused: [], sends: [], order_status: 'pending' });
     await userEvent.click(screen.getByTestId('waiting-release-all'));
+    expect(mocks.releaseDocuments).not.toHaveBeenCalled();
+    const candidates = await screen.findAllByTestId('release-candidate');
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]).toHaveTextContent('Hazard plan');
+    expect(candidates[0]).toHaveTextContent('HACCP Plan · version 3 · approved');
+    expect(candidates[0]).toHaveTextContent('Asked by Dana Reid');
+    expect(candidates[0]).toHaveTextContent('Goes to buyer@harborbakery.example');
+    await userEvent.click(screen.getByTestId('release-confirm'));
     expect(mocks.releaseDocuments).toHaveBeenCalledTimes(1);
-    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', ['dl2', 'dl5']);
+    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', [
+      { id: 'dl2', document_id: 'd2', version_number: 3, pending_send_id: 'send-9' },
+      { id: 'dl5', document_id: 'd2', version_number: 3, pending_send_id: 'send-9' },
+    ]);
     expect(await screen.findByText(/Released 2 documents in one email/)).toBeInTheDocument();
+    // The list is read again afterwards, whatever happened.
+    expect(mocks.pending.mock.calls.length).toBeGreaterThan(1);
   });
 
   it('refusing needs a note', async () => {
@@ -673,7 +782,41 @@ describe('OrdersWaitingForQa', () => {
     expect(screen.getByTestId('waiting-refuse-confirm')).toBeDisabled();
     await user.type(screen.getByTestId('waiting-refuse-note'), 'Not this revision.');
     await user.click(screen.getByTestId('waiting-refuse-confirm'));
-    expect(mocks.refuseDocument).toHaveBeenCalledWith('o1', 'dl2', 'Not this revision.');
+    expect(mocks.refuseDocument).toHaveBeenCalledWith('o1', 'dl2', 'Not this revision.', {
+      document_id: 'd2',
+      pending_send_id: 'send-9',
+    });
+  });
+
+  it('a line that changed since the list was opened is said, and the list reloads', async () => {
+    mocks.pending.mockResolvedValue({ can_release: true, count: 1, lines: [pendingLine()] });
+    mocks.releaseDocuments.mockRejectedValue(new Error('This document line changed since you opened it, so nothing was released. Reload the list and look at it again.'));
+    render(wrap(<OrdersWaitingForQa />));
+    await userEvent.click(await screen.findByTestId('waiting-release'));
+    await userEvent.click(await screen.findByTestId('release-confirm'));
+    expect(await screen.findByText(/changed since you opened it/)).toBeInTheDocument();
+    await waitFor(() => expect(mocks.pending.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('more than one release carries is refused on the screen before anything is asked', async () => {
+    const many = Array.from({ length: 51 }, (_, i) => pendingLine({ id: `l${i}` }));
+    mocks.pending.mockResolvedValue({ can_release: true, count: 51, lines: many });
+    render(wrap(<OrdersWaitingForQa />));
+    await userEvent.click(await screen.findByTestId('waiting-release-all'));
+    expect(await screen.findByTestId('release-too-many')).toHaveTextContent('at most 50 documents');
+    expect(screen.getByTestId('release-confirm')).toBeDisabled();
+    expect(mocks.releaseDocuments).not.toHaveBeenCalled();
+  });
+
+  it('a release that did not finish is shown as that, with Release again and Put back', async () => {
+    mocks.pending.mockResolvedValue({ can_release: true, count: 1, lines: [pendingLine({ release_status: 'releasing', stuck: true })] });
+    render(wrap(<OrdersWaitingForQa />));
+    expect(await screen.findByTestId('waiting-releasing')).toHaveTextContent('did not finish');
+    expect(screen.getByTestId('waiting-releasing')).toHaveTextContent('not been recorded as sent');
+    expect(screen.getByTestId('waiting-release')).toHaveTextContent('Release again');
+    expect(screen.getByTestId('waiting-refuse')).toBeDisabled();
+    await userEvent.click(screen.getByTestId('waiting-give-back'));
+    expect(mocks.giveBackDocument).toHaveBeenCalledWith('o1', 'dl2');
   });
 
   it('tells somebody who cannot release that it is not theirs to do, and offers no button', async () => {

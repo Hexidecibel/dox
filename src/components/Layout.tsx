@@ -42,6 +42,7 @@ import { NotificationsBell } from './NotificationsBell';
 import { SetupBanner } from './SetupPrompt';
 import { navGroupsForRole, pinnedNavSurfaces } from '../lib/surfaces';
 import { api } from '../lib/api';
+import { QA_WAITING_CHANGED, QA_WAITING_POLL_MS } from '../lib/qaWaiting';
 import type { Surface } from '../lib/surfaces';
 
 const DRAWER_WIDTH = 260;
@@ -130,9 +131,14 @@ export function Layout() {
   // "Waiting for QA" (migration 0138) is drawn only for a person who can
   // release, with the number waiting. Who that is cannot be read off the role
   // (a QA releaser is an ordinary user named on a route), so the server is
-  // asked -- and only when the role's rail has such an entry at all. Asked
-  // again on navigation, so the number moves after a release. A failure
-  // leaves the entry hidden: the page itself is still reachable by URL.
+  // asked -- and only when the role's rail has such an entry at all.
+  //
+  // ONE CHEAP COUNT, ON A TIMER. `?count=1` is a single COUNT; the list's live
+  // judgement of every waiting line is for the page, not the rail. Asked on
+  // mount and every three minutes, the notification bell's own cadence -- NOT
+  // on every navigation. The waiting page and the order page announce a
+  // release or a refusal (`QA_WAITING_CHANGED`) so the number moves at once.
+  // A failure leaves the entry hidden: the page is still reachable by URL.
   const wantsQaWaiting = useMemo(
     () => roleGroups.some((g) => g.items.some((s) => s.nav?.requires === 'qa_release')),
     [roleGroups]
@@ -144,18 +150,25 @@ export function Layout() {
       return;
     }
     let cancelled = false;
-    api.orderDocuments
-      .pending({ tenant_id: selectedTenantId || undefined })
-      .then((r) => {
-        if (!cancelled) setQaWaiting({ canRelease: r.can_release, count: r.count });
-      })
-      .catch(() => {
-        if (!cancelled) setQaWaiting({ canRelease: false, count: 0 });
-      });
+    const ask = () => {
+      api.orderDocuments
+        .pendingCount({ tenant_id: selectedTenantId || undefined })
+        .then((r) => {
+          if (!cancelled) setQaWaiting({ canRelease: r.can_release, count: r.count });
+        })
+        .catch(() => {
+          if (!cancelled) setQaWaiting({ canRelease: false, count: 0 });
+        });
+    };
+    ask();
+    const timer = window.setInterval(ask, QA_WAITING_POLL_MS);
+    window.addEventListener(QA_WAITING_CHANGED, ask);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener(QA_WAITING_CHANGED, ask);
     };
-  }, [wantsQaWaiting, selectedTenantId, location.pathname]);
+  }, [wantsQaWaiting, selectedTenantId]);
 
   const navGroups = useMemo(
     () =>

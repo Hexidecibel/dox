@@ -88,7 +88,15 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
                 <Chip
                   size="small"
                   color={STATUS_COLOR[s.status]}
-                  label={kind === 'qa_release' ? (s.status === 'sent' ? 'Released by QA' : 'Release not sent') : STATUS_LABEL[s.status]}
+                  label={
+                    kind === 'qa_release'
+                      ? s.status === 'sent'
+                        ? 'Released by QA'
+                        : s.status === 'partial'
+                          ? 'Release did not finish'
+                          : 'Release not sent'
+                      : STATUS_LABEL[s.status]
+                  }
                 />
               )}
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
@@ -125,6 +133,11 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
 
             {s.files.map((f) => (
               <Typography key={f.position} variant="caption" sx={{ display: 'block', color: f.sent_ok ? 'text.primary' : 'error.main' }}>
+                {f.not_sent_reason && (
+                  <Box component="span" sx={{ display: 'block' }} data-testid="order-send-file-withdrawn">
+                    {f.not_sent_reason}
+                  </Box>
+                )}
                 {f.sent_ok ? '✓' : '✗'} {f.file_name} · {humanBytes(f.bytes)} ·{' '}
                 {describeDelivery(f)} ·{' '}
                 {f.source === 'original' ? 'the whole certificate' : 'the document on file'}
@@ -152,7 +165,9 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
                   ) : undefined
                 }
               >
-                {kind === 'qa_release'
+                {kind === 'qa_release' && s.status === 'partial'
+                  ? 'This release did not finish, and it is not known whether the email reached the customer. The documents show as "release did not finish" until QA releases them again or puts them back.'
+                  : kind === 'qa_release'
                   ? 'The release email did not go, so nothing reached the customer. The documents are waiting for QA again.'
                   : failedParts.length === s.part_count
                   ? 'Nothing reached the customer.'

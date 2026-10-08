@@ -555,6 +555,7 @@ export function OrderDetail() {
             orderId={order.id}
             documents={documents}
             canBuild={canBuildDocuments}
+            readOnly={isReader}
             canRelease={canReleaseQa}
             onChanged={reload}
             onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
