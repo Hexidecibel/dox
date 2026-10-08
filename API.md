@@ -2133,7 +2133,9 @@ supplier. Module-gated under `fulfillment` (`/api/orders`, `/api/order-documents
 are open to every role, a read-only account included (a reader still may not
 send, put COA lines on an order, or edit its header). Two limits on a
 read-only account: it may not remove or refresh a line that is waiting for QA,
-being released or released (403), and it opens at most 20 orders an hour (429). Sending keeps its bar,
+released or refused (403), and it opens at most 20 orders an hour (429).
+Nobody, whatever their role, removes or refreshes a line in the middle of a
+release (409): it is released again or put back first. Sending keeps its bar,
 `user` and above. Releasing is a QA releaser's act and never an API key's.
 
 **`POST /api/orders/:id/documents`** -- body `{ items: [{ product_id,
@@ -2220,7 +2222,11 @@ and `POST /api/orders/:id/send` executes exactly that:
   active or has a new version, is left out of the retried email. The response
   lists it in `not_resent[]` (`file_name`, `reason`), the file record carries
   `not_sent_reason`, and the rest of the email still goes. An email with
-  nothing left sends nothing and never marks the order delivered.
+  nothing left sends nothing, is recorded `withdrawn: true` (not `ok`), and
+  never marks the order delivered. Every send carries **`outcome`**: `sent` /
+  `partial` / `failed` as `status`, plus `withdrawn` (nothing left at all;
+  stored `failed`) and `sent_rest_withdrawn` (some emails went, the rest were
+  withdrawn; stored `partial`). Neither can be resent (409).
 
 The response carries `documents: { sent, pending_qa, not_sent, qa_notice }`.
 
@@ -2246,7 +2252,15 @@ and its `order_sends` record at `partial` with "outcome not recorded". After
 five minutes it can be released again, or put back with
 **`POST /api/orders/:id/documents/:lineId/give-back`**; both first revoke the
 link the unfinished attempt minted. `refused[].code` is `changed`,
-`in_progress` or `unfinished` where one applies. Lines bound
+`in_progress`, `unfinished` or `undone` where one applies. **A release is
+recorded as sent only if it is still that release when its mail returns**: if
+somebody put it back meanwhile, the line is refused with `code: "undone"`, the
+record's part carries `code: "undone"` and `undone_by_name`, and nothing is
+listed as released. The release waits at most 60 seconds for the mail
+provider; a timeout is "outcome not recorded" (`unfinished`), and a call that
+never completed says "the mail may not have been sent; the link was
+withdrawn". The person who pressed the asking send is told by one internal
+email (`requester_notice` in the response); a refusal tells them too. Lines bound
 for the same recipients leave on **one 30-day link in one email**, minted in
 the **releaser's** name (a link serves a `qa` document only while its minter
 may release, C-045), addressed to the recipients **of the send that asked**
@@ -2272,7 +2286,9 @@ mail, the advisory, `releasable` / `blocked_reason`, and what a release is
 pinned to: `version_number`, `document_approved_at`, `pending_send_id`. A line
 whose release did not finish is listed too (`release_status: "releasing"`,
 `stuck`). A person who cannot release gets `{ can_release: false, count: 0,
-lines: [] }`. **`?count=1`** answers `{ can_release, count }` from one COUNT
+lines: [] }`. Each line carries `earlier_refusals[]` (who, when, the note)
+when QA refused the same item, supplier and type on that order before the line
+was taken off and asked for again. **`?count=1`** answers `{ can_release, count }` from one COUNT
 and no lines; it is what the navigation polls.
 
 **The private-label advisory.** A line whose item has a brand owner and a

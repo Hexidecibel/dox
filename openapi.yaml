@@ -5476,6 +5476,10 @@ paths:
                       subject: { type: string }
                       part_count: { type: integer }
                       can_resend: { type: boolean }
+                      outcome:
+                        type: string
+                        enum: [sent, partial, failed, withdrawn, sent_rest_withdrawn]
+                        description: "What to call the result. withdrawn = nothing left at all, every email's files were withdrawn on a resend (stored status failed); sent_rest_withdrawn = some emails went and the rest were withdrawn (stored status partial). Neither can be resent."
                       kind:
                         type: string
                         enum: [send, qa_request, qa_release]
@@ -5655,7 +5659,9 @@ paths:
         - { name: lineId, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Removed }
+        '403': { description: "A read-only account, on a line that is waiting for QA, released or refused" }
         '404': { description: No such order or line in this organization }
+        '409': { description: "The line is in the middle of a release; release it again or put it back first" }
 
   /api/orders/{id}/documents/{lineId}/refresh:
     post:
@@ -5738,8 +5744,8 @@ paths:
                         reason: { type: string }
                         code:
                           type: string
-                          enum: [changed, in_progress, unfinished]
-                          description: "changed = not what QA saw any more; in_progress = being released right now; unfinished = the email went and the record could not be written."
+                          enum: [changed, in_progress, unfinished, undone]
+                          description: "changed = not what QA saw any more; in_progress = being released right now; unfinished = the outcome of the email was not recorded; undone = somebody put the release back while its mail was going out, and its link was withdrawn."
                   order_status: { type: string }
                   sends: { type: array, items: { type: object } }
         '403': { description: Not a QA releaser, a read-only account, or an API key }
@@ -5864,6 +5870,16 @@ paths:
                         advisory: { type: string, nullable: true }
                         releasable: { type: boolean }
                         blocked_reason: { type: string, nullable: true }
+                        earlier_refusals:
+                          type: array
+                          description: QA refused the same item, supplier and type on this order before the line was taken off and asked for again.
+                          items:
+                            type: object
+                            properties:
+                              by_name: { type: string, nullable: true }
+                              at: { type: string, nullable: true }
+                              note: { type: string }
+                              document_id: { type: string, nullable: true }
 
   /api/document-exports/links/{id}/revoke:
     post:
