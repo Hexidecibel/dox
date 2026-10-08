@@ -145,3 +145,81 @@ describe('queue file falls back to the produced document', () => {
     expect([403, 404]).toContain(res.status);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The sharing rule (migration 0137): the fallback serves an APPROVED DOCUMENT,
+// so an API key reads it only when that document is "send freely". The staging
+// file is not a document and is what intake reads, so a key always reads that.
+// ---------------------------------------------------------------------------
+describe('the sharing rule on the queue file route', () => {
+  function keyContext(queueId: string): any {
+    const ctx = fileContext(queueId);
+    ctx.data.authMethod = 'api_key';
+    ctx.data.apiKeyId = 'worker-key';
+    return ctx;
+  }
+
+  async function coaTypeId(): Promise<string> {
+    const id = generateTestId();
+    await db
+      .prepare('INSERT INTO document_types (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+      .bind(id, seed.tenantId, 'Certificate of Analysis', `coa-${id.slice(0, 6)}`)
+      .run();
+    return id;
+  }
+
+  it('a key always reads the staging file: that read is intake, whatever came of the item', async () => {
+    const id = await makeQueueItem({ stagingExists: true });
+    // Even with an untyped (locked) document already produced from it.
+    await makeProducedDocument(id, '', ORIGINAL);
+
+    const res = await getQueueFile(keyContext(id));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-File-Source')).toBe('queue');
+    expect(await res.text()).toBe(ORIGINAL);
+  });
+
+  it('a key is refused the fallback for a document that is not "send freely", and a person is not', async () => {
+    const id = await makeQueueItem({ stagingExists: false });
+    // makeProducedDocument writes no type: unclassified, so locked.
+    await makeProducedDocument(id, '', ORIGINAL);
+
+    const refused = await getQueueFile(keyContext(id));
+    expect(refused.status).toBe(403);
+    const body = (await refused.json()) as { code: string; reason: string };
+    expect(body).toMatchObject({ code: 'sharing_rule_refused', reason: 'locked' });
+
+    const person = await getQueueFile(fileContext(id));
+    expect(person.status).toBe(200);
+    expect(await person.text()).toBe(ORIGINAL);
+  });
+
+  it('a key reads the fallback once the document is a COA -- the replay harness keeps working', async () => {
+    const id = await makeQueueItem({ stagingExists: false });
+    await makeProducedDocument(id, '', ORIGINAL);
+    await db
+      .prepare(`UPDATE documents SET document_type_id = ? WHERE external_ref = ?`)
+      .bind(await coaTypeId(), `queue-${id}`)
+      .run();
+
+    const res = await getQueueFile(keyContext(id));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-File-Source')).toBe('document');
+    expect(await res.text()).toBe(ORIGINAL);
+  });
+
+  it('one page-scoped slice is held to the strictest rule of every document cut from the item', async () => {
+    const id = await makeQueueItem({ stagingExists: false });
+    await makeProducedDocument(id, '-lot1', SCOPED);
+    await makeProducedDocument(id, '-lot2', SCOPED + ' plus a little more');
+    const coa = await coaTypeId();
+    // Only ONE of the two is typed; the other is still unclassified.
+    await db.prepare(`UPDATE documents SET document_type_id = ? WHERE external_ref = ?`).bind(coa, `queue-${id}-lot2`).run();
+    expect((await getQueueFile(keyContext(id))).status).toBe(403);
+
+    await db.prepare(`UPDATE documents SET document_type_id = ? WHERE external_ref = ?`).bind(coa, `queue-${id}-lot1`).run();
+    const res = await getQueueFile(keyContext(id));
+    expect(res.status).toBe(200);
+    await res.text();
+  });
+});

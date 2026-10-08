@@ -27,6 +27,13 @@
  * Worker, so it has a real ceiling; an export over it is REFUSED with the cap
  * in the message, never quietly truncated to the first N files. A truncated
  * compliance package that looks complete is the worst outcome available here.
+ *
+ * THE SHARING RULE IS ASKED HERE (decision C-003, migration 0137).
+ * `loadExportDocuments` is the one reader behind the ZIP, the emailed link,
+ * the public link and the order send, and it will not hand back a row without
+ * being told WHICH EXIT is asking and WHO is asking: the argument is required,
+ * so a new caller cannot forget it. A document the rule keeps back is returned
+ * in `refused` with its reason -- stated, like the cap, never dropped.
  */
 
 import { zipSync } from 'fflate';
@@ -36,7 +43,16 @@ import type {
   DocumentExportLandingView,
   DocumentExportLinkState,
   DocumentExportLinkSummary,
+  SharingRefusal,
 } from '../../shared/types';
+import type { ExitActor, SharingExit } from '../../shared/sharingRule';
+import { LINK_ACTOR, judgeDocumentsForExit } from './sharing-rule';
+
+/** Which exit is asking for these documents, and on whose authority. */
+export interface ExportGate {
+  exit: SharingExit;
+  actor: ExitActor;
+}
 
 /**
  * Hard ceilings on one export.
@@ -101,6 +117,23 @@ export interface LoadedExport {
    * document the requester asked for must say so.
    */
   missing_ids: string[];
+  /**
+   * Documents the sharing rule kept back for this exit and this actor, each
+   * with its reason. Not in `rows`, and not in `missing_ids` either: the
+   * document exists, it may not go.
+   */
+  refused: SharingRefusal[];
+  /**
+   * The refused documents as export rows, for the one place that prints them
+   * to somebody outside (the ZIP manifest), which must use the same
+   * outward-facing title as every other line of it.
+   */
+  refused_rows: { row: ExportDocumentRow; refusal: SharingRefusal }[];
+  /**
+   * `qa` documents in `rows` that are there ONLY because the actor is a QA
+   * releaser. Their leaving is the approval; the caller audits it as one.
+   */
+  qa_released_ids: string[];
 }
 
 /**
@@ -130,13 +163,19 @@ export function normalizeExportIds(raw: unknown): string[] {
  * another tenant comes back as missing, indistinguishable from an id that
  * never existed, so the endpoint cannot be used to probe for documents
  * elsewhere.
+ *
+ * `gate` IS REQUIRED: the sharing rule of every document is judged for that
+ * exit and that actor before a row is returned (see the module header).
  */
 export async function loadExportDocuments(
   db: D1Database,
   tenantId: string,
   ids: string[],
+  gate: ExportGate,
 ): Promise<LoadedExport> {
-  if (ids.length === 0) return { rows: [], missing_ids: [] };
+  if (ids.length === 0) {
+    return { rows: [], missing_ids: [], refused: [], refused_rows: [], qa_released_ids: [] };
+  }
 
   const placeholders = ids.map(() => '?').join(', ');
   const res = await db
@@ -217,9 +256,32 @@ export async function loadExportDocuments(
     if (dates && dates.size === 1) row.production_date = [...dates][0];
   }
 
-  const rows = ids.map((id) => byId.get(id)).filter((r): r is ExportDocumentRow => Boolean(r));
+  const found = ids.map((id) => byId.get(id)).filter((r): r is ExportDocumentRow => Boolean(r));
   const missing_ids = ids.filter((id) => !byId.has(id));
-  return { rows, missing_ids };
+
+  // The sharing rule, read now. Only documents that were FOUND are judged, so
+  // an id that is another organization's stays plain "missing".
+  const judged = await judgeDocumentsForExit(
+    db,
+    tenantId,
+    found.map((r) => r.document_id),
+    gate.exit,
+    gate.actor,
+  );
+  const allowed = new Set(judged.allowed);
+  const refusalById = new Map(judged.refused.map((r) => [r.document_id, r]));
+  const rows = found.filter((r) => allowed.has(r.document_id));
+  const refused_rows = found.flatMap((row) => {
+    const refusal = refusalById.get(row.document_id);
+    return refusal ? [{ row, refusal }] : [];
+  });
+  return {
+    rows,
+    missing_ids,
+    refused: refused_rows.map((r) => r.refusal),
+    refused_rows,
+    qa_released_ids: judged.qa_released,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +462,12 @@ export interface ManifestMeta {
   /** ISO timestamp. */
   exported_at: string;
   on_behalf_of?: string | null;
+  /**
+   * Documents that were asked for and the sharing rule kept back (0137). The
+   * manifest says so: an archive missing a document somebody selected must
+   * not look complete to whoever opens it.
+   */
+  not_included?: { row: ExportDocumentRow; reason: string }[];
 }
 
 /**
@@ -439,6 +507,31 @@ export function buildExportManifestCsv(
         csvField(e.row.created_at ? e.row.created_at.slice(0, 10) : null),
       ].join(','),
     );
+  }
+  // What was asked for and is NOT in the archive, by the same outward-facing
+  // title as the rows above (H4: never the uploaded file name).
+  if (meta.not_included && meta.not_included.length > 0) {
+    lines.push('');
+    lines.push(
+      [
+        csvField('Not included'),
+        csvField('Document'),
+        csvField('Supplier'),
+        csvField('Document type'),
+        csvField('Reason'),
+      ].join(','),
+    );
+    for (const n of meta.not_included) {
+      lines.push(
+        [
+          csvField(''),
+          csvField(externalDocumentTitle(n.row)),
+          csvField(n.row.supplier_name),
+          csvField(n.row.document_type_name),
+          csvField(n.reason),
+        ].join(','),
+      );
+    }
   }
   // Provenance last, as trailing comment rows: a spreadsheet still parses the
   // table above it, and whoever opens the file can see where it came from.
@@ -591,6 +684,11 @@ export function exportLinkNeverExpires(row: { never_expires?: number | boolean |
  * Create the link row. Unlike `mintAlertLink` this one THROWS on failure
  * rather than returning null: an alert must go out even without a link, but an
  * export email whose link does not exist is an email with nothing in it.
+ *
+ * THE MINT IS THE APPROVAL (0137). `documentIds` must be ids that
+ * `loadExportDocuments` returned for the `send` (or `order_send`) exit: a
+ * `qa` document on a link was put there by a QA releaser, which is why a
+ * later read of the link serves it. Reads re-check only for `locked`.
  */
 export async function mintExportLink(
   db: D1Database,
@@ -829,10 +927,36 @@ export async function loadExportLinkDocuments(
   db: D1Database,
   link: DocumentExportLinkRow,
 ): Promise<ExportDocumentRow[]> {
+  return (await loadExportLinkSet(db, link)).rows;
+}
+
+export interface ExportLinkSet {
+  /** What the link serves NOW, in the order it was sent. */
+  rows: ExportDocumentRow[];
+  /** Documents on the link that are locked now (0137), withheld from `rows`. */
+  withheld: SharingRefusal[];
+  /** Documents on the link that are no longer in the portal. */
+  missing_ids: string[];
+}
+
+/**
+ * The same read, with what was left out and why.
+ *
+ * THE RULE IS RE-CHECKED ON EVERY READ (0137), as the `public_link` exit: a
+ * document that has been LOCKED since the link was minted is no longer served.
+ * A `qa` document stays -- the mint was its approval (see `mintExportLink`).
+ */
+export async function loadExportLinkSet(
+  db: D1Database,
+  link: DocumentExportLinkRow,
+): Promise<ExportLinkSet> {
   const ids = parseStringList(link.document_ids);
-  if (ids.length === 0) return [];
-  const { rows } = await loadExportDocuments(db, link.tenant_id, ids);
-  return rows;
+  if (ids.length === 0) return { rows: [], withheld: [], missing_ids: [] };
+  const loaded = await loadExportDocuments(db, link.tenant_id, ids, {
+    exit: 'public_link',
+    actor: LINK_ACTOR,
+  });
+  return { rows: loaded.rows, withheld: loaded.refused, missing_ids: loaded.missing_ids };
 }
 
 /**
@@ -865,7 +989,8 @@ export async function buildExportLandingView(
     .bind(link.created_by)
     .first<{ name: string | null; email: string | null }>();
 
-  const rows = await loadExportLinkDocuments(db, link);
+  const set = await loadExportLinkSet(db, link);
+  const rows = set.rows;
   const names = exportFileNames(rows);
 
   const items: DocumentExportItem[] = rows.map((r, i) => ({
@@ -889,6 +1014,9 @@ export async function buildExportLandingView(
     expires_at: link.expires_at,
     never_expires: exportLinkNeverExpires(link),
     documents: items,
+    // A COUNT, never a title or a reason: the recipient is told the list is
+    // shorter than what was sent, and nothing about what is being held back.
+    unavailable_count: set.withheld.length + set.missing_ids.length,
   };
 }
 

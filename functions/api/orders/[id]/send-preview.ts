@@ -15,6 +15,7 @@
 import { requireRole, errorToResponse } from '../../../lib/permissions';
 import { loadOrderForLineWrite, requireOrderAccess } from '../../../lib/order-items';
 import { planOrderSend } from '../../../lib/order-send';
+import { exitActorForRequest } from '../../../lib/sharing-rule';
 import type { Env, User } from '../../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -36,6 +37,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       order,
       tenantName: tenant?.name ?? 'Documents',
       sender: user,
+      actor: await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id),
       emailConfigured: Boolean(context.env.RESEND_API_KEY),
     });
     if (order.staged_at && !plan.preview.blocked) {

@@ -5,12 +5,39 @@ import {
   errorToResponse,
 } from '../../../lib/permissions';
 import { downloadFile } from '../../../lib/r2';
+import { getClientIp } from '../../../lib/db';
+import { apiKeyFileRefusal, documentsFromQueueItem } from '../../../lib/sharing-rule';
 import type { Env, User } from '../../../lib/types';
 
 /**
  * GET /api/queue/:id/file
  * Stream the pending file from R2 for preview.
  * Auth: super_admin, org_admin, user
+ *
+ * THE SHARING RULE (decision C-003, migration 0137) APPLIES TO THE FALLBACK
+ * ONLY. A file still in the queue is not a document yet: nobody has approved
+ * it, it has no type a person confirmed, and the extraction worker
+ * (bin/process-worker, which authenticates with an API key) MUST be able to
+ * read it -- that read is intake, and it never reaches the fallback: a new
+ * arrival is fetched while it is queued, and an item's staging object is
+ * deleted only by approval.
+ *
+ * The fallback serves an APPROVED DOCUMENT's bytes. That is the same file
+ * `GET /api/documents/:id/download` serves, so the same rule holds: a
+ * logged-in reviewer is not asked, an API key reads it only when every
+ * document that came from this queue item is "send freely" (C-041, C-042).
+ *
+ * TWO API-KEY CALLERS REACH THE FALLBACK, both operator tools working on
+ * certificates of analysis, neither of them intake:
+ *   - the read-only replay harness (bin/parity-coa -> the worker's parity mode);
+ *   - bin/reprocess-multisublot, which re-queues APPROVED items so the worker
+ *     re-reads them.
+ * A COA type is "send freely" by default, so both keep working. An approved
+ * item whose document is untyped, or of a type that is not "send freely", now
+ * answers a stated 403 to a key (the worker records it as that item's error).
+ * Nothing can tell the worker's key from any other key, so there is no
+ * narrower rule to write; the fix for such an item is to give its document a
+ * type, or to run the replay from a logged-in session.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -80,6 +107,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         }>();
 
       if (fallback) {
+        const refusal = await apiKeyFileRefusal(context.env.DB, context.data, {
+          user,
+          tenantId: item.tenant_id,
+          documentIds: await documentsFromQueueItem(context.env.DB, item.tenant_id, queueId),
+          route: 'queue/file (approved document fallback)',
+          clientIp: getClientIp(context.request),
+        });
+        if (refusal) return refusal;
         file = await downloadFile(context.env.FILES, fallback.r2_key);
         if (file) {
           source = 'document';

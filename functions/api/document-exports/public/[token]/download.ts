@@ -9,6 +9,10 @@
  * list the send recorded, so a forwarded link cannot be edited into covering
  * anything else.
  *
+ * THE SHARING RULE IS RE-READ HERE (migration 0137), inside
+ * `loadExportLinkSet`: a document locked since the send is left out of the
+ * archive and the audit row says which.
+ *
  * Rate limited harder than the landing read: this one moves megabytes.
  */
 import { logAudit, getClientIp } from '../../../../lib/db';
@@ -18,7 +22,7 @@ import {
   exportSizeRefusal,
   exportZipFileName,
   zipResponseBody,
-  loadExportLinkDocuments,
+  loadExportLinkSet,
   loadUsableExportLink,
   recordExportLinkView,
 } from '../../../../lib/document-export';
@@ -58,7 +62,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
     await recordAttempt(context.env.DB, rlKey, RATE_LIMIT_WINDOW_SECONDS);
 
-    const rows = await loadExportLinkDocuments(context.env.DB, link);
+    const { rows, withheld } = await loadExportLinkSet(context.env.DB, link);
     if (rows.length === 0) return notFound();
 
     const refusal = exportSizeRefusal(rows);
@@ -97,6 +101,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       JSON.stringify({
         document_ids: built.entries.map((e) => e.row.document_id),
         document_count: built.entries.length,
+        withheld_ids: withheld.map((w) => w.document_id),
         ip,
       }),
       ip,

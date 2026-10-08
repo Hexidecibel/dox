@@ -19,6 +19,15 @@
  * the id list, the count, the byte total and anything that was asked for and
  * could not be included.
  *
+ * THE SHARING RULE (decision C-003, migration 0137). A ZIP is a file LEAVING,
+ * which one download in the portal is not (C-039) -- so the role bar above is
+ * unchanged, and the rule is asked on top of it: a locked document never goes
+ * in; one that needs QA approval goes in only when a QA releaser is the one
+ * pressing the button (and that press is recorded as the approval); an API
+ * key gets "send freely" documents only. WHAT WAS KEPT BACK IS SAID: in the
+ * manifest, in the `X-Export-Refused` headers, in the audit row -- and when
+ * nothing at all may go, in a 403 that names every document.
+ *
  * VERSION PINNING IS IMPLICIT AND DELIBERATE: the CURRENT version of each
  * document, which is what the person was looking at in search. A pinned
  * historical set is what bundles are for.
@@ -35,6 +44,12 @@ import {
   loadExportDocuments,
   normalizeExportIds,
 } from '../../lib/document-export';
+import {
+  auditQaRelease,
+  exitActorForRequest,
+  refusedHeaderValue,
+  sharingRefusedResponse,
+} from '../../lib/sharing-rule';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -74,8 +89,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!tenantId) throw new BadRequestError('No organization selected for this export.');
     requireTenantAccess(user, tenantId);
 
-    const { rows, missing_ids } = await loadExportDocuments(context.env.DB, tenantId, ids);
+    const actor = await exitActorForRequest(context.env.DB, context.data, user, tenantId);
+    const { rows, missing_ids, refused, refused_rows, qa_released_ids } = await loadExportDocuments(
+      context.env.DB,
+      tenantId,
+      ids,
+      { exit: 'zip', actor },
+    );
     if (rows.length === 0) {
+      if (refused.length > 0) {
+        await logAudit(
+          context.env.DB,
+          user.id,
+          tenantId,
+          'document_export.refused',
+          'document_export',
+          null,
+          JSON.stringify({ exit: 'zip', requested_ids: ids, refused, via: actor.method }),
+          getClientIp(context.request),
+        );
+        return sharingRefusedResponse(refused);
+      }
       return json({ error: 'None of those documents are available to export.' }, 404);
     }
 
@@ -92,6 +126,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       tenant_name: tenant?.name ?? '',
       exported_by: user.name || user.email,
       exported_at: new Date().toISOString(),
+      not_included: refused_rows.map((r) => ({ row: r.row, reason: r.refusal.message })),
     });
 
     if (built.entries.length === 0) {
@@ -112,9 +147,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         requested_ids: ids,
         missing_ids,
         unavailable_ids: built.unavailable.map((r) => r.document_id),
+        // Kept back by the sharing rule, each with its reason (0137).
+        refused: refused.map((r) => ({ document_id: r.document_id, rule: r.rule, reason: r.reason })),
+        qa_released_ids,
+        via: actor.method,
       }),
       getClientIp(context.request),
     );
+    // A QA releaser zipping a document that needs QA approval IS the approval.
+    const went = new Set(built.entries.map((e) => e.row.document_id));
+    await auditQaRelease(context.env.DB, {
+      userId: user.id,
+      tenantId,
+      exit: 'zip',
+      documentIds: qa_released_ids.filter((id) => went.has(id)),
+      resourceType: 'document_export',
+      resourceId: null,
+      clientIp: getClientIp(context.request),
+    });
 
     const fileName = exportZipFileName();
     return new Response(zipResponseBody(built.zip), {
@@ -125,6 +175,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // got eleven can see that without opening the archive.
         'X-Export-Documents': String(built.entries.length),
         'X-Export-Missing': String(missing_ids.length + built.unavailable.length),
+        // Kept back by the sharing rule: how many, and which with which
+        // reason (`id:locked,id:needs_qa`). The manifest names them too.
+        'X-Export-Refused': String(refused.length),
+        ...(refused.length > 0 ? { 'X-Export-Refused-Ids': refusedHeaderValue(refused) } : {}),
       },
     });
   } catch (err) {

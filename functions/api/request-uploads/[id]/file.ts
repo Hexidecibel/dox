@@ -17,9 +17,16 @@
  * `X-File-Source: upload | document` says which, same idea as the queue's own
  * file endpoint. Any tenant user may read, matching the role model's "reader:
  * read-only, download files".
+ *
+ * THE SHARING RULE (migration 0137) applies to branch 2 only: there the bytes
+ * are an approved document's, so an API key reads them only when that
+ * document is "send freely" (C-041). The upload's own object is an arrival,
+ * not a document, and a logged-in person is never asked.
  */
 
 import { downloadFile } from '../../../lib/r2';
+import { getClientIp } from '../../../lib/db';
+import { apiKeyFileRefusal } from '../../../lib/sharing-rule';
 import { errorToResponse, NotFoundError } from '../../../lib/permissions';
 import { resolveTenantForUpload } from '../../../lib/request-arrivals';
 import type { Env, User } from '../../../lib/types';
@@ -63,6 +70,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         .bind(upload.document_id, tenantId)
         .first<{ r2_key: string; file_name: string; mime_type: string }>();
       if (version) {
+        const refusal = await apiKeyFileRefusal(db, context.data, {
+          user,
+          tenantId,
+          documentIds: [upload.document_id],
+          route: 'request-uploads/file (approved document fallback)',
+          clientIp: getClientIp(context.request),
+        });
+        if (refusal) return refusal;
         file = await downloadFile(context.env.FILES, version.r2_key);
         if (file) {
           source = 'document';

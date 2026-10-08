@@ -110,6 +110,42 @@ describe('buildExportManifestCsv', () => {
     expect(csv).toContain('"On behalf of","Marco in Sales"');
   });
 
+  it('names what was asked for and left out, by its outward-facing title, with the reason', () => {
+    const csv = buildExportManifestCsv(
+      [{ file_name: 'coa_1.pdf', row: row() }],
+      {
+        tenant_name: 't',
+        exported_by: 'u',
+        exported_at: 'now',
+        not_included: [
+          {
+            // A title that is the uploaded file's own name never travels (H4):
+            // the manifest prints type and supplier instead.
+            row: row({ title: 'w9-internal', file_name: 'w9-internal.pdf', document_type_name: 'W-9', lot_label: null }),
+            reason: 'Locked: this document does not leave the portal.',
+          },
+        ],
+      },
+    );
+    const lines = csv.split('\r\n');
+    const at = lines.indexOf('"Not included","Document","Supplier","Document type","Reason"');
+    expect(at).toBeGreaterThan(1);
+    expect(lines[at + 1]).toBe('"","W-9 - Darigold, Inc.","Darigold, Inc.","W-9","Locked: this document does not leave the portal."');
+    expect(csv).not.toContain('w9-internal');
+    // Provenance still comes last.
+    expect(lines.indexOf('"Exported from","t"')).toBeGreaterThan(at);
+  });
+
+  it('says nothing about exclusions when there were none', () => {
+    const csv = buildExportManifestCsv([{ file_name: 'a.pdf', row: row() }], {
+      tenant_name: 't',
+      exported_by: 'u',
+      exported_at: 'now',
+      not_included: [],
+    });
+    expect(csv).not.toContain('Not included');
+  });
+
   it('quotes a supplier name containing a comma rather than splitting it', () => {
     const csv = buildExportManifestCsv(
       [{ file_name: 'a.pdf', row: row({ supplier_name: 'Smith, Jones & Co' }) }],

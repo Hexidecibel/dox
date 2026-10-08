@@ -50,6 +50,7 @@ const db = env.DB;
 const files = env.FILES;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 let supplierId = '';
+let coaTypeId = '';
 
 const admin = (): TestUser => ({ id: seed.orgAdminId, email: 'orgadmin@test.com', name: 'Org Admin', role: 'org_admin', tenant_id: seed.tenantId });
 const regular = (): TestUser => ({ id: seed.userId, email: 'user@test.com', name: 'Regular User', role: 'user', tenant_id: seed.tenantId });
@@ -96,10 +97,13 @@ async function makeDocument(productId: string, lotNumber: string): Promise<strin
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, supplier_id)
-       VALUES (?, ?, ?, '[]', 1, 'active', ?, ?)`,
+      `INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, supplier_id, document_type_id)
+       VALUES (?, ?, ?, '[]', 1, 'active', ?, ?, ?)`,
     )
-    .bind(id, seed.tenantId, `COA ${id.slice(0, 5)}`, seed.orgAdminId, supplierId)
+    // TYPED as a certificate of analysis. A document with no type at all reads
+    // "locked" under the sharing rule (migration 0137, C-038) and would not
+    // leave on an order -- which is not what these tests are about.
+    .bind(id, seed.tenantId, `COA ${id.slice(0, 5)}`, seed.orgAdminId, supplierId, coaTypeId)
     .run();
   const key = `docs/${id}/v1.pdf`;
   const body = `PDF-${id}`;
@@ -175,6 +179,11 @@ beforeAll(async () => {
   await db
     .prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
     .bind(supplierId, seed.tenantId, 'Acme Creamery', `acme-${supplierId.slice(0, 6)}`)
+    .run();
+  coaTypeId = generateTestId();
+  await db
+    .prepare('INSERT INTO document_types (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+    .bind(coaTypeId, seed.tenantId, 'Certificate of Analysis', `coa-${coaTypeId.slice(0, 6)}`)
     .run();
 }, 30_000);
 

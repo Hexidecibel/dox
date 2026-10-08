@@ -39,6 +39,7 @@ import {
   planOrderSend,
 } from '../../../lib/order-send';
 import type { OrderSendRequest, OrderSendResponse } from '../../../../shared/types';
+import { exitActorForRequest } from '../../../lib/sharing-rule';
 import type { Env, User } from '../../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -95,10 +96,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ? body.message.trim().slice(0, ORDER_SEND_MAX_MESSAGE_CHARS)
         : null;
 
+    const actor = await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id);
     const plan = await planOrderSend(context.env.DB, context.env.FILES, {
       order,
       tenantName,
       sender: user,
+      actor,
       emailConfigured: Boolean(context.env.RESEND_API_KEY),
       subject,
     });
@@ -171,6 +174,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         tenantName,
         sender: user,
         order,
+        actor,
       },
       {
         order,

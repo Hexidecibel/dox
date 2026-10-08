@@ -5,6 +5,7 @@ import {
   errorToResponse,
 } from '../../../lib/permissions';
 import { downloadFile } from '../../../lib/r2';
+import { apiKeyFileRefusal, documentsCitingPacket } from '../../../lib/sharing-rule';
 import type { Env, User, Document, DocumentVersion } from '../../../lib/types';
 
 /**
@@ -18,6 +19,12 @@ import type { Env, User, Document, DocumentVersion } from '../../../lib/types';
  * sent". Same access rule as the document itself (the packet belongs to the
  * same tenant), audited as its own action. 404 when the version was not split
  * from a packet or the packet's file is gone.
+ *
+ * THE SHARING RULE (decision C-003, migration 0137). A logged-in person
+ * opening one file is not "leaving" and is not asked. An API KEY reads the
+ * file only when its rule is "send freely" (C-041) -- and the packet original
+ * holds every part that was split from it, so a key reads it only when EVERY
+ * document citing that packet is "send freely" (C-042, the strictest rule).
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -79,6 +86,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             .bind(packetId, doc.tenant_id)
             .first<{ id: string; file_r2_key: string; file_name: string; mime_type: string }>()
         : null;
+      if (packet) {
+        // Every document carved out of this packet is on these pages, not
+        // only the one the caller named.
+        const onPacket = await documentsCitingPacket(context.env.DB, doc.tenant_id, packet.id);
+        const refusal = await apiKeyFileRefusal(context.env.DB, context.data, {
+          user,
+          tenantId: doc.tenant_id,
+          documentIds: [...new Set([docId, ...onPacket])],
+          route: 'documents/download?source=packet',
+          clientIp: getClientIp(context.request),
+        });
+        if (refusal) return refusal;
+      }
       const packetObject = packet ? await downloadFile(context.env.FILES, packet.file_r2_key) : null;
       if (!packet || !packetObject) {
         return new Response(
@@ -104,6 +124,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         },
       });
     }
+
+    const refusal = await apiKeyFileRefusal(context.env.DB, context.data, {
+      user,
+      tenantId: doc.tenant_id,
+      documentIds: [docId],
+      route: 'documents/download',
+      clientIp: getClientIp(context.request),
+    });
+    if (refusal) return refusal;
 
     // Get file from R2
     const r2Object = await downloadFile(context.env.FILES, version.r2_key);

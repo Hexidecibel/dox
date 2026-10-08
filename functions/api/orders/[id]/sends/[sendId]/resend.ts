@@ -27,6 +27,7 @@ import {
   resendFailedParts,
 } from '../../../../../lib/order-send';
 import type { OrderSendResponse } from '../../../../../../shared/types';
+import { exitActorForRequest } from '../../../../../lib/sharing-rule';
 import type { Env, User } from '../../../../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -101,6 +102,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         tenantName: tenant?.name ?? 'Documents',
         sender: originalSender ?? user,
         order,
+        // The rule is asked of whoever is pressing resend, not of the
+        // original sender (migration 0137).
+        actor: await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id),
       },
       { sendId, tenantId: order.tenant_id, actorId: user.id, clientIp: getClientIp(context.request) },
     );
