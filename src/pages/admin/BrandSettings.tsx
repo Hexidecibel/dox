@@ -30,6 +30,7 @@ import {
   Stack,
   TextField,
   Typography,
+  Chip,
 } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { useAuth } from '../../contexts/AuthContext';
@@ -41,6 +42,7 @@ import {
   BRAND_LOGO_MAX_BYTES,
   BRAND_SUPPORT_PHONE_MAX,
   BRAND_SUPPORT_TEXT_MAX,
+  BRAND_WITHDRAW_REASON_MAX,
   BRAND_SURFACES,
   DEFAULT_BRAND_COLOR,
   brandPalette,
@@ -50,7 +52,12 @@ import {
   resolveSupportLine,
 } from '../../../shared/tenantBrand';
 import type { BrandSurface } from '../../../shared/tenantBrand';
-import type { BrandSupportLine, PublicBrand, TenantBrandResponse } from '../../../shared/types';
+import type {
+  BrandSupportLine,
+  PublicBrand,
+  TenantBrandLogoRecord,
+  TenantBrandResponse,
+} from '../../../shared/types';
 
 interface Draft {
   display_name: string;
@@ -186,6 +193,9 @@ export function BrandSettings() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [previewSurface, setPreviewSurface] = useState<BrandSurface>('supplier_request');
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [withdrawing, setWithdrawing] = useState<string | null>(null);
+  const [withdrawReason, setWithdrawReason] = useState('');
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -313,6 +323,39 @@ export function BrandSettings() {
     }
   };
 
+  // "Remove brand": back to exactly what an organization with no brand shows.
+  const removeBrand = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await api.tenantBrand.remove(tenantId);
+      setBrand(next);
+      setDraft(toDraft(next));
+      setConfirmRemove(false);
+      setSaved(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not remove the brand.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const withdrawLogo = async (logo: TenantBrandLogoRecord) => {
+    setLogoBusy(true);
+    setError(null);
+    try {
+      setBrand(await api.tenantBrand.withdrawLogo(tenantId, logo.id, withdrawReason.trim()));
+      setWithdrawing(null);
+      setWithdrawReason('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not withdraw the logo.');
+    } finally {
+      setLogoBusy(false);
+    }
+  };
+
+  const published = brand.logos.filter((l) => !l.withdrawn_at).length;
+
   return (
     <Box data-testid="brand-settings">
       <Typography variant="h6" fontWeight={700}>
@@ -409,6 +452,107 @@ export function BrandSettings() {
               </Stack>
             </Stack>
           </Paper>
+
+          {brand.logos.length > 0 && (
+            <Paper variant="outlined" sx={{ p: 2.5 }} data-testid="brand-past-logos">
+              <Typography variant="subtitle2" fontWeight={700}>
+                Published logos
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+                A logo you replace or remove stays reachable, because emails already sent show it. {published} of{' '}
+                {brand.logo_limit} kept. Withdraw one to delete it for good.
+              </Typography>
+              <Stack spacing={1.5} divider={<Divider flexItem />}>
+                {brand.logos.map((l) => (
+                  <Box key={l.id} data-testid={`brand-logo-row-${l.id}`}>
+                    <Stack direction="row" spacing={2} alignItems="center">
+                      <Box
+                        sx={{
+                          width: 96,
+                          height: 40,
+                          border: '1px solid',
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                          bgcolor: '#ffffff',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {l.withdrawn_at ? (
+                          <Typography variant="caption" color="text.secondary">
+                            deleted
+                          </Typography>
+                        ) : (
+                          <Box component="img" src={l.url} alt="" sx={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                        )}
+                      </Box>
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography variant="body2">
+                          {l.width} x {l.height} px, {Math.max(1, Math.round(l.size_bytes / 1024))} KB{' '}
+                          {l.current && <Chip size="small" color="primary" label="Current" sx={{ ml: 0.5 }} />}
+                          {l.withdrawn_at && <Chip size="small" label="Withdrawn" sx={{ ml: 0.5 }} />}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                          {l.withdrawn_at
+                            ? `Withdrawn${l.withdrawn_by_name ? ` by ${l.withdrawn_by_name}` : ''}: ${l.withdrawn_reason ?? ''}`
+                            : `Uploaded ${new Date(l.uploaded_at.replace(' ', 'T') + 'Z').toLocaleDateString()}`}
+                        </Typography>
+                      </Box>
+                      {!l.withdrawn_at && withdrawing !== l.id && (
+                        <Button
+                          size="small"
+                          color="error"
+                          disabled={logoBusy}
+                          onClick={() => {
+                            setWithdrawing(l.id);
+                            setWithdrawReason('');
+                          }}
+                          data-testid={`brand-logo-withdraw-${l.id}`}
+                        >
+                          Withdraw
+                        </Button>
+                      )}
+                    </Stack>
+                    {withdrawing === l.id && (
+                      <Box sx={{ mt: 1.5 }}>
+                        <Alert severity="warning" sx={{ mb: 1.5 }} data-testid="brand-withdraw-warning">
+                          Withdrawing deletes this image. Emails already sent that show it will show a broken image
+                          instead{l.current ? ', and it is taken off your brand now' : ''}. This takes up to a day to
+                          reach everyone who has already loaded it.
+                        </Alert>
+                        <TextField
+                          label="Why is it being withdrawn?"
+                          size="small"
+                          fullWidth
+                          value={withdrawReason}
+                          onChange={(e) => setWithdrawReason(e.target.value)}
+                          inputProps={{ maxLength: BRAND_WITHDRAW_REASON_MAX, 'data-testid': 'brand-withdraw-reason' }}
+                        />
+                        <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                          <Button
+                            size="small"
+                            color="error"
+                            variant="contained"
+                            disabled={logoBusy || withdrawReason.trim() === ''}
+                            onClick={() => void withdrawLogo(l)}
+                            data-testid="brand-withdraw-confirm"
+                          >
+                            Withdraw this logo
+                          </Button>
+                          <Button size="small" onClick={() => setWithdrawing(null)} disabled={logoBusy}>
+                            Cancel
+                          </Button>
+                        </Stack>
+                      </Box>
+                    )}
+                  </Box>
+                ))}
+              </Stack>
+            </Paper>
+          )}
 
           <Paper variant="outlined" sx={{ p: 2.5 }}>
             <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1.5 }}>
@@ -507,6 +651,35 @@ export function BrandSettings() {
               </Typography>
             )}
           </Stack>
+
+          {brand.configured && (
+            <Box data-testid="brand-remove-section">
+              {!confirmRemove ? (
+                <Button color="error" size="small" onClick={() => setConfirmRemove(true)} disabled={saving} data-testid="brand-remove">
+                  Remove brand
+                </Button>
+              ) : (
+                <Alert
+                  severity="warning"
+                  data-testid="brand-remove-confirm"
+                  action={
+                    <Stack direction="row" spacing={1}>
+                      <Button color="error" size="small" onClick={() => void removeBrand()} disabled={saving} data-testid="brand-remove-yes">
+                        Remove
+                      </Button>
+                      <Button size="small" onClick={() => setConfirmRemove(false)} disabled={saving}>
+                        Cancel
+                      </Button>
+                    </Stack>
+                  }
+                >
+                  Every field is cleared and the logo is taken off. Pages and emails go back to showing the
+                  organization name in the default navy. Logos already published stay reachable until you withdraw
+                  them.
+                </Alert>
+              )}
+            </Box>
+          )}
         </Stack>
 
         {/* ── What an outsider will see ──────────────────────────────── */}

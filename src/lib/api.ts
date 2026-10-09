@@ -3158,6 +3158,15 @@ export const api = {
     },
     removeLogo: (tenantId: string) =>
       fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand/logo`, { method: 'DELETE' }),
+    /** "Remove brand": every field cleared and the logo taken off. */
+    remove: (tenantId: string) =>
+      fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand`, { method: 'DELETE' }),
+    /** Make a published logo unreachable. Mail already sent shows a broken image. */
+    withdrawLogo: (tenantId: string, logoId: string, reason: string) =>
+      fetchApi<TenantBrandResponse>(
+        `/tenants/${encodeURIComponent(tenantId)}/brand/logos/${encodeURIComponent(logoId)}/withdraw`,
+        { method: 'POST', body: JSON.stringify({ reason }) },
+      ),
   },
 
   tenantExtractionContext: {

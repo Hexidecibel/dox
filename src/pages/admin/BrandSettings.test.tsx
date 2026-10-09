@@ -16,6 +16,8 @@ const get = vi.fn();
 const put = vi.fn();
 const uploadLogo = vi.fn();
 const removeLogo = vi.fn();
+const removeBrand = vi.fn();
+const withdrawLogo = vi.fn();
 let tenant: { selectedTenantId: string | null } = { selectedTenantId: 't1' };
 
 vi.mock('../../contexts/AuthContext', () => ({
@@ -31,6 +33,8 @@ vi.mock('../../lib/api', () => ({
       put: (...a: unknown[]) => put(...a),
       uploadLogo: (...a: unknown[]) => uploadLogo(...a),
       removeLogo: (...a: unknown[]) => removeLogo(...a),
+      remove: (...a: unknown[]) => removeBrand(...a),
+      withdrawLogo: (...a: unknown[]) => withdrawLogo(...a),
     },
   },
 }));
@@ -49,6 +53,8 @@ const record = (over: Partial<TenantBrandResponse> = {}): TenantBrandResponse =>
   support: { text: null, email: null, phone: null },
   support_overrides: {},
   logo: null,
+  logos: [],
+  logo_limit: 10,
   updated_at: null,
   updated_by_name: null,
   ...over,
@@ -65,6 +71,8 @@ beforeEach(() => {
   put.mockReset();
   uploadLogo.mockReset();
   removeLogo.mockReset();
+  removeBrand.mockReset();
+  withdrawLogo.mockReset();
   tenant = { selectedTenantId: 't1' };
 });
 
@@ -225,5 +233,109 @@ describe('Settings > Brand', () => {
     render(<Fresh />);
     expect(await screen.findByText(/Choose an organization/)).toBeInTheDocument();
     expect(get).not.toHaveBeenCalled();
+  });
+});
+
+describe('Settings > Brand: back to no brand, and withdrawing a published logo', () => {
+  const published = (over: Record<string, unknown> = {}) => ({
+    id: 'logo-1',
+    url: LOGO,
+    content_type: 'image/png',
+    size_bytes: 2000,
+    width: 320,
+    height: 96,
+    uploaded_at: '2026-10-08 12:00:00',
+    current: false,
+    withdrawn_at: null,
+    withdrawn_reason: null,
+    withdrawn_by_name: null,
+    ...over,
+  });
+
+  it('"Remove brand" is offered only when there is one, asks first, and returns the screen to unbranded', async () => {
+    get.mockResolvedValue(record());
+    const { unmount } = render(<BrandSettings />);
+    await screen.findByTestId('brand-settings');
+    expect(screen.queryByTestId('brand-remove')).toBeNull();
+    unmount();
+
+    get.mockResolvedValue(record({ configured: true, display_name: 'Northfield Foods', primary_color: '#0B6E4F' }));
+    removeBrand.mockResolvedValue(record());
+    const user = userEvent.setup();
+    render(<BrandSettings />);
+    await user.click(await screen.findByTestId('brand-remove'));
+    // Nothing happens until it is confirmed, and the confirmation says what it does.
+    expect(removeBrand).not.toHaveBeenCalled();
+    const confirm = screen.getByTestId('brand-remove-confirm');
+    expect(confirm.textContent).toContain('Every field is cleared and the logo is taken off');
+    expect(confirm.textContent).toContain('stay reachable until you withdraw them');
+
+    await user.click(screen.getByTestId('brand-remove-yes'));
+    await waitFor(() => expect(removeBrand).toHaveBeenCalledWith('t1'));
+    expect(await screen.findByText(/Nothing is set yet/)).toBeInTheDocument();
+    expect(screen.getByTestId('brand-display-name')).toHaveValue('');
+    expect(screen.getByTestId('brand-primary-color')).toHaveValue('');
+    expect(screen.queryByTestId('brand-remove')).toBeNull();
+    expect(within(screen.getByTestId('brand-preview-page')).getByTestId('brand-name')).toHaveTextContent('Northfield Provisions LLC');
+  });
+
+  it('lists every published logo, and withdrawing one needs a reason and warns about mail already sent', async () => {
+    get.mockResolvedValue(
+      record({
+        configured: true,
+        logo: { url: LOGO, content_type: 'image/png', size_bytes: 2000, width: 320, height: 96, uploaded_at: '2026-10-08 12:00:00' },
+        logos: [
+          published({ id: 'logo-now', current: true }),
+          published({ id: 'logo-old', url: `/api/public/brand-logo/${'cd34'.repeat(10)}` }),
+          published({ id: 'logo-gone', withdrawn_at: '2026-10-07 09:00:00', withdrawn_reason: 'Wrong artwork', withdrawn_by_name: 'Dana Whitlow' }),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<BrandSettings />);
+    const list = await screen.findByTestId('brand-past-logos');
+    expect(list.textContent).toContain('2 of 10 kept');
+    expect(within(screen.getByTestId('brand-logo-row-logo-now')).getByText('Current')).toBeInTheDocument();
+    const gone = screen.getByTestId('brand-logo-row-logo-gone');
+    expect(gone.textContent).toContain('Withdrawn by Dana Whitlow: Wrong artwork');
+    expect(within(gone).queryByRole('button', { name: 'Withdraw' })).toBeNull();
+    expect(gone.querySelector('img')).toBeNull();
+
+    await user.click(screen.getByTestId('brand-logo-withdraw-logo-old'));
+    const warning = screen.getByTestId('brand-withdraw-warning');
+    expect(warning.textContent).toContain('Emails already sent that show it will show a broken image');
+    expect(screen.getByTestId('brand-withdraw-confirm')).toBeDisabled();
+    expect(withdrawLogo).not.toHaveBeenCalled();
+
+    withdrawLogo.mockResolvedValue(
+      record({
+        configured: true,
+        logos: [published({ id: 'logo-now', current: true }), published({ id: 'logo-old', withdrawn_at: '2026-10-08 13:00:00', withdrawn_reason: 'Old artwork' })],
+      }),
+    );
+    await user.type(screen.getByTestId('brand-withdraw-reason'), '  Old artwork ');
+    await user.click(screen.getByTestId('brand-withdraw-confirm'));
+    await waitFor(() => expect(withdrawLogo).toHaveBeenCalledWith('t1', 'logo-old', 'Old artwork'));
+    await waitFor(() => expect(screen.queryByTestId('brand-withdraw-warning')).toBeNull());
+    expect(screen.getByTestId('brand-logo-row-logo-old').textContent).toContain('Withdrawn');
+  });
+
+  it('withdrawing the logo the brand is showing says it comes off the brand now', async () => {
+    get.mockResolvedValue(record({ configured: true, logos: [published({ id: 'logo-now', current: true })] }));
+    const user = userEvent.setup();
+    render(<BrandSettings />);
+    await user.click(await screen.findByTestId('brand-logo-withdraw-logo-now'));
+    expect(screen.getByTestId('brand-withdraw-warning').textContent).toContain('it is taken off your brand now');
+  });
+
+  it('the upload limit and the throttle are shown as the server words them', async () => {
+    get.mockResolvedValue(record({ configured: true }));
+    uploadLogo.mockRejectedValue(
+      new Error('This organization already keeps 10 published logos, the most allowed. Withdraw one you no longer need (Settings > Brand > Past logos) before uploading another.'),
+    );
+    const user = userEvent.setup();
+    render(<BrandSettings />);
+    await user.upload(await screen.findByTestId('brand-logo-input'), new File([new Uint8Array(100)], 'logo.png', { type: 'image/png' }));
+    expect(await screen.findByText(/already keeps 10 published logos/)).toBeInTheDocument();
   });
 });
