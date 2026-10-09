@@ -14,6 +14,7 @@ import {
 
 import { mailPalette, mailSupportText, renderMailHeaderCell, renderMailSupportLine } from './brand-mail';
 import type { MailBrand } from './brand-mail';
+import { hasVisibleCharacter, stripInvisibleCharacters } from '../../shared/tenantBrand';
 
 /** The portal's own sending address. The display name may vary; this never does. */
 export const PORTAL_SENDER_ADDRESS = 'noreply@supdox.com';
@@ -77,12 +78,16 @@ export interface SendEmailResult {
  * quoted display name or fake an address are removed, not escaped.
  */
 export function viaSenderName(tenantName: string | null | undefined): string {
-  const clean = (tenantName ?? '')
+  // Invisible and direction-changing characters are taken out HERE, where the
+  // From name is built, and not only where a brand's display name is saved:
+  // with no brand the name is `tenants.name`, which is not validated that way.
+  // A name with no letter or digit left is no name: the portal's own is used.
+  const clean = stripInvisibleCharacters(tenantName ?? '')
     .replace(/[\r\n"<>\\,;:@]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80);
-  return clean ? `${clean} via ${PORTAL_SENDER_NAME}` : PORTAL_SENDER_NAME;
+  return clean && hasVisibleCharacter(clean) ? `${clean} via ${PORTAL_SENDER_NAME}` : PORTAL_SENDER_NAME;
 }
 
 /** Base64 of raw bytes, built in chunks so a multi-megabyte file cannot overflow the call stack. */

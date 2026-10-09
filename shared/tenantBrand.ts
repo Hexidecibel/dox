@@ -40,6 +40,19 @@ export const BRAND_LOGO_MAX_BYTES = 512 * 1024;
 export const BRAND_LOGO_MIN_PIXELS = 16;
 export const BRAND_LOGO_MAX_PIXELS = 2000;
 
+/** Logo uploads one organisation may attempt in an hour (all of them count). */
+export const BRAND_LOGO_UPLOADS_PER_HOUR = 20;
+/**
+ * Logos one organisation may keep published at once, the current one included.
+ * Past logos stay reachable for mail already sent, so they are not free: at the
+ * cap an admin withdraws one before another new image is accepted. Nothing is
+ * ever withdrawn automatically.
+ */
+export const BRAND_LOGO_RETAINED_MAX = 10;
+export const BRAND_WITHDRAW_REASON_MAX = 300;
+/** How long a browser or a mail proxy may keep a logo: a withdrawal lands within a day. */
+export const BRAND_LOGO_CACHE_SECONDS = 86400;
+
 /** The navy every outside page and mail used before a tenant could choose. */
 export const DEFAULT_BRAND_COLOR = '#1A365D';
 
@@ -243,20 +256,93 @@ const PHONE = /^[0-9+()\-. #xXeEtT]+$/;
 export type FieldResult = { ok: true; value: string | null } | { ok: false; error: string };
 
 /**
+ * Characters that take up no space, or change the direction text is drawn in.
+ * Written as code points, not as literals, so no editor or tool can lose them.
+ *
+ * WHY THEY ARE REFUSED. A display name becomes the From name and the subject
+ * of mail. U+202E in front of a name draws it backwards in an inbox; U+200B or
+ * a Hangul filler on its own is a sender with no name at all. None of these
+ * has a use in a company name or a support line.
+ */
+const INVISIBLE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00ad, 0x00ad], // soft hyphen
+  [0x034f, 0x034f], // combining grapheme joiner
+  [0x061c, 0x061c], // Arabic letter mark
+  [0x115f, 0x1160], // Hangul choseong / jungseong fillers
+  [0x17b4, 0x17b5], // Khmer inherent vowels (invisible)
+  [0x180b, 0x180f], // Mongolian free variation selectors, vowel separator
+  [0x200b, 0x200f], // zero width space / joiners, LRM, RLM
+  [0x202a, 0x202e], // bidi embeddings and overrides
+  [0x2060, 0x206f], // word joiner, invisible operators, bidi isolates
+  [0x2800, 0x2800], // braille pattern blank
+  [0x3164, 0x3164], // Hangul filler
+  [0xfeff, 0xfeff], // zero width no-break space / BOM
+  [0xffa0, 0xffa0], // halfwidth Hangul filler
+  [0xfff9, 0xfffb], // interlinear annotation
+  [0x1d173, 0x1d17a], // musical formatting
+  [0xe0000, 0xe007f], // tags
+];
+
+const hex = (n: number) => n.toString(16);
+const INVISIBLE_CLASS = INVISIBLE_RANGES.map(([from, to]) =>
+  from === to ? `\\u{${hex(from)}}` : `\\u{${hex(from)}}-\\u{${hex(to)}}`,
+).join('');
+/** Any invisible or direction-changing character, plus the whole Cf category. */
+const INVISIBLE = new RegExp(`[${INVISIBLE_CLASS}\\p{Cf}]`, 'u');
+const INVISIBLE_ALL = new RegExp(`[${INVISIBLE_CLASS}\\p{Cf}]`, 'gu');
+const VISIBLE = /[\p{L}\p{N}]/u;
+
+/** Does this text carry an invisible or direction-changing character? */
+export function hasInvisibleCharacters(text: string): boolean {
+  return INVISIBLE.test(text);
+}
+
+/** The text with every such character taken out. */
+export function stripInvisibleCharacters(text: string): string {
+  return text.replace(INVISIBLE_ALL, '');
+}
+
+/** Does it contain at least one letter or digit a reader can see? */
+export function hasVisibleCharacter(text: string): boolean {
+  return VISIBLE.test(stripInvisibleCharacters(text));
+}
+
+/**
  * One line of text a person typed, to be shown to outsiders. Stored AS TYPED
  * (an ampersand or an angle bracket is a legitimate character in a company
- * name) and escaped wherever it is drawn; what is refused is anything that is
- * not one line -- a control character or a line break -- and anything too long.
+ * name) and escaped wherever it is drawn. What is refused:
+ *
+ *   - anything that is not one line (a control character, a line break);
+ *   - an invisible or direction-changing character (see INVISIBLE_RANGES);
+ *   - anything too long;
+ *   - with `requireVisible` (the display name): text with no letter or digit.
+ *
  * Empty means "not set".
  */
-export function cleanBrandText(raw: unknown, label: string, max: number): FieldResult {
+export function cleanBrandText(
+  raw: unknown,
+  label: string,
+  max: number,
+  opts: { requireVisible?: boolean } = {},
+): FieldResult {
   if (raw === null || raw === undefined) return { ok: true, value: null };
   if (typeof raw !== 'string') return { ok: false, error: `${label} must be text` };
   const value = raw.trim();
   if (value === '') return { ok: true, value: null };
   if (CONTROL_CHARS.test(value)) return { ok: false, error: `${label} must be a single line of plain text` };
+  if (hasInvisibleCharacters(value)) {
+    return { ok: false, error: `${label} contains an invisible or text-direction character; type it again as plain text` };
+  }
   if (value.length > max) return { ok: false, error: `${label} is too long (${max} characters at most)` };
+  if (opts.requireVisible && !VISIBLE.test(value)) {
+    return { ok: false, error: `${label} must contain at least one letter or digit` };
+  }
   return { ok: true, value };
+}
+
+/** The display name: brand text that must also be readable as a name. */
+export function cleanDisplayName(raw: unknown, label = 'Display name'): FieldResult {
+  return cleanBrandText(raw, label, BRAND_DISPLAY_NAME_MAX, { requireVisible: true });
 }
 
 export function cleanBrandEmail(raw: unknown, label: string): FieldResult {
@@ -445,10 +531,29 @@ const be16 = (b: Uint8Array, at: number) => (b[at] << 8) | b[at + 1];
 const le16 = (b: Uint8Array, at: number) => b[at] | (b[at + 1] << 8);
 const le24 = (b: Uint8Array, at: number) => b[at] | (b[at + 1] << 8) | (b[at + 2] << 16);
 
+/**
+ * A PNG is its signature, then chunks: 4 bytes of length, 4 of type, the data,
+ * 4 of CRC. The first chunk is IHDR and carries the size. The walk goes on to
+ * the first IDAT (the pixels) and refuses two things on the way:
+ *
+ *   - an `acTL` chunk, which is what makes a PNG ANIMATED (an APNG must declare
+ *     it before the first IDAT). A logo does not move;
+ *   - a file whose chunks do not lead to an IDAT at all: it is not an image.
+ */
 function sniffPng(b: Uint8Array): SniffedLogo | null {
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  if (b.length < 24 || sig.some((v, i) => b[i] !== v) || !ascii(b, 12, 'IHDR')) return null;
-  return { contentType: 'image/png', extension: 'png', width: be32(b, 16), height: be32(b, 20) };
+  if (b.length < 33 || sig.some((v, i) => b[i] !== v) || !ascii(b, 12, 'IHDR') || be32(b, 8) !== 13) return null;
+  const logo: SniffedLogo = { contentType: 'image/png', extension: 'png', width: be32(b, 16), height: be32(b, 20) };
+  let at = 33; // signature (8) + IHDR chunk (4 + 4 + 13 + 4)
+  for (let chunks = 0; chunks < 4096; chunks += 1) {
+    if (at + 12 > b.length) return null;
+    const length = be32(b, at);
+    if (ascii(b, at + 4, 'acTL')) return null;
+    if (ascii(b, at + 4, 'IDAT')) return logo;
+    if (ascii(b, at + 4, 'IEND')) return null;
+    at += 12 + length;
+  }
+  return null;
 }
 
 function sniffJpeg(b: Uint8Array): SniffedLogo | null {
@@ -574,4 +679,43 @@ export function pageBrand(brand: PublicBrand | null | undefined, fallbackName: s
     logoSrc: pageLogoSrc(brand),
     support,
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// A Records form's own accent colour
+// ---------------------------------------------------------------------------
+
+export type AccentResult = { ok: true; value: string | null } | { ok: false; error: string };
+
+const SHORT_HEX = /^#[0-9a-fA-F]{3}$/;
+
+/**
+ * The accent colour of one public form, as typed in the form builder.
+ *
+ * More forgiving than a brand colour ON THE WAY IN, because the builder's
+ * field was free text for a long time: `#abc` is read as `#AABBCC`, any case
+ * is accepted, surrounding spaces are dropped. Empty is "none". Anything else
+ * -- a colour name, `rgb()`, a longer hex -- is an error, never a guess. What
+ * comes out is `#RRGGBB` upper case or null, so what is DRAWN is held to the
+ * same rule as a brand colour.
+ */
+export function normalizeFormAccent(raw: unknown): AccentResult {
+  if (raw === null || raw === undefined) return { ok: true, value: null };
+  if (typeof raw !== 'string') return { ok: false, error: 'Accent colour must be a hex colour such as #1A365D' };
+  const value = raw.trim();
+  if (value === '') return { ok: true, value: null };
+  if (SHORT_HEX.test(value)) {
+    const [r, g, bl] = [value[1], value[2], value[3]];
+    return { ok: true, value: `#${r}${r}${g}${g}${bl}${bl}`.toUpperCase() };
+  }
+  const full = parseBrandColor(value);
+  if (full) return { ok: true, value: full };
+  return { ok: false, error: 'Accent colour must be a hex colour such as #1A365D (three or six digits after the #)' };
+}
+
+/** The accent a stored setting really draws: a colour, or null (falls back). */
+export function formAccentOrNull(raw: unknown): string | null {
+  const r = normalizeFormAccent(raw);
+  return r.ok ? r.value : null;
 }

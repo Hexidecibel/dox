@@ -12,6 +12,12 @@ import {
   cleanBrandEmail,
   cleanBrandPhone,
   cleanBrandText,
+  cleanDisplayName,
+  formAccentOrNull,
+  hasInvisibleCharacters,
+  hasVisibleCharacter,
+  normalizeFormAccent,
+  stripInvisibleCharacters,
   cleanSupportOverrides,
   contrastRatio,
   isBrandSurface,
@@ -327,5 +333,148 @@ describe('what a logo file is: the bytes, not the label', () => {
     expect(judgeLogo(pngBytes(2000, 2000)).ok).toBe(true);
     expect(judgeLogo(pngBytes(2001, 100)).ok).toBe(false);
     expect(judgeLogo(pngBytes(100, 40000)).ok).toBe(false);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// After the independent review (2026-10-08)
+// ---------------------------------------------------------------------------
+
+const cp = (n: number) => String.fromCodePoint(n);
+
+describe('invisible and direction-changing characters are refused in every brand text field', () => {
+  // Written as code points so no editor or tool can lose them.
+  const HOSTILE: Array<[string, number]> = [
+    ['zero width space', 0x200b],
+    ['zero width non-joiner', 0x200c],
+    ['zero width joiner', 0x200d],
+    ['left-to-right mark', 0x200e],
+    ['right-to-left mark', 0x200f],
+    ['left-to-right embedding', 0x202a],
+    ['right-to-left embedding', 0x202b],
+    ['pop directional formatting', 0x202c],
+    ['left-to-right override', 0x202d],
+    ['RIGHT-TO-LEFT OVERRIDE', 0x202e],
+    ['word joiner', 0x2060],
+    ['invisible times', 0x2062],
+    ['left-to-right isolate', 0x2066],
+    ['right-to-left isolate', 0x2067],
+    ['pop directional isolate', 0x2069],
+    ['zero width no-break space', 0xfeff],
+    ['Hangul filler', 0x3164],
+    ['Hangul choseong filler', 0x115f],
+    ['Hangul jungseong filler', 0x1160],
+    ['halfwidth Hangul filler', 0xffa0],
+    ['soft hyphen', 0x00ad],
+    ['Arabic letter mark', 0x061c],
+    ['braille blank', 0x2800],
+    ['Mongolian vowel separator', 0x180e],
+    ['tag space', 0xe0020],
+  ];
+
+  it.each(HOSTILE)('%s (U+%s) is refused in the middle of a display name and of a support line', (_name, code) => {
+    const text = `North${cp(code)}field`;
+    expect(hasInvisibleCharacters(text)).toBe(true);
+    for (const result of [cleanDisplayName(text), cleanBrandText(text, 'Support line text', 200)]) {
+      expect(result.ok).toBe(false);
+      expect(!result.ok && result.error).toContain('invisible or text-direction character');
+    }
+    // At the very front it is refused too -- or, for the one of these that
+    // JavaScript counts as white space (U+FEFF), trimmed away. Either way it
+    // is never in what is stored.
+    const leading = cleanBrandText(`${cp(code)}Northfield`, 'Support line text', 200);
+    expect(leading.ok ? leading.value : 'Northfield').toBe('Northfield');
+    expect(stripInvisibleCharacters(text)).toBe('Northfield');
+  });
+
+  it('a name that would draw backwards in an inbox is refused', () => {
+    // U+202E in front: "moc.elpmaxe" reads "example.com" on screen.
+    expect(cleanDisplayName(`${cp(0x202e)}moc.elpmaxe`).ok).toBe(false);
+  });
+
+  it('a display name must have a letter or digit somebody can see', () => {
+    for (const blank of [cp(0x3164), cp(0x200b), `${cp(0x3164)}${cp(0x3164)}`, '...', '---', '***', '"\'"']) {
+      expect(cleanDisplayName(blank).ok, JSON.stringify(blank)).toBe(false);
+    }
+    const symbols = cleanDisplayName('---');
+    expect(!symbols.ok && symbols.error).toBe('Display name must contain at least one letter or digit');
+    for (const fine of ['Northfield Foods', 'A', '7', 'Smith & Sons <Dairy>', 'Søndergård A/S', '北田食品', 'Ünal Süt 24']) {
+      expect(cleanDisplayName(fine)).toEqual({ ok: true, value: fine });
+    }
+    expect(cleanDisplayName('')).toEqual({ ok: true, value: null });
+    expect(cleanDisplayName(null)).toEqual({ ok: true, value: null });
+    expect(cleanDisplayName('x'.repeat(81)).ok).toBe(false);
+  });
+
+  it('a support line may be punctuation; it may not be invisible', () => {
+    expect(cleanBrandText('---', 'Support line text', 200).ok).toBe(true);
+    expect(cleanBrandText(cp(0x3164), 'Support line text', 200).ok).toBe(false);
+  });
+
+  it('hasVisibleCharacter ignores what cannot be seen', () => {
+    expect(hasVisibleCharacter('Northfield')).toBe(true);
+    expect(hasVisibleCharacter(`${cp(0x3164)}${cp(0x115f)}${cp(0xffa0)}`)).toBe(false);
+    expect(hasVisibleCharacter(`${cp(0x200b)} ${cp(0x202e)}`)).toBe(false);
+    expect(hasVisibleCharacter('')).toBe(false);
+  });
+
+  it('ordinary accents, scripts and symbols are not caught', () => {
+    for (const fine of ['Crème & Co.', 'Ελληνικά', 'Привет', 'مرحبا', 'שלום', '日本語', 'Ñandú 100%', "O'Brien (Dairy) #2"]) {
+      expect(hasInvisibleCharacters(fine), fine).toBe(false);
+    }
+  });
+});
+
+describe('an animated PNG is not a logo', () => {
+  it('a PNG with an acTL chunk is refused, as an animated WebP is', () => {
+    expect(sniffLogo(pngBytes(320, 96, 400))).toEqual({ contentType: 'image/png', extension: 'png', width: 320, height: 96 });
+    expect(sniffLogo(pngBytes(320, 96, 400, 0, { animated: true }))).toBeNull();
+    const verdict = judgeLogo(pngBytes(320, 96, 400, 0, { animated: true }));
+    expect(verdict.ok).toBe(false);
+  });
+
+  it('a PNG whose chunks never reach the image data is not an image', () => {
+    expect(sniffLogo(pngBytes(320, 96, undefined, 0, { noData: true }))).toBeNull();
+    // A header with bytes after it that are not chunks at all.
+    const junk = new Uint8Array(200);
+    junk.set(pngBytes(320, 96).slice(0, 33), 0);
+    for (let i = 33; i < junk.length; i += 1) junk[i] = 0xee;
+    expect(sniffLogo(junk)).toBeNull();
+  });
+
+  it('an acTL after the image data does not animate anything and is not what is tested for', () => {
+    const still = pngBytes(320, 96, 400);
+    // The walk stops at IDAT; what follows is not read.
+    expect(sniffLogo(still)).not.toBeNull();
+  });
+});
+
+describe("a form's own accent colour", () => {
+  it('a hex colour of three or six digits, any case, is normalised to #RRGGBB', () => {
+    expect(normalizeFormAccent('#1a365d')).toEqual({ ok: true, value: '#1A365D' });
+    expect(normalizeFormAccent('#1A365D')).toEqual({ ok: true, value: '#1A365D' });
+    expect(normalizeFormAccent('#abc')).toEqual({ ok: true, value: '#AABBCC' });
+    expect(normalizeFormAccent('#F0a')).toEqual({ ok: true, value: '#FF00AA' });
+    expect(normalizeFormAccent('  #abc  ')).toEqual({ ok: true, value: '#AABBCC' });
+  });
+
+  it('empty is none', () => {
+    for (const none of [null, undefined, '', '   ']) expect(normalizeFormAccent(none)).toEqual({ ok: true, value: null });
+  });
+
+  it.each(['red', 'navy', '1A365D', '#1A365', '#1A365DFF', '#12', '#ggg', 'rgb(0,0,0)', '#abc; background:url(x)', 'var(--x)'])(
+    '%j is refused with a message, never guessed at',
+    (bad) => {
+      const r = normalizeFormAccent(bad);
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.error).toContain('hex colour');
+      expect(formAccentOrNull(bad)).toBeNull();
+    },
+  );
+
+  it('a value that is not a string is refused', () => {
+    expect(normalizeFormAccent(0xabc).ok).toBe(false);
+    expect(normalizeFormAccent(['#abc']).ok).toBe(false);
   });
 });
