@@ -6024,7 +6024,17 @@ paths:
                 type: object
                 properties:
                   placed: { type: integer }
-                  already_held: { type: integer }
+                  already_held: { type: integer, description: "Holds that were already there and still active" }
+                  released:
+                    type: array
+                    description: "Holds that had been placed and were since RELEASED. Nothing was placed for them; the certificate is not on hold for that result."
+                    items:
+                      type: object
+                      properties:
+                        reason: { type: string }
+                        released_by_name: { type: string, nullable: true }
+                        released_at: { type: string }
+                  message: { type: string, description: "What happened, in words a screen prints as they stand" }
         '403': { description: A read-only account }
         '404': { description: "No such failure in the caller's organization" }
         '409': { description: Already retried }

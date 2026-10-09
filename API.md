@@ -2022,12 +2022,18 @@ carry the hold's reason. A file that leaves does not: the ZIP manifest and the
 bundle note print "On hold: this certificate is not sent until QA releases the
 hold.", and a link's recipient is told only a count.
 
-**A lot hold is on the lot, on every certificate that carries it.** A hold
-placed with `lot_id` is on that `lots` row (organization, supplier, product,
-lot, sublot), not on one certificate's mention of it. Every certificate linked
-to the row is held: a re-scan, a duplicate that was kept, a corrected
-certificate approved later, which is held from the moment it is linked (QA is
-mailed once that it arrived). The hold still names the certificate it was
+**A lot hold is on the lot, on every certificate of it.** A hold placed with
+`lot_id` names one lot row, and covers THE LOT: every certificate of the same
+supplier on any lot row with the same stored lot key and the same sublot code,
+whatever product that row was read under (two scans of one certificate often
+read the product differently, and so sit on different rows). A re-scan, a
+duplicate that was kept, a corrected certificate approved later: each is held,
+the last from the moment it is linked (QA is mailed once that it arrived). A
+certificate's supplier is its own `supplier_id`, else its lot row's. NOT
+covered: another supplier's lot with the same number, a different sublot, and
+a certificate with no supplier recorded anywhere unless it is on the very row
+the hold names. A held brief carries `reach` (`placed`, `lot`, `page`) and,
+for `lot`, `own_lot_id`: the asked document's own row. The hold still names the certificate it was
 placed from; a sibling's `also_held_by` carries that `document_id` and
 `document_title`. One lot row carries one person's hold at a time, wherever it
 was placed from (409, naming the certificate). Releasing is one act on the
@@ -2060,7 +2066,8 @@ the same certificate is refused under that lot's rule, and the refusal carries
 **Delivered.** An order is `delivered` only when every line has actually gone
 on a successful send. A line that was on hold when the order was sent and has
 never gone since is still owed after the hold is released, until the order is
-sent again.
+sent again. The QA-release path asks the same question: a certificate that
+went on an earlier send is not owed again because a later send only asked QA.
 
 **Automatic holds.** Placed when a certificate is approved, from the verdicts
 just written, and never from the bulk recheck:
@@ -2089,8 +2096,12 @@ QA route (the administrators when nobody is on it), and returned as `failures`
 on `GET /api/holds` and `GET /api/documents/:id/holds`:
 `{ id, document_id, document_title, document_version, created_at, error, holds: [{ source, reason }] }`.
 `POST /api/holds/failures/:id/retry` places exactly those holds, once per
-judged result, and answers `{ placed, already_held }`. Anybody who may place a
-hold may retry; a second retry is a 409.
+judged result, and answers `{ placed, already_held, released, message }`:
+`released` lists holds that had been placed and were since RELEASED (nothing
+is placed for those, and `message` says who released them and when rather than
+"already on hold"). Anybody who may place a hold may retry; a second retry is
+a 409. There is one open failure per certificate version, QA is mailed once
+when it opens, and it closes by itself once the holds it describes exist.
 
 **Replacing the file does not lift a hold.** A new version, or the Review
 Queue's "Replace existing", leaves an active hold on the document.

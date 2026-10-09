@@ -52,7 +52,7 @@ silent-apply, and eventually full auto-ingest.
 
 **Source:** AJ Conner's rules table assumes holds exist (B1 "Critical: this result stops the
 shipment", E2 "zero-tolerance ... holds until a person resolves it") and nothing held anything.
-Decision C-005 and C-071..C-090 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
+Decision C-005 and C-071..C-093 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
 under "Holds (migration 0139)".
 
 - `migrations/0139_document_holds.sql`: `document_versions.source_queue_id`, `document_hold_failures`, and `document_holds`, append-only, two unique indexes (one active per lot and source; an automatic hold once per judged result ever), an immutability trigger. Additive; holds nothing by itself.
@@ -66,12 +66,14 @@ under "Holds (migration 0139)".
 - Tests: `tests/unit/holds.test.ts`, `tests/unit/specHoldsPlan.test.ts`, `tests/api/holds.test.ts`, `tests/api/migration-0139-document-holds.test.ts`, `src/components/DocumentHolds.test.tsx`, `src/pages/Holds.test.tsx`.
 
 - After an independent review (same day, C-085..C-090): a file is its CURRENT version's queue item (`document_versions.source_queue_id`), so a reissued certificate no longer sends a held or locked lot on its whole original; a LOT hold follows the `lots` row onto every certificate of the lot (supersedes C-071); a hold that could not be placed is recorded, mailed, shown and retried (`document_hold_failures`), per document; a file takes the strictest sharing rule of every lot it prints; a flat extraction approved as several product documents is registered and held per product, unattributed results on every document; `delivered` means every line travelled; one read per part in an order send. `bin/migrate --reapply` for the amended migration.
+- After the re-review (C-091..C-093): a lot hold covers the same supplier + lot key + sublot on EVERY lot row, whatever product each scan was read under (not another supplier's same number, not another sublot); one open hold failure per certificate version, closed by itself once the hold exists, with a truthful retry; one `delivered` function for the send and the QA-release paths; the prod pre-check query for the version backfill is in `docs/migration-history.md`.
 
 **Not built:** B3 supplier-probation holds (no supplier watch statuses exist); anything to a WMS;
 C-016's notice for a bare "Negative"; dilution (not extracted).
 
 **To ship:** `bin/backup`, then 0139 on staging and prod with `bin/migrate-prod-one` BEFORE the code
-deploys (every exit reads `document_holds`, and that read fails closed). After the deploy,
+deploys (every exit reads `document_holds`, and that read fails closed). Run the read-only
+backfill check in the 0139 row of `docs/migration-history.md` on prod FIRST. After the deploy,
 `bin/propose-spec-holds --tenant <id> --remote` (dry run) per organization and decide whether to
 `--apply`. Release note reach tokens: holds and the automatic Critical hold are `[existing]`; QA
 being told by mail needs the `QA` owner route, `[config]`; the zero-tolerance hold needs an analyte
