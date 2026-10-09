@@ -35,6 +35,7 @@ import type {
   RecordColumnRow,
   RecordUpdateRequestRow,
 } from '../../../../../../../../shared/types';
+import { loadPublicBrand } from '../../../../../../../lib/tenant-brand';
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -216,6 +217,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           dueDate,
           fieldCount: fieldsRequested.length,
           publicUrl,
+          // The organisation's brand (0140), from the sheet's own tenant.
+          brand: await loadPublicBrand(context.env.DB, sheet.tenant_id, 'records_update_request', { origin }),
         });
         emailSent = await sendEmail(context.env.RESEND_API_KEY, {
           to: email,

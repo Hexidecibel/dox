@@ -1150,3 +1150,173 @@ describe('the master user setting', () => {
     ]);
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// The tenant brand on a supplier request (migration 0140)
+// ───────────────────────────────────────────────────────────────────────────
+describe('the tenant brand on a supplier request (migration 0140)', () => {
+  async function setBrand(tenantId: string, cols: Record<string, string | null>): Promise<void> {
+    const keys = Object.keys(cols);
+    await db
+      .prepare(`INSERT INTO tenant_brands (tenant_id, ${keys.join(', ')}) VALUES (?, ${keys.map(() => '?').join(', ')})`)
+      .bind(tenantId, ...keys.map((k) => cols[k]))
+      .run();
+  }
+
+  it('dresses the mail and names the organisation by its display name; the approved text is untouched', async () => {
+    await setBrand(seed.tenantId, {
+      display_name: 'Northfield Foods',
+      primary_color: '#0B6E4F',
+      support_text: 'DEFAULT-LINE-NOT-FOR-SUPPLIERS',
+      support_overrides: JSON.stringify({
+        supplier_request: { text: 'Supplier desk', email: 'suppliers@northfield.example', phone: null },
+      }),
+    });
+    await setBrand(seed.tenantId2, { display_name: 'OTHER-TENANT-BRAND', support_text: 'OTHER-TENANT-LINE' });
+
+    const { sent } = stubResend();
+    const supplierId = await makeSupplier('Acme Supplier');
+    await addContact(supplierId);
+    const docId = await makeDoc('Acme COI', { supplierId });
+    await run(asOfFor(30));
+    const draft = await waitingSend(docId);
+    // The draft a person reads already says who the supplier knows us as.
+    expect(draft.draft_subject).toContain('Northfield Foods');
+    expect(draft.draft_body).toContain('Northfield Foods');
+    expect(`${draft.draft_subject}\n${draft.draft_body}`).not.toContain('Test Corp');
+
+    expect((await approve(draft)).status).toBe(200);
+    const [mail] = toContact(sent);
+    expect(mail.html).toContain('<td style="background:#0B6E4F;padding:24px 32px;">');
+    expect(mail.html).toContain('font-weight:600;">Northfield Foods</h1>');
+    expect(mail.html).toContain('background:#0B6E4F;color:#ffffff;');
+    expect(mail.html).toContain('<strong>Northfield Foods</strong> &middot; Supplier desk &middot; <a href="mailto:suppliers@northfield.example"');
+    // The supplier surface's line only; nothing of the other tenant.
+    for (const leak of ['DEFAULT-LINE-NOT-FOR-SUPPLIERS', 'OTHER-TENANT-BRAND', 'OTHER-TENANT-LINE', 'Test Corp', '#1A365D']) {
+      expect(mail.html).not.toContain(leak);
+    }
+    // Who it is from and who a reply reaches: the address never moves.
+    expect(mail.from).toBe('Northfield Foods via SupDox <noreply@supdox.com>');
+    expect(mail.reply_to).toBe('orgadmin@test.com');
+
+    // What is STORED as sent is still the approved text plus the link block.
+    const stored = (await sendsFor(docId))[0];
+    const url = /https:\/\/portal\.example\.com\/r\/[A-Za-z0-9_-]+/.exec(mail.html)![0];
+    expect(stored.sent_body).toBe(`${String(draft.draft_body).replace(/\s+$/, '')}\n\n${renewalRequestLinkBlock(url)}`);
+    expect(stored.sent_body).not.toContain('Supplier desk');
+
+    // ...and the audit row says what it was dressed in.
+    const [row] = await audits('renewal_request.sent');
+    expect(row.details).toMatchObject({
+      from_name: 'Northfield Foods via SupDox',
+      body: stored.sent_body,
+      brand: {
+        display_name: 'Northfield Foods',
+        logo_url: null,
+        primary_color: '#0B6E4F',
+        support: 'Supplier desk · suppliers@northfield.example',
+      },
+    });
+
+    // The page the link opens carries the same brand, for the same surface.
+    const token = url.split('/r/')[1];
+    const page = await supplierPageGet({
+      request: new Request(`${ORIGIN}/api/supplier-requests/public/${token}`),
+      env,
+      data: {},
+      params: { token },
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+      next: async () => new Response(null),
+      functionPath: `/api/supplier-requests/public/${token}`,
+    } as never);
+    expect(((await page.json()) as { brand: unknown }).brand).toEqual({
+      display_name: 'Northfield Foods',
+      logo_url: null,
+      primary_color: '#0B6E4F',
+      accent_color: null,
+      support: { text: 'Supplier desk', email: 'suppliers@northfield.example', phone: null },
+    });
+  });
+
+  it('no brand record: the mail, the sender name and the audit row are what they were', async () => {
+    // Another tenant having a brand changes nothing here.
+    await setBrand(seed.tenantId2, { display_name: 'OTHER-TENANT-BRAND', primary_color: '#7A1F5C' });
+    const { sent } = stubResend();
+    const supplierId = await makeSupplier('Acme Supplier');
+    await addContact(supplierId);
+    const docId = await makeDoc('Acme COI', { supplierId });
+    await run(asOfFor(30));
+    const draft = await waitingSend(docId);
+    expect(draft.draft_body).toContain('Test Corp');
+    expect((await approve(draft)).status).toBe(200);
+    const [mail] = toContact(sent);
+    expect(mail.html).toContain(
+      '<td style="background:#1A365D;padding:24px 32px;">\n        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Test Corp</h1>',
+    );
+    expect(mail.html).not.toContain('OTHER-TENANT-BRAND');
+    expect(mail.html).not.toContain('#7A1F5C');
+    expect(mail.html).not.toContain('<strong>');
+    expect(mail.from).toBe('Test Corp via SupDox <noreply@supdox.com>');
+    const [row] = await audits('renewal_request.sent');
+    expect(row.details.from_name).toBe('Test Corp via SupDox');
+    expect(Object.prototype.hasOwnProperty.call(row.details, 'brand')).toBe(false);
+  });
+  /** A published logo for the tenant, put on its brand. Returns the URL token. */
+  async function giveLogo(tenantId: string): Promise<string> {
+    const token = 'c0de'.repeat(10);
+    const sha = 'ab'.repeat(32);
+    await db
+      .prepare(
+        `INSERT INTO tenant_brand_logos (id, tenant_id, url_token, sha256, r2_key, content_type, size_bytes, width, height)
+         VALUES ('logo-e2e', ?, ?, ?, ?, 'image/png', 1200, 320, 96)`,
+      )
+      .bind(tenantId, token, sha, `brand/${tenantId}/logo-${sha}.png`)
+      .run();
+    await db.prepare(`UPDATE tenant_brands SET logo_id = 'logo-e2e' WHERE tenant_id = ?`).bind(tenantId).run();
+    return token;
+  }
+  const HOSTILE_NAME = `<script>alert(1)</script>"'& Co`;
+  const HOSTILE_LINE = `"><img src=x onerror=alert(2)>`;
+
+  it('END TO END with a logo and hostile text: the logo is ours and absolute, and every typed character is escaped', async () => {
+    await setBrand(seed.tenantId, {
+      display_name: HOSTILE_NAME,
+      primary_color: '#0B6E4F',
+      support_overrides: JSON.stringify({ supplier_request: { text: HOSTILE_LINE, email: null, phone: null } }),
+    });
+    const token = await giveLogo(seed.tenantId);
+
+    const { sent } = stubResend();
+    const supplierId = await makeSupplier('Acme Supplier');
+    await addContact(supplierId);
+    const docId = await makeDoc('Acme COI', { supplierId });
+    await run(asOfFor(30));
+    const draft = await waitingSend(docId);
+    expect((await approve(draft)).status).toBe(200);
+    const [mail] = toContact(sent);
+
+    // The logo: our own route, absolute, on white, alt text the (escaped) name.
+    expect(mail.html).toContain(
+      `<img src="${ORIGIN}/api/public/brand-logo/${token}" alt="&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;&amp; Co" height="48"`,
+    );
+    expect(mail.html).toContain('<td style="background:#ffffff;padding:24px 32px 16px;border-bottom:4px solid #0B6E4F;">');
+    // The name and the line, as text.
+    expect(mail.html).toContain('<strong>&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;&amp; Co</strong> &middot; &quot;&gt;&lt;img src=x onerror=alert(2)&gt;');
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).not.toContain('<img src=x');
+    expect(mail.html.match(/<img /g)).toHaveLength(1);
+    // The body a person approved names the organisation as typed, escaped too.
+    expect(mail.html).not.toMatch(/alert\(1\)<\/script>/);
+    // The From name cannot carry markup or break the header; the address is ours.
+    expect(mail.from).toBe('script alert(1) /script \'& Co via SupDox <noreply@supdox.com>');
+    expect(mail.reply_to).toBe('orgadmin@test.com');
+
+    const [row] = await audits('renewal_request.sent');
+    expect(row.details.brand).toMatchObject({
+      display_name: HOSTILE_NAME,
+      logo_url: `${ORIGIN}/api/public/brand-logo/${token}`,
+      support: HOSTILE_LINE,
+    });
+  });
+});

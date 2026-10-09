@@ -52,6 +52,8 @@ import type {
   SupplierRequestView,
   SupplierUploadResult,
 } from '../../lib/types';
+import { BrandHeader, BrandSupport } from '../../components/brand/BrandHeader';
+import { pageBrand } from '../../../shared/tenantBrand';
 
 const ACCENT = '#1A365D';
 const GOOD = '#1B5E20';
@@ -287,6 +289,9 @@ export function SupplierRequestPortal() {
     );
   }
 
+  // The organisation's brand (0140). With none, `brand.accent` is the navy the
+  // page always used and no band or support line is drawn.
+  const brand = pageBrand(view.brand, view.tenant_name);
   const due = dueText(view.due_date);
   const pct =
     view.progress.required_total > 0
@@ -304,8 +309,9 @@ export function SupplierRequestPortal() {
       }}
     >
       {/* ── Who is asking, of whom, and by when ───────────────────────── */}
-      <Typography variant="overline" sx={{ color: ACCENT, letterSpacing: 1 }}>
-        {view.tenant_name} — document request
+      <BrandHeader brand={view.brand} />
+      <Typography variant="overline" sx={{ color: brand.accent, letterSpacing: 1 }}>
+        {brand.name} — document request
       </Typography>
       <Typography variant="h5" sx={{ fontWeight: 700, mt: 0.5, lineHeight: 1.25 }}>
         {view.title}
@@ -361,7 +367,7 @@ export function SupplierRequestPortal() {
                 mt: 1.5,
                 height: 10,
                 borderRadius: 5,
-                bgcolor: alpha(ACCENT, 0.12),
+                bgcolor: alpha(brand.accent, 0.12),
                 '& .MuiLinearProgress-bar': { bgcolor: GOOD, borderRadius: 5 },
               }}
             />
@@ -448,7 +454,7 @@ export function SupplierRequestPortal() {
       {view.accepting_uploads ? (
         <Paper
           variant="outlined"
-          sx={{ p: 2.5, mt: 3, borderRadius: 2, borderColor: alpha(ACCENT, 0.35) }}
+          sx={{ p: 2.5, mt: 3, borderRadius: 2, borderColor: alpha(brand.accent, 0.35) }}
         >
           <Typography sx={{ fontWeight: 700 }}>Send documents</Typography>
           <Typography variant="body2" sx={{ color: '#555', mt: 0.5 }}>
@@ -511,7 +517,7 @@ export function SupplierRequestPortal() {
             variant="contained"
             disabled={uploading || pending.length === 0 || selected.size === 0}
             onClick={() => void send(pending, [...selected])}
-            sx={{ mt: 2, py: 1.75, fontSize: '1rem', bgcolor: ACCENT }}
+            sx={{ mt: 2, py: 1.75, fontSize: '1rem', bgcolor: brand.accent }}
           >
             {uploading
               ? 'Sending…'
@@ -564,6 +570,7 @@ export function SupplierRequestPortal() {
         This link works until {formatDate(view.link_expires_at)}. If it stops working, reply
         to the message that brought you here and we will send a new one.
       </Typography>
+      <BrandSupport brand={view.brand} sx={{ mt: 1 }} />
     </Box>
   );
 }

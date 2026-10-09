@@ -26,8 +26,9 @@ import {
 } from '@mui/icons-material';
 import { publicApprovalsApi } from '../../lib/recordsApi';
 import type { PublicApprovalView } from '../../../shared/types';
+import { BrandHeader, BrandSupport } from '../../components/brand/BrandHeader';
+import { pageBrand } from '../../../shared/tenantBrand';
 
-const ACCENT = '#1A365D';
 
 export function PublicApprovalPage() {
   const { token } = useParams<{ token: string }>();
@@ -123,6 +124,11 @@ export function PublicApprovalPage() {
     );
   }
 
+  // The organisation's brand (0140). With none, `accent` is the navy the page
+  // always used and no band or support line is drawn.
+  const brand = pageBrand(view.brand, null);
+  const accent = brand.accent;
+
   if (submittedDecision) {
     return (
       <Box
@@ -131,7 +137,7 @@ export function PublicApprovalPage() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          bgcolor: alpha(ACCENT, 0.04),
+          bgcolor: alpha(accent, 0.04),
           p: 2,
         }}
       >
@@ -158,7 +164,7 @@ export function PublicApprovalPage() {
     <Box
       sx={{
         minHeight: '100vh',
-        bgcolor: alpha(ACCENT, 0.03),
+        bgcolor: alpha(accent, 0.03),
         py: { xs: 4, md: 8 },
         px: 2,
       }}
@@ -173,8 +179,9 @@ export function PublicApprovalPage() {
           overflow: 'hidden',
         }}
       >
+        <BrandHeader brand={view.brand} sx={{ borderRadius: 0, mb: 0 }} />
         {/* Header */}
-        <Box sx={{ p: { xs: 3, md: 4 }, borderBottom: 1, borderColor: 'divider', bgcolor: ACCENT, color: 'white' }}>
+        <Box sx={{ p: { xs: 3, md: 4 }, borderBottom: 1, borderColor: 'divider', bgcolor: accent, color: 'white' }}>
           <Typography variant="caption" sx={{ opacity: 0.85, fontWeight: 600, letterSpacing: 0.5 }}>
             APPROVAL REQUEST
           </Typography>
@@ -196,8 +203,8 @@ export function PublicApprovalPage() {
                 p: 2,
                 mb: 3,
                 borderLeft: 4,
-                borderColor: ACCENT,
-                bgcolor: alpha(ACCENT, 0.04),
+                borderColor: accent,
+                bgcolor: alpha(accent, 0.04),
                 fontStyle: 'italic',
               }}
             >
@@ -305,6 +312,7 @@ export function PublicApprovalPage() {
               Reject
             </Button>
           </Stack>
+          <BrandSupport brand={view.brand} />
         </Box>
       </Box>
     </Box>

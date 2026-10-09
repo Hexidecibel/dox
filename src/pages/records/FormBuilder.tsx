@@ -68,6 +68,7 @@ import type {
   RecordFormSettings,
 } from '../../../shared/types';
 import { FORM_ATTACHMENT_DEFAULTS } from '../../../shared/types';
+import { DEFAULT_BRAND_COLOR, formAccentOrNull, normalizeFormAccent } from '../../../shared/tenantBrand';
 
 type EntityKind = 'customer' | 'supplier' | 'product';
 
@@ -310,7 +311,7 @@ export function FormBuilder() {
       setSaveState('saving');
       try {
         const fc = next.field_config ? JSON.parse(next.field_config) : [];
-        const st = next.settings ? JSON.parse(next.settings) : {};
+        const st = settingsForSave(next.settings ? JSON.parse(next.settings) : {});
         const res = await recordsApi.forms.update(sheetId, formId, {
           name: next.name,
           description: next.description ?? null,
@@ -480,8 +481,9 @@ export function FormBuilder() {
       form: {
         name: form.name,
         description: form.description,
-        accent_color: settings.accent_color ?? null,
-        logo_url: settings.logo_url ?? null,
+        // What the public page will really draw: a colour, or nothing.
+        accent_color: formAccentOrNull(settings.accent_color),
+        logo_url: null,
       },
       fields,
       turnstile_site_key: turnstileSiteKey,
@@ -744,14 +746,9 @@ export function FormBuilder() {
             fullWidth
             size="small"
           />
-          <TextField
-            label="Accent color"
-            placeholder="#1A365D"
-            value={settings.accent_color ?? ''}
-            onChange={(e) => updateSettings({ accent_color: e.target.value })}
-            fullWidth
-            size="small"
-            helperText="Hex color used for buttons and highlights"
+          <FormAccentField
+            stored={settings.accent_color ?? null}
+            onCommit={(accent_color) => updateSettings({ accent_color })}
           />
         </Box>
       </Paper>
@@ -1387,6 +1384,104 @@ function PublicLinkPanel({ isPublic, status, publicUrl, onRotate, onPublish }: P
             Rotate URL
           </Button>
         </Tooltip>
+      </Box>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------
+// The form's accent colour (migration 0140)
+// ---------------------------------------------------------------------
+
+/**
+ * The settings a save sends. Two things are taken out on the way:
+ *
+ *   - an accent that is not a colour. It was never drawn as one (the public
+ *     page falls back to the organisation's brand), the server now refuses it,
+ *     and leaving it in would make every OTHER edit to the form fail to save.
+ *     The builder says so above the field before this happens;
+ *   - `logo_url`, a link to an outside address that no page ever drew.
+ */
+export function settingsForSave(settings: RecordFormSettings): RecordFormSettings {
+  const { logo_url: _dropped, ...rest } = settings as RecordFormSettings & { logo_url?: unknown };
+  return { ...rest, accent_color: formAccentOrNull(rest.accent_color) };
+}
+
+/**
+ * A colour picker and a hex field for one form's accent.
+ *
+ * It commits on blur (and when the picker moves), not on every keystroke: the
+ * builder autosaves, and "#1a3" on the way to "#1a365d" is itself a colour.
+ * What is committed is always `#RRGGBB` or nothing -- `#abc` and lower case
+ * are normalised, anything else is refused with the reason and NOT saved.
+ */
+export function FormAccentField({
+  stored,
+  onCommit,
+}: {
+  stored: string | null;
+  onCommit: (accent: string | null) => void;
+}) {
+  const storedColor = formAccentOrNull(stored);
+  const unusable = !!stored && stored.trim() !== '' && storedColor === null;
+  const [text, setText] = useState(storedColor ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const lastStored = useRef(stored);
+  if (lastStored.current !== stored) {
+    // The form was reloaded or saved: show what is stored now.
+    lastStored.current = stored;
+    setText(storedColor ?? '');
+    setError(null);
+  }
+
+  const commit = (raw: string) => {
+    const result = normalizeFormAccent(raw);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setError(null);
+    setText(result.value ?? '');
+    if (result.value !== storedColor || unusable) onCommit(result.value);
+  };
+
+  return (
+    <Box>
+      {unusable && (
+        <Alert severity="warning" sx={{ mb: 1.5 }} data-testid="form-accent-unused">
+          This form's stored accent colour, "{String(stored).slice(0, 40)}", is not a hex colour and is not being
+          used: the public form shows your organization's brand colour instead. Choose a colour below to replace
+          it; otherwise it is cleared the next time this form is saved.
+        </Alert>
+      )}
+      <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'flex-start' }}>
+        <Box
+          component="input"
+          type="color"
+          aria-label="Accent color picker"
+          data-testid="form-accent-picker"
+          value={(formAccentOrNull(text) ?? storedColor ?? DEFAULT_BRAND_COLOR).toLowerCase()}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => commit(e.target.value)}
+          sx={{ width: 48, height: 40, p: 0, border: '1px solid', borderColor: 'divider', borderRadius: 1, cursor: 'pointer', mt: 0.25 }}
+        />
+        <TextField
+          label="Accent color"
+          placeholder="#1A365D"
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            setError(null);
+          }}
+          onBlur={() => commit(text)}
+          error={!!error}
+          fullWidth
+          size="small"
+          inputProps={{ maxLength: 9, 'data-testid': 'form-accent-input' }}
+          helperText={
+            error ??
+            "A hex colour for this form's buttons and highlights. Leave empty to use your organization's brand colour (Settings > Brand)."
+          }
+        />
       </Box>
     </Box>
   );

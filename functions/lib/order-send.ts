@@ -79,6 +79,9 @@
 
 import { generateId, logAudit } from './db';
 import { computeChecksum } from './r2';
+import { mailPalette, renderMailHeaderCell, renderMailSupportLine } from './brand-mail';
+import type { MailBrand } from './brand-mail';
+import { loadPublicBrand } from './tenant-brand';
 import {
   bytesToBase64,
   sendEmailDetailed,
@@ -846,7 +849,13 @@ export function buildOrderDocumentsEmail(params: {
   documents?: OrderEmailFile[];
   documentsLinkUrl?: string | null;
   documentsLinkDays?: number | null;
+  /**
+   * The organisation's brand for this surface (0140), from `loadPublicBrand`.
+   * Null / absent draws the header and footer exactly as before.
+   */
+  brand?: MailBrand;
 }): { html: string } {
+  const palette = mailPalette(params.brand);
   const facts = [
     `Order ${params.orderNumber}`,
     params.poNumber ? `PO ${params.poNumber}` : null,
@@ -876,7 +885,7 @@ export function buildOrderDocumentsEmail(params: {
       ? `<p style="margin:0 0 8px;color:#555;">Too large to attach &mdash; open ${params.linked.length === 1 ? 'it' : 'them'} with the link below (${params.linked.length}):</p>
         <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">${params.linked.map(fileRow).join('')}</table>
         <p style="margin:0 0 24px;text-align:center;">
-          <a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
+          <a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:${palette.button};color:${palette.onButton};text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
         </p>
         <p style="margin:0 0 24px;color:#666;font-size:13px;">This link does not expire.</p>`
       : '';
@@ -888,7 +897,7 @@ export function buildOrderDocumentsEmail(params: {
       ? `<p style="margin:0 0 8px;color:#555;">Documents for this order &mdash; open ${documents.length === 1 ? 'it' : 'them'} with the link below (${documents.length}):</p>
         <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">${documents.map(fileRow).join('')}</table>
         <p style="margin:0 0 24px;text-align:center;">
-          <a href="${escapeHtml(params.documentsLinkUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
+          <a href="${escapeHtml(params.documentsLinkUrl)}" style="display:inline-block;background:${palette.button};color:${palette.onButton};text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
         </p>
         <p style="margin:0 0 24px;color:#666;font-size:13px;">This link works for ${params.documentsLinkDays ?? 30} days.</p>`
       : '';
@@ -906,15 +915,12 @@ export function buildOrderDocumentsEmail(params: {
 <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
-      <td style="background:#1A365D;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">${escapeHtml(params.tenantName)}</h1>
-        <p style="margin:6px 0 0;color:#cbd5e0;font-size:13px;">${facts}</p>
-      </td>
+      ${renderMailHeaderCell(params.brand, { fallbackTitle: params.tenantName, subtitleHtml: `${facts}` })}
     </tr>
     <tr>
       <td style="padding:32px;">
         ${partLine}
-        ${params.message ? `<p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid #1A365D;color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.message)}</p>` : ''}
+        ${params.message ? `<p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid ${palette.stripe};color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.message)}</p>` : ''}
         ${attachedBlock}
         ${linkedBlock}
         ${documentsBlock}
@@ -925,7 +931,7 @@ export function buildOrderDocumentsEmail(params: {
     </tr>
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
-        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+        ${renderMailSupportLine(params.brand)}<p style="margin:0;color:#999;font-size:12px;text-align:center;">
           Sent through SupDox by ${escapeHtml(params.senderEmail)}.
         </p>
       </td>
@@ -1216,6 +1222,9 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
   const results: OrderSendPartResult[] = [];
   const qaReleasedIds = new Set<string>();
   const withdrawn: { file_name: string; reason: string }[] = [];
+  // The organisation's brand for an order mail (0140): read once per run, from
+  // the tenant of the stored send. Null = the mail as it always was.
+  const brand = await loadPublicBrand(db, send.tenant_id, 'order_send', { origin: ctx.origin });
 
   for (const part of partNumbers) {
     const prior = previous.find((p) => p.part_number === part);
@@ -1377,6 +1386,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       documents: documentFiles,
       documentsLinkUrl,
       documentsLinkDays,
+      brand,
     });
     const outcome = await sendEmailDetailed(ctx.apiKey, {
       to: recipients,

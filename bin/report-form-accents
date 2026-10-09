@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/report-form-accents — list the Records forms whose stored accent colour
+ * will NOT be drawn once the tenant brand record ships (migration 0140,
+ * decisions C-106 / C-116). READ-ONLY: it runs SELECTs and writes nothing.
+ *
+ * WHY THIS EXISTS
+ *
+ * A form's accent colour was a free-text field, stored as typed and drawn
+ * unchecked. From 0140 the public form draws it only when it is a hex colour:
+ *
+ *   #RRGGBB, any case      drawn as before
+ *   #RGB, or stray spaces  normalised and drawn (the same colour, respelled)
+ *   anything else          NOT drawn: the form falls back to the organisation's
+ *                          brand colour, or the default navy
+ *
+ * The last group is a visible change to an existing public form, so it should
+ * be looked at on production BEFORE the code deploys. This prints those forms.
+ * The rule is the application's own (`formAccentOrNull`, shared/tenantBrand.ts,
+ * through its esbuild mirror), not a copy of it.
+ *
+ * It also counts forms that still store a `logo_url` (a link to an outside
+ * address). No page ever drew one and it is no longer published or saved; the
+ * count is there so nobody is surprised.
+ *
+ * Usage:
+ *   bin/report-form-accents                       # LOCAL D1
+ *   bin/report-form-accents --persist-to DIR      # LOCAL D1 state under DIR (a
+ *                                                 # git worktree has none of its own)
+ *   bin/report-form-accents --remote              # PRODUCTION, read-only
+ *   bin/report-form-accents --staging             # staging, read-only
+ *   bin/report-form-accents --json                # machine-readable
+ *
+ * Exit status: 0 when it could read the forms (whatever it found), 1 when it
+ * could not.
+ */
+const fs = require('fs');
+const path = require('path');
+const { queryPaged } = require('./lib/d1.js');
+const { classifyFormAccent } = require('./lib/formAccents.js');
+
+const args = process.argv.slice(2);
+const opts = { remote: false, db: 'doc-upload-db', persistTo: null };
+let asJson = false;
+for (let i = 0; i < args.length; i += 1) {
+  const a = args[i];
+  if (a === '--remote' || a === '-r') opts.remote = true;
+  else if (a === '--staging') {
+    opts.remote = true;
+    opts.db = 'doc-upload-db-staging';
+  } else if (a === '--persist-to') {
+    opts.persistTo = args[i + 1];
+    i += 1;
+  } else if (a === '--json') asJson = true;
+  else if (a === '-h' || a === '--help') {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(2, 37).join('\n'));
+    process.exit(0);
+  } else {
+    console.error(`Unknown argument: ${a}. --help for usage.`);
+    process.exit(2);
+  }
+}
+if (opts.remote && opts.persistTo) {
+  console.error('--persist-to is for LOCAL D1 only');
+  process.exit(2);
+}
+
+const root = path.resolve(__dirname, '..');
+for (const key of ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']) {
+  if (process.env[key]) continue;
+  for (const f of ['.env', '.dev.vars']) {
+    const p = path.join(root, f);
+    if (!fs.existsSync(p)) continue;
+    const line = fs.readFileSync(p, 'utf8').split('\n').find((l) => l.startsWith(`${key}=`));
+    if (line) {
+      process.env[key] = line.slice(key.length + 1).replace(/["']/g, '').trim();
+      break;
+    }
+  }
+}
+
+let forms;
+try {
+  forms = queryPaged(
+    (limit, offset) =>
+      `SELECT f.id, f.tenant_id, t.name AS tenant_name, f.name, f.public_slug, f.is_public, f.status, f.archived, f.settings
+         FROM records_forms f LEFT JOIN tenants t ON t.id = f.tenant_id
+        ORDER BY f.tenant_id, f.id LIMIT ${limit} OFFSET ${offset}`,
+    opts,
+  ).rows;
+} catch (err) {
+  console.error(String(err.message || err));
+  process.exit(1);
+}
+
+const rows = forms.map((f) => ({
+  ...classifyFormAccent(f.settings),
+  id: f.id,
+  tenant_id: f.tenant_id,
+  tenant_name: f.tenant_name,
+  name: f.name,
+  public_slug: f.public_slug,
+  live: Number(f.is_public) === 1 && f.status === 'live' && Number(f.archived) !== 1,
+}));
+const count = (state) => rows.filter((r) => r.state === state).length;
+const fallsBack = rows.filter((r) => r.state === 'falls_back' || r.state === 'settings_unreadable');
+const normalised = rows.filter((r) => r.state === 'normalised');
+const summary = {
+  target: opts.remote ? opts.db : `local${opts.persistTo ? ` (${opts.persistTo})` : ''}`,
+  forms: rows.length,
+  no_accent: count('none'),
+  drawn_as_before: count('drawn'),
+  normalised: normalised.length,
+  falls_back: fallsBack.length,
+  falls_back_live: fallsBack.filter((r) => r.live).length,
+  with_logo_url: rows.filter((r) => r.has_logo_url).length,
+};
+
+if (asJson) {
+  const pick = ({ settings: _s, ...r }) => r;
+  console.log(JSON.stringify({ summary, falls_back: fallsBack.map(pick), normalised: normalised.map(pick) }, null, 2));
+  process.exit(0);
+}
+
+console.log(`Records form accent colours -- ${summary.target} (read-only)`);
+console.log('');
+console.log(`  forms                                   ${summary.forms}`);
+console.log(`  no accent stored (brand colour or navy) ${summary.no_accent}`);
+console.log(`  accent drawn exactly as before          ${summary.drawn_as_before}`);
+console.log(`  accent respelled, same colour           ${summary.normalised}`);
+console.log(`  accent NOT a colour: WILL FALL BACK     ${summary.falls_back}  (${summary.falls_back_live} live and public)`);
+console.log(`  still storing an outside logo_url       ${summary.with_logo_url}  (never drawn; no longer published)`);
+
+const line = (r) =>
+  `  ${r.live ? 'LIVE ' : '     '} ${String(r.tenant_name ?? r.tenant_id).slice(0, 28).padEnd(28)}  ${String(r.name).slice(0, 34).padEnd(34)}  ` +
+  `${r.public_slug ? `/f/${r.public_slug}` : '(no public link)'}  stored: ${JSON.stringify(r.stored)}${r.drawn ? `  ->  ${r.drawn}` : ''}`;
+
+if (fallsBack.length > 0) {
+  console.log('');
+  console.log('WILL FALL BACK (the stored value is not a hex colour, or the settings are unreadable):');
+  for (const r of fallsBack) console.log(line(r));
+  console.log('');
+  console.log('  Each of these draws the organisation brand colour (or navy) after deploy. To keep a');
+  console.log('  colour, open the form in the builder and choose one; the builder says the same thing.');
+}
+if (normalised.length > 0) {
+  console.log('');
+  console.log('RESPELLED (drawn as the same colour; listed so nothing is a surprise):');
+  for (const r of normalised) console.log(line(r));
+}
+if (fallsBack.length === 0) {
+  console.log('');
+  console.log('No form changes colour.');
+}

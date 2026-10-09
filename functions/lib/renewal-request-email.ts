@@ -17,15 +17,9 @@ import {
   renewalRequestLinkBlock,
   renewalStageLabel,
 } from '../../shared/renewalRequestTemplate';
+import { escapeHtml, mailPalette, renderMailHeaderCell, renderMailSupportLine } from './brand-mail';
+import type { MailBrand } from './brand-mail';
 
-function escapeHtml(s: string): string {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 const SHELL_OPEN = `<!DOCTYPE html>
 <html>
@@ -49,26 +43,30 @@ export function buildRenewalRequestSupplierEmail(params: {
   tenantName: string;
   body: string;
   linkUrl: string;
+  /**
+   * The organisation's brand for this surface (0140), from `loadPublicBrand`.
+   * Null / absent draws the header and footer exactly as before.
+   */
+  brand?: MailBrand;
 }): { html: string } {
+  const palette = mailPalette(params.brand);
   const [lead, , ...rest] = renewalRequestLinkBlock(params.linkUrl).split('\n');
   const footer = rest.filter((l) => l.trim().length > 0).join(' ');
   const html = `${SHELL_OPEN}
     <tr>
-      <td style="background:#1A365D;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">${escapeHtml(params.tenantName)}</h1>
-      </td>
+      ${renderMailHeaderCell(params.brand, { fallbackTitle: params.tenantName })}
     </tr>
     <tr>
       <td style="padding:32px;">
         <div style="margin:0 0 24px;color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.body.replace(/\s+$/, ''))}</div>
         <p style="margin:0 0 8px;color:#333;line-height:1.6;">${escapeHtml(lead)}</p>
-        <p style="margin:0 0 8px;"><a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">Upload the document</a></p>
+        <p style="margin:0 0 8px;"><a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:${palette.button};color:${palette.onButton};text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">Upload the document</a></p>
         <p style="margin:8px 0 0;color:#666;font-size:12px;word-break:break-all;">${escapeHtml(params.linkUrl)}</p>
       </td>
     </tr>
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
-        <p style="margin:0;color:#999;font-size:12px;text-align:center;">${escapeHtml(footer)}</p>
+        ${renderMailSupportLine(params.brand)}<p style="margin:0;color:#999;font-size:12px;text-align:center;">${escapeHtml(footer)}</p>
       </td>
     </tr>${SHELL_CLOSE}`;
   return { html };

@@ -19,6 +19,7 @@ import {
   isApprovalAcceptable,
   type WorkflowStepRunDbRow,
 } from '../../../lib/records/workflows';
+import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
 import type { PublicApprovalSubmitRequest } from '../../../../shared/types';
 
@@ -59,9 +60,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     // Pull the row's data so the projection can show contextual fields.
     const run = await context.env.DB
-      .prepare('SELECT row_id FROM records_workflow_runs WHERE id = ?')
+      .prepare('SELECT row_id, tenant_id FROM records_workflow_runs WHERE id = ?')
       .bind(sr.run_id)
-      .first<{ row_id: string }>();
+      .first<{ row_id: string; tenant_id: string }>();
     if (!run) return notFound();
     const row = await context.env.DB
       .prepare('SELECT data FROM records_rows WHERE id = ? AND archived = 0')
@@ -73,7 +74,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const view = await buildPublicApprovalView(context.env.DB, sr, data);
     if (!view) return notFound();
 
-    return new Response(JSON.stringify(view), {
+    // The organisation's brand (0140), from the tenant of the run this token
+    // resolved to.
+    const brand = await loadPublicBrand(context.env.DB, run.tenant_id, 'records_approval');
+
+    // No brand record: the payload is exactly what it was before 0140.
+    return new Response(JSON.stringify(brand ? { ...view, brand } : view), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
     });
   } catch (err) {

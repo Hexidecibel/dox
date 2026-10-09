@@ -42,6 +42,8 @@ import type {
   PublicUpdateRequestView,
   RecordRowData,
 } from '../../../shared/types';
+import { BrandHeader, BrandSupport } from '../../components/brand/BrandHeader';
+import { pageBrand } from '../../../shared/tenantBrand';
 
 type FormState =
   | { kind: 'idle' }
@@ -49,7 +51,6 @@ type FormState =
   | { kind: 'success'; fieldsUpdated: number }
   | { kind: 'error'; message: string };
 
-const ACCENT = '#1A365D';
 
 function formatFriendlyDate(iso: string): string {
   try {
@@ -183,10 +184,15 @@ export function UpdateRequestForm() {
     return <UnavailableScreen message={error ?? 'This request is no longer accepting updates.'} />;
   }
 
+  // The organisation's brand (0140). With none, `accent` is the navy the page
+  // always used and no band or support line is drawn.
+  const brand = pageBrand(view.brand, null);
+  const accent = brand.accent;
+
   if (state.kind === 'success') {
     return (
       <SuccessScreen
-        accent={ACCENT}
+        accent={accent}
         thankYou={`Your updates have been recorded${state.fieldsUpdated > 0 ? ` (${state.fieldsUpdated} field${state.fieldsUpdated === 1 ? '' : 's'})` : ''}. The team will be notified.`}
         redirect={null}
         title="Thanks!"
@@ -212,7 +218,7 @@ export function UpdateRequestForm() {
       <Box
         sx={{
           height: 3,
-          bgcolor: alpha(ACCENT, 0.08),
+          bgcolor: alpha(accent, 0.08),
           flexShrink: 0,
           overflow: 'hidden',
         }}
@@ -221,11 +227,14 @@ export function UpdateRequestForm() {
           sx={{
             height: '100%',
             width: `${((stepIndex + 1) / totalSteps) * 100}%`,
-            bgcolor: ACCENT,
+            bgcolor: accent,
             transition: 'width 300ms ease-out',
           }}
         />
       </Box>
+
+      <BrandHeader brand={view.brand} sx={{ borderRadius: 0, mb: 0 }} />
+      <BrandSupport brand={view.brand} sx={{ mt: 1, px: { xs: 3, md: 6 } }} />
 
       {/* Header */}
       <Box
@@ -243,7 +252,7 @@ export function UpdateRequestForm() {
             aria-label="Previous question"
             onClick={goBack}
             size="small"
-            sx={{ color: alpha(ACCENT, 0.7), minWidth: 44, minHeight: 44 }}
+            sx={{ color: alpha(accent, 0.7), minWidth: 44, minHeight: 44 }}
           >
             <BackIcon />
           </IconButton>
@@ -322,7 +331,7 @@ export function UpdateRequestForm() {
                   color: 'text.secondary',
                   fontSize: { xs: 14, md: 15 },
                   borderLeft: 3,
-                  borderColor: alpha(ACCENT, 0.3),
+                  borderColor: alpha(accent, 0.3),
                   pl: 1.5,
                   py: 0.5,
                 }}
@@ -358,7 +367,7 @@ export function UpdateRequestForm() {
                 goNext();
               }}
               isMobile={isMobile}
-              accent={ACCENT}
+              accent={accent}
             />
             {/* Show the row's previous value as a hint so the recipient
                 understands what they're editing. Only show when there's
@@ -420,14 +429,14 @@ export function UpdateRequestForm() {
             disabled={state.kind === 'submitting'}
             onClick={handleSubmit}
             sx={{
-              bgcolor: ACCENT,
+              bgcolor: accent,
               color: '#fff',
               fontWeight: 600,
               fontSize: 16,
               px: 4,
               py: 1.5,
               minHeight: 48,
-              '&:hover': { bgcolor: alpha(ACCENT, 0.85) },
+              '&:hover': { bgcolor: alpha(accent, 0.85) },
             }}
           >
             {state.kind === 'submitting' ? (
@@ -450,14 +459,14 @@ export function UpdateRequestForm() {
               goNext();
             }}
             sx={{
-              bgcolor: ACCENT,
+              bgcolor: accent,
               color: '#fff',
               fontWeight: 600,
               fontSize: 16,
               px: 4,
               py: 1.5,
               minHeight: 48,
-              '&:hover': { bgcolor: alpha(ACCENT, 0.85) },
+              '&:hover': { bgcolor: alpha(accent, 0.85) },
             }}
           >
             Next
@@ -475,8 +484,8 @@ export function UpdateRequestForm() {
             left: 0,
             right: 0,
             zIndex: 10,
-            bgcolor: alpha(ACCENT, 0.08),
-            '& .MuiLinearProgress-bar': { bgcolor: ACCENT },
+            bgcolor: alpha(accent, 0.08),
+            '& .MuiLinearProgress-bar': { bgcolor: accent },
           }}
         />
       )}

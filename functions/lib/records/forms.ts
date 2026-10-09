@@ -11,6 +11,7 @@
  *     applies to forms as it does to sheets/rows.
  */
 
+import { formAccentOrNull, normalizeFormAccent } from '../../../shared/tenantBrand';
 import { generateId } from '../db';
 import { rebuildRowRefs, computeDisplayTitle, logRecordsActivity } from './helpers';
 import { BadRequestError } from '../permissions';
@@ -113,12 +114,18 @@ export function normalizeSettings(input: unknown): RecordFormSettings {
     throw new BadRequestError('settings must be an object');
   }
   const s = input as Partial<RecordFormSettings>;
+  // The accent is a colour or nothing (0140). `#abc` and lower case are
+  // normalised rather than refused; a colour name or anything else is a 400
+  // that says so -- it used to be stored and then drawn unchecked.
+  const accent = normalizeFormAccent(s.accent_color);
+  if (!accent.ok) throw new BadRequestError(accent.error);
   const out: RecordFormSettings = {
     thank_you_message:
       typeof s.thank_you_message === 'string' ? s.thank_you_message : null,
     redirect_url: typeof s.redirect_url === 'string' ? s.redirect_url : null,
-    accent_color: typeof s.accent_color === 'string' ? s.accent_color : null,
-    logo_url: typeof s.logo_url === 'string' ? s.logo_url : null,
+    accent_color: accent.value,
+    // `logo_url` is no longer stored: it was a link to any outside address and
+    // no page ever drew it. A form shows the organisation's own logo.
   };
   if (typeof s.allow_attachments === 'boolean') {
     out.allow_attachments = s.allow_attachments;
@@ -239,8 +246,15 @@ export function buildPublicFormView(
     form: {
       name: form.name,
       description: form.description,
-      accent_color: settings.accent_color ?? null,
-      logo_url: settings.logo_url ?? null,
+      // A real colour or nothing. A value stored before the builder checked
+      // it (`#abc`, lower case) is normalised; one that is not a colour at
+      // all draws nothing and the form falls back to the organisation's brand.
+      // `bin/report-form-accents` lists the forms that fall back.
+      accent_color: formAccentOrNull(settings.accent_color),
+      // Never published. It was a link to any outside address, which would
+      // tell that site every time the form is opened; the logo a form shows is
+      // the organisation's own, served by us (`brand.logo_url`).
+      logo_url: null,
     },
     fields,
     turnstile_site_key: turnstileSiteKey,

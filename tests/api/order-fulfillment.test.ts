@@ -1258,3 +1258,177 @@ describe('the whole original of a multi-lot certificate', () => {
     expect(res.get(cert.docIds[0])).toEqual({ state: 'not_split' });
   });
 });
+
+// ===========================================================================
+// The tenant brand on an order send (migration 0140)
+// ===========================================================================
+
+describe('the tenant brand on an order send (migration 0140)', () => {
+  async function setBrand(tenantId: string, cols: Record<string, string | null>): Promise<void> {
+    const keys = Object.keys(cols);
+    await db
+      .prepare(`INSERT INTO tenant_brands (tenant_id, ${keys.join(', ')}) VALUES (?, ${keys.map(() => '?').join(', ')})`)
+      .bind(tenantId, ...keys.map((k) => cols[k]))
+      .run();
+  }
+  const clearBrands = () => db.prepare('DELETE FROM tenant_brands').run();
+
+  it('no brand record, while ANOTHER tenant has one: the order mail is the unbranded one', async () => {
+    await clearBrands();
+    await setBrand(seed.tenantId2, { display_name: 'OTHER-TENANT-BRAND', primary_color: '#7A1F5C', support_text: 'OTHER-TENANT-LINE' });
+    const doc = await makeDocument({ lots: [{ number: '99100' }] });
+    const order = await orderId();
+    await pick(order, [doc.id]);
+    const plan = await preview(order);
+    expect(plan.from_name).toBe('Test Corp via SupDox');
+    const mail = stubMail();
+    await send(order, { fingerprint: plan.fingerprint });
+    expect(mail[0].from).toBe('Test Corp via SupDox <noreply@supdox.com>');
+    expect(mail[0].html).toContain(
+      '<td style="background:#1A365D;padding:24px 32px;">\n        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Test Corp</h1>',
+    );
+    for (const leak of ['OTHER-TENANT-BRAND', 'OTHER-TENANT-LINE', '#7A1F5C', '<strong>', 'brand-logo']) {
+      expect(mail[0].html).not.toContain(leak);
+    }
+    await clearBrands();
+  });
+
+  it('carries the display name, the colours and the ORDER support line -- in the mail and on the oversize-file page', async () => {
+    await clearBrands();
+    await setBrand(seed.tenantId, {
+      display_name: 'Northfield Foods',
+      primary_color: '#0B6E4F',
+      accent_color: '#F2A900',
+      support_text: 'DEFAULT-LINE',
+      support_overrides: JSON.stringify({
+        order_send: { text: 'Order desk', email: 'orders@northfield.example', phone: '555 0142' },
+        document_export: { text: 'EXPORT-ONLY-LINE', email: null, phone: null },
+      }),
+    });
+    await setBrand(seed.tenantId2, { display_name: 'OTHER-TENANT-BRAND', support_text: 'OTHER-TENANT-LINE' });
+
+    const big = await makeDocument({ size: 16 * MB, lots: [{ number: '99201' }] });
+    const small = await makeDocument({ lots: [{ number: '99202' }] });
+    const order = await orderId({ po_number: 'PO-77' });
+    await pick(order, [big.id, small.id]);
+
+    // The review screen shows what will really be sent.
+    const plan = await preview(order);
+    expect(plan.from_name).toBe('Northfield Foods via SupDox');
+    expect(plan.default_subject.startsWith('Northfield Foods: documents for order')).toBe(true);
+    expect(plan.reply_to).toBe('user@test.com');
+
+    const mail = stubMail();
+    const { status } = await send(order, { fingerprint: plan.fingerprint, message: 'For your delivery.' });
+    expect(status).toBe(200);
+    const m = mail[0];
+    // The address and the reply-to never move; only the name in front does.
+    expect(m.from).toBe('Northfield Foods via SupDox <noreply@supdox.com>');
+    expect(m.reply_to).toBe('user@test.com');
+    expect(m.subject.startsWith('Northfield Foods: documents for order')).toBe(true);
+    expect(m.html).toContain('<td style="background:#0B6E4F;padding:24px 32px;border-bottom:4px solid #F2A900;">');
+    expect(m.html).toContain('font-weight:600;">Northfield Foods</h1>');
+    expect(m.html).toContain('background:#0B6E4F;color:#ffffff;');
+    expect(m.html).toContain('border-left:3px solid #F2A900;');
+    expect(m.html).toContain(
+      '<strong>Northfield Foods</strong> &middot; Order desk &middot; <a href="mailto:orders@northfield.example" style="color:#666666;">orders@northfield.example</a> &middot; 555 0142',
+    );
+    for (const leak of ['DEFAULT-LINE', 'EXPORT-ONLY-LINE', 'OTHER-TENANT-BRAND', 'OTHER-TENANT-LINE', 'Test Corp', '#1A365D']) {
+      expect(m.html).not.toContain(leak);
+    }
+    // Nothing internal rides along with the brand.
+    expect(JSON.stringify(m)).not.toContain('INTERNAL do not send');
+
+    // The page behind the "too large to attach" link is an order page: the
+    // order line, not the document-export one.
+    const token = /\/export\/([A-Za-z0-9_-]+)/.exec(m.html)![1];
+    const landing = await exportLanding(
+      fnContext(`http://localhost/api/document-exports/public/${token}`, { params: { token } }),
+    );
+    const view = (await readJson(landing)) as DocumentExportLandingView;
+    expect(view.brand).toEqual({
+      display_name: 'Northfield Foods',
+      logo_url: null,
+      primary_color: '#0B6E4F',
+      accent_color: '#F2A900',
+      support: { text: 'Order desk', email: 'orders@northfield.example', phone: '555 0142' },
+    });
+    expect(JSON.stringify(view)).not.toContain('EXPORT-ONLY-LINE');
+    expect(JSON.stringify(view)).not.toContain('OTHER-TENANT');
+    await clearBrands();
+  });
+  /** A published logo for the tenant, put on its brand. Returns the URL token. */
+  async function giveLogo(tenantId: string): Promise<string> {
+    const token = 'c0de'.repeat(10);
+    const sha = 'ab'.repeat(32);
+    await db
+      .prepare(
+        `INSERT INTO tenant_brand_logos (id, tenant_id, url_token, sha256, r2_key, content_type, size_bytes, width, height)
+         VALUES ('logo-e2e', ?, ?, ?, ?, 'image/png', 1200, 320, 96)`,
+      )
+      .bind(tenantId, token, sha, `brand/${tenantId}/logo-${sha}.png`)
+      .run();
+    await db.prepare(`UPDATE tenant_brands SET logo_id = 'logo-e2e' WHERE tenant_id = ?`).bind(tenantId).run();
+    return token;
+  }
+  const HOSTILE_NAME = `<script>alert(1)</script>"'& Co`;
+  const HOSTILE_LINE = `"><img src=x onerror=alert(2)>`;
+
+  it('END TO END with a logo and hostile text: the logo is ours and absolute, and every typed character is escaped', async () => {
+    await clearBrands();
+    await db.prepare(`DELETE FROM tenant_brand_logos WHERE id = 'logo-e2e'`).run();
+    await setBrand(seed.tenantId, {
+      display_name: HOSTILE_NAME,
+      primary_color: '#0B6E4F',
+      accent_color: '#F2A900',
+      support_overrides: JSON.stringify({ order_send: { text: HOSTILE_LINE, email: 'orders@northfield.example', phone: null } }),
+    });
+    const token = await giveLogo(seed.tenantId);
+
+    const big = await makeDocument({ size: 16 * MB, lots: [{ number: '99301' }] });
+    const small = await makeDocument({ lots: [{ number: '99302' }] });
+    const order = await orderId({ po_number: 'PO-78' });
+    await pick(order, [big.id, small.id]);
+    const plan = await preview(order);
+    expect(plan.from_name).toBe('script alert(1) /script \'& Co via SupDox');
+
+    const mail = stubMail();
+    const { status } = await send(order, { fingerprint: plan.fingerprint, message: 'For your delivery.' });
+    expect(status).toBe(200);
+    const m = mail[0];
+
+    expect(m.html).toContain(
+      `<img src="http://localhost/api/public/brand-logo/${token}" alt="&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;&amp; Co" height="48"`,
+    );
+    // With a logo the header is white with the accent rule under it.
+    expect(m.html).toContain('<td style="background:#ffffff;padding:24px 32px 16px;border-bottom:4px solid #F2A900;">');
+    expect(m.html).toContain(
+      '<strong>&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;&amp; Co</strong> &middot; &quot;&gt;&lt;img src=x onerror=alert(2)&gt; &middot; <a href="mailto:orders@northfield.example"',
+    );
+    expect(m.html).not.toContain('<script>');
+    expect(m.html).not.toContain('<img src=x');
+    expect(m.html.match(/<img /g)).toHaveLength(1);
+    expect(m.from).toBe('script alert(1) /script \'& Co via SupDox <noreply@supdox.com>');
+    expect(m.from).not.toMatch(/[<>"].*via SupDox/);
+    expect(m.reply_to).toBe('user@test.com');
+    // The certificate still travelled, attached, exactly as before.
+    expect(m.attachments).toHaveLength(1);
+
+    // The oversize-file page carries the same brand as JSON text.
+    const linkToken = /\/export\/([A-Za-z0-9_-]+)/.exec(m.html)![1];
+    const landing = await exportLanding(
+      fnContext(`http://localhost/api/document-exports/public/${linkToken}`, { params: { token: linkToken } }),
+    );
+    expect(landing.headers.get('Content-Type')).toBe('application/json');
+    const view = (await readJson(landing)) as DocumentExportLandingView;
+    expect(view.brand).toEqual({
+      display_name: HOSTILE_NAME,
+      logo_url: `/api/public/brand-logo/${token}`,
+      primary_color: '#0B6E4F',
+      accent_color: '#F2A900',
+      support: { text: HOSTILE_LINE, email: 'orders@northfield.example', phone: null },
+    });
+    await clearBrands();
+    await db.prepare(`DELETE FROM tenant_brand_logos WHERE id = 'logo-e2e'`).run();
+  });
+});

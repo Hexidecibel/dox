@@ -29,6 +29,7 @@ import {
 import type { OrderSendResponse } from '../../../../../../shared/types';
 import { exitActorForRequest } from '../../../../../lib/sharing-rule';
 import type { Env, User } from '../../../../../lib/types';
+import { loadOutwardName } from '../../../../../lib/tenant-brand';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -111,7 +112,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         files: context.env.FILES,
         apiKey: context.env.RESEND_API_KEY,
         origin: new URL(context.request.url).origin,
-        tenantName: tenant?.name ?? 'Documents',
+        tenantName: await loadOutwardName(context.env.DB, order.tenant_id, tenant?.name ?? 'Documents'),
         sender: originalSender ?? user,
         order,
         // The rule is asked of whoever is pressing resend, not of the

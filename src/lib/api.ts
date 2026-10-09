@@ -1,3 +1,4 @@
+import type { TenantBrandResponse, TenantBrandUpdateRequest } from '../../shared/types';
 import { parseRefusedHeader, type SharingRefusalReason } from '../../shared/sharingRule';
 import type {
   ApiDocumentHold,
@@ -3134,6 +3135,40 @@ export const api = {
    * (`templates`) so the UI can seed the editor without duplicating the text
    * client-side. `default_template` is the dairy template under its older name.
    */
+  /**
+   * The tenant brand record (migration 0140): what outsiders see of the
+   * organisation -- display name, logo, two colours, a support line. Admin
+   * only. The logo goes up as multipart; the server decides what the file is.
+   */
+  tenantBrand: {
+    get: (tenantId: string) =>
+      fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand`),
+    put: (tenantId: string, body: TenantBrandUpdateRequest) =>
+      fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+    uploadLogo: (tenantId: string, file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+      return fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand/logo`, {
+        method: 'POST',
+        body: form,
+      });
+    },
+    removeLogo: (tenantId: string) =>
+      fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand/logo`, { method: 'DELETE' }),
+    /** "Remove brand": every field cleared and the logo taken off. */
+    remove: (tenantId: string) =>
+      fetchApi<TenantBrandResponse>(`/tenants/${encodeURIComponent(tenantId)}/brand`, { method: 'DELETE' }),
+    /** Make a published logo unreachable. Mail already sent shows a broken image. */
+    withdrawLogo: (tenantId: string, logoId: string, reason: string) =>
+      fetchApi<TenantBrandResponse>(
+        `/tenants/${encodeURIComponent(tenantId)}/brand/logos/${encodeURIComponent(logoId)}/withdraw`,
+        { method: 'POST', body: JSON.stringify({ reason }) },
+      ),
+  },
+
   tenantExtractionContext: {
     get: (params?: { tenant_id?: string }) => {
       const qs = new URLSearchParams();

@@ -62,6 +62,8 @@ import {
   sharingRefusedResponse,
 } from '../../lib/sharing-rule';
 import type { Env, User } from '../../lib/types';
+import { loadPublicBrand } from '../../lib/tenant-brand';
+import { mailBrandAudit } from '../../lib/brand-mail';
 
 /**
  * Sends per user per hour. Generous for the job (AJ answers document requests
@@ -237,8 +239,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const url = new URL(context.request.url);
     const linkUrl = exportLinkUrl(url.origin, link.token);
+    // The organisation's brand for this mail (0140), from the SENDER'S OWN
+    // tenant. Null = the mail as it always was. With a brand, the name an
+    // outsider reads is its display name, in the subject as in the header.
+    const brand = await loadPublicBrand(context.env.DB, tenantId, 'document_export', { origin: url.origin });
     const email = buildDocumentExportEmail({
-      tenantName: tenant?.name ?? 'Documents',
+      brand,
+      tenantName: brand?.display_name ?? tenant?.name ?? 'Documents',
       senderName: user.name || user.email,
       senderEmail: user.email,
       onBehalfOf,
@@ -297,6 +304,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         qa_released_ids,
         via: actor.method,
         expires_at: link.expires_at,
+        ...(brand ? { brand: mailBrandAudit(brand) } : {}),
       }),
       getClientIp(context.request),
     );

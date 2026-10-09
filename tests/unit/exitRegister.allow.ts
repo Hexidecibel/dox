@@ -405,4 +405,37 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
     reason:
       'Re-reads the file a source run ingested so the run can be dispatched again. Intake input, not an approved document, and nothing is returned.',
   },
+  // ---- the tenant brand logo (migration 0140) ----------------------------
+  // A NEW PUBLIC, UNAUTHENTICATED READ OF THE BUCKET, registered on purpose.
+  // It is not an exit because no document can be reached through it: the only
+  // key ever read is rebuilt as brand/<tenant>/logo-<sha256>.<ext> from a row
+  // of tenant_brand_logos, and must equal the key that row stores.
+  {
+    path: 'functions/lib/tenant-brand.ts',
+    classification: 'not_exit',
+    signature: { bucket: 11, gets: 2, readers: 0, checks: 0 },
+    reason:
+      'Writes, reads and deletes an organisation logo. readBrandLogo takes a 40-hex token, finds a tenant_brand_logos row by it, refuses a WITHDRAWN row, REBUILDS the key from the row (brand/<tenant>/logo-<sha256>.<ext>) and refuses unless it equals the stored key, so no caller-supplied string reaches the bucket and no document key can be formed. withdrawBrandLogo deletes only a key it rebuilt the same way from a row found by id AND tenant. The second .get( is the per-request brand cache, a Map. Still one bucket read; the bucket mentions that moved the count are the delete on withdrawal and a head() after an upload (does the object the request just wrote still exist), which returns no bytes.',
+  },
+  {
+    path: 'functions/api/public/brand-logo/[token].ts',
+    classification: 'not_exit',
+    signature: { bucket: 2, gets: 0, readers: 0, checks: 0 },
+    reason:
+      'The public logo route: unauthenticated by design, because a logo is drawn in mail and on token pages. It hands the bucket to readBrandLogo and returns only what that returns -- an image a tenant admin published as their logo, never an approved document. The sharing rule does not apply to a logo.',
+  },
+  {
+    path: 'functions/api/tenants/[id]/brand/logo.ts',
+    classification: 'not_exit',
+    signature: { bucket: 2, gets: 1, readers: 0, checks: 0 },
+    reason:
+      'An admin uploads or removes the organisation logo. It writes INTO the bucket (through storeBrandLogo) and returns the brand record as JSON, never file bytes. The .get( is FormData.get on the upload.',
+  },
+  {
+    path: 'functions/api/tenants/[id]/brand/logos/[logoId]/withdraw.ts',
+    classification: 'not_exit',
+    signature: { bucket: 2, gets: 0, readers: 0, checks: 0 },
+    reason:
+      'An admin withdraws a published logo: the object is DELETED and its public URL answers 404 from then on. It hands the bucket to withdrawBrandLogo and returns the brand record as JSON. Nothing is read out of storage here.',
+  },
 ];

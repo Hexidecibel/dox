@@ -16,6 +16,7 @@ import {
   entityKindsReferencedByForm,
   fetchPublicEntityOptions,
 } from '../../../lib/records/forms';
+import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
 import type { RecordColumnRow, RecordFormRow } from '../../../../shared/types';
 
@@ -73,7 +74,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       entityOptions,
     );
 
-    return new Response(JSON.stringify(view), {
+    // The organisation's brand (0140), from the tenant that owns the form.
+    const brand = await loadPublicBrand(context.env.DB, form.tenant_id, 'records_form');
+
+    // No brand record: the payload is exactly what it was before 0140.
+    return new Response(JSON.stringify(brand ? { ...view, brand } : view), {
       headers: {
         'Content-Type': 'application/json',
         // Lightly cache so a viral form share doesn't hammer D1, but keep

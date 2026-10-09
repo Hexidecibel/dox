@@ -22,6 +22,7 @@ import { resolveConnectorHandle } from '../../../lib/connectors/resolveHandle';
 import {
   ACCEPTED_CONNECTOR_FILE_EXTENSIONS,
 } from '../../../../shared/connectorFileTypes';
+import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
 
 const TEXT_SIZE_LIMIT = 5 * 1024 * 1024;
@@ -107,6 +108,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     tenantName = null;
   }
 
+  // The organisation's brand (0140), from the tenant that owns the source this
+  // slug and token resolved to.
+  const brand = await loadPublicBrand(context.env.DB, connector.tenant_id, 'file_drop');
+
   return new Response(
     JSON.stringify({
       connector: {
@@ -116,6 +121,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       tenant: {
         name: tenantName,
       },
+      // The organisation's brand (0140); absent when there is no brand record.
+      ...(brand ? { brand } : {}),
       accepted_extensions: ACCEPTED_CONNECTOR_FILE_EXTENSIONS,
       max_size_bytes: {
         text: TEXT_SIZE_LIMIT,

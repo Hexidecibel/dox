@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 150 tables, 2 views, 278 indexes, 48 triggers.
+Objects: 152 tables, 2 views, 279 indexes, 54 triggers.
 
 ## Core documents & versions
 
@@ -2306,6 +2306,49 @@ Indexes: `idx_spec_tests_tenant`
 ```
 
 Indexes: `idx_spec_unmatched_ignores_key`
+
+### `tenant_brand_logos`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  url_token TEXT NOT NULL UNIQUE CHECK (length(url_token) = 40 AND url_token NOT GLOB '*[^0-9a-f]*')
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*')
+  r2_key TEXT NOT NULL
+  content_type TEXT NOT NULL CHECK (content_type IN ('image/png', 'image/jpeg', 'image/webp'))
+  size_bytes INTEGER NOT NULL CHECK (size_bytes > 0)
+  width INTEGER NOT NULL CHECK (width > 0)
+  height INTEGER NOT NULL CHECK (height > 0)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT REFERENCES users(id)
+  withdrawn_at TEXT
+  withdrawn_by TEXT REFERENCES users(id)
+  withdrawn_reason TEXT
+  UNIQUE (tenant_id, sha256)
+```
+
+Indexes: `idx_tenant_brand_logos_tenant`
+
+Triggers: `trg_tenant_brand_logos_no_withdraw_current`, `trg_tenant_brand_logos_withdrawal_shape`
+
+### `tenant_brands`
+
+```sql
+  tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE
+  display_name TEXT CHECK (display_name IS NULL OR length(display_name) BETWEEN 1 AND 80)
+  primary_color TEXT CHECK (primary_color IS NULL OR (length(primary_color) = 7 AND primary_color GLOB '#[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]'))
+  accent_color TEXT CHECK (accent_color IS NULL OR (length(accent_color) = 7 AND accent_color GLOB '#[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]'))
+  support_text TEXT CHECK (support_text IS NULL OR length(support_text) BETWEEN 1 AND 200)
+  support_email TEXT CHECK (support_email IS NULL OR length(support_email) BETWEEN 3 AND 254)
+  support_phone TEXT CHECK (support_phone IS NULL OR length(support_phone) BETWEEN 3 AND 40)
+  support_overrides TEXT CHECK (support_overrides IS NULL OR length(support_overrides) <= 8000)
+  logo_id TEXT REFERENCES tenant_brand_logos(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT REFERENCES users(id)
+```
+
+Triggers: `trg_tenant_brands_logo_not_withdrawn_insert`, `trg_tenant_brands_logo_not_withdrawn_update`, `trg_tenant_brands_logo_same_tenant_insert`, `trg_tenant_brands_logo_same_tenant_update`
 
 ### `tenant_modules`
 

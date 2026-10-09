@@ -41,6 +41,7 @@ import {
 import type { OrderSendRequest, OrderSendResponse } from '../../../../shared/types';
 import { exitActorForRequest } from '../../../lib/sharing-rule';
 import type { Env, User } from '../../../lib/types';
+import { loadOutwardName } from '../../../lib/tenant-brand';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -85,7 +86,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tenant = await context.env.DB.prepare('SELECT name FROM tenants WHERE id = ?')
       .bind(order.tenant_id)
       .first<{ name: string }>();
-    const tenantName = tenant?.name ?? 'Documents';
+    // What outsiders read (0140): the brand's display name, the organisation's
+    // own name until an admin sets one.
+    const tenantName = await loadOutwardName(context.env.DB, order.tenant_id, tenant?.name ?? 'Documents');
 
     const subject =
       typeof body.subject === 'string' && body.subject.trim()

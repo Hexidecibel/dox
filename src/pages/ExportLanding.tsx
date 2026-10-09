@@ -31,6 +31,8 @@ import {
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import type { DocumentExportLandingView } from '../../shared/types';
+import { BrandHeader, BrandSupport } from '../components/brand/BrandHeader';
+import { pageBrand } from '../../shared/tenantBrand';
 
 const ACCENT = '#1A365D';
 
@@ -91,7 +93,7 @@ export function ExportLanding() {
         const v = (await res.json()) as DocumentExportLandingView;
         if (cancelled) return;
         setView(v);
-        document.title = `${v.documents.length} document${v.documents.length === 1 ? '' : 's'} from ${v.tenant_name}`;
+        document.title = `${v.documents.length} document${v.documents.length === 1 ? '' : 's'} from ${v.brand?.display_name || v.tenant_name}`;
       } catch (err) {
         if (cancelled) return;
         const code = (err as { code?: string }).code;
@@ -130,13 +132,18 @@ export function ExportLanding() {
     );
   }
 
+  // The organisation's brand (0140). With none, `brand.accent` is the navy and
+  // the header below is the plain name line the page always had.
+  const brand = pageBrand(view.brand, view.tenant_name);
   const zipUrl = `/api/document-exports/public/${encodeURIComponent(token ?? '')}/download`;
 
   return (
     <Box sx={{ maxWidth: 820, mx: 'auto', px: { xs: 2, sm: 3 }, py: { xs: 4, sm: 6 } }}>
-      <Typography variant="overline" sx={{ color: ACCENT, fontWeight: 700, letterSpacing: 1 }}>
-        {view.tenant_name}
-      </Typography>
+      <BrandHeader brand={view.brand}>
+        <Typography variant="overline" sx={{ color: ACCENT, fontWeight: 700, letterSpacing: 1 }}>
+          {view.tenant_name}
+        </Typography>
+      </BrandHeader>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
         {view.documents.length} document{view.documents.length === 1 ? '' : 's'}
       </Typography>
@@ -164,7 +171,7 @@ export function ExportLanding() {
             mt: 2,
             p: 2,
             borderLeft: '3px solid',
-            borderColor: ACCENT,
+            borderColor: brand.stripe,
             bgcolor: 'action.hover',
             whiteSpace: 'pre-wrap',
           }}
@@ -178,7 +185,7 @@ export function ExportLanding() {
           variant="contained"
           startIcon={<DownloadIcon />}
           href={zipUrl}
-          sx={{ textTransform: 'none', bgcolor: ACCENT }}
+          sx={{ textTransform: 'none', bgcolor: brand.accent }}
           data-testid="export-landing-zip"
         >
           Download all as ZIP
@@ -234,6 +241,7 @@ export function ExportLanding() {
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 3 }}>
         Shared through SupDox. Reply to the email that brought you here to reach {view.sent_by_name ?? view.sent_by_email ?? 'the sender'}.
       </Typography>
+      <BrandSupport brand={view.brand} sx={{ mt: 1 }} />
     </Box>
   );
 }

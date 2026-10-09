@@ -5018,6 +5018,8 @@ export interface PublicFormAttachmentPolicy {
 }
 
 export interface PublicFormView {
+  /** The organisation's brand for this surface (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   /** Form display metadata. */
   form: {
     name: string;
@@ -5177,6 +5179,8 @@ export interface CreateUpdateRequestRequest {
  * the scope of the fields_requested set.
  */
 export interface PublicUpdateRequestView {
+  /** The organisation's brand for this surface (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   /** Row + sheet identity (recipient-friendly only). */
   request: {
     sheet_name: string;
@@ -5503,6 +5507,8 @@ export interface WorkflowApprovalInboxResponse {
  * without exposing the rest of the sheet.
  */
 export interface PublicApprovalView {
+  /** The organisation's brand for this surface (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   step: {
     name: string;
     message: string | null;
@@ -6670,6 +6676,8 @@ export interface AlertLandingRenewal {
  * against any other endpoint.
  */
 export interface AlertLandingView {
+  /** The organisation's brand for this surface (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   kind: AlertLinkKind;
   /** The organization the alert is for — already named in the email body. */
   tenant_name: string;
@@ -6760,6 +6768,8 @@ export interface DocumentExportItem {
  * here carries an internal id.
  */
 export interface DocumentExportLandingView {
+  /** The organisation's brand for this surface (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   tenant_name: string;
   sent_by_name: string | null;
   /** The sender's address, which is also the email's reply-to. */
@@ -7142,6 +7152,8 @@ export interface RequestLinkView {
  * the reasoning that replaced it.
  */
 export interface SupplierRequestView {
+  /** The organisation's brand for this surface (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   /** The organization asking. Already known to the recipient. */
   tenant_name: string;
   /** The supplier entity being asked. Their own name, back to them. */
@@ -8681,4 +8693,109 @@ export interface RenewalDefaultOwnerResponse {
   updated_by_name: string | null;
   /** Active users of this organisation who can be chosen. */
   candidates: Array<{ id: string; name: string; email: string; role: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Tenant brand record (migration 0140)
+// ---------------------------------------------------------------------------
+
+/**
+ * One support line: a short sentence plus an optional address and number.
+ * All three are typed by an admin and all three are shown to outsiders.
+ */
+export interface BrandSupportLine {
+  text: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
+/**
+ * EVERYTHING an outsider is given about an organisation's brand -- on a token
+ * page (the `brand` object of that page's own payload) and in a mail. An
+ * allow-list (`toPublicBrand` in shared/tenantBrand.ts), never a row: no id,
+ * no tenant id, no who-edited-it, and only the ONE support line resolved for
+ * the surface being shown, never the other surfaces' lines.
+ *
+ * `null` in place of this object means the organisation has no brand record,
+ * and the surface draws exactly what it drew before 0140.
+ */
+export interface PublicBrand {
+  /** What outsiders read. The organisation name until an admin sets one. */
+  display_name: string;
+  /** `/api/public/brand-logo/<token>` (absolute in a mail), or null. */
+  logo_url: string | null;
+  /** `#RRGGBB` or null. */
+  primary_color: string | null;
+  /** `#RRGGBB` or null. */
+  accent_color: string | null;
+  /** The support line for THIS surface, or null when none is set. */
+  support: BrandSupportLine | null;
+}
+
+/** The logo currently on the brand, as the admin screen sees it. */
+export interface TenantBrandLogo {
+  url: string;
+  content_type: string;
+  size_bytes: number;
+  width: number;
+  height: number;
+  uploaded_at: string;
+}
+
+/**
+ * One logo the organisation has published, current or past, as the admin
+ * screen lists it. A past logo stays reachable at its URL (mail already sent
+ * points at it) until an admin WITHDRAWS it.
+ */
+export interface TenantBrandLogoRecord extends TenantBrandLogo {
+  id: string;
+  /** The logo the brand shows now. */
+  current: boolean;
+  /** Set once withdrawn: the URL answers 404 and the image is deleted. */
+  withdrawn_at: string | null;
+  withdrawn_reason: string | null;
+  withdrawn_by_name: string | null;
+}
+
+/** POST /api/tenants/:id/brand/logos/:logoId/withdraw */
+export interface TenantBrandLogoWithdrawRequest {
+  reason: string;
+}
+
+/** GET / PUT /api/tenants/:id/brand -- the admin's view of the record. */
+export interface TenantBrandResponse {
+  tenant_id: string;
+  /** `tenants.name`: what the display name falls back to. */
+  tenant_name: string;
+  /**
+   * True when at least one field is set or a logo is current. A record with
+   * nothing in it IS no record: false, and every surface is unbranded.
+   */
+  configured: boolean;
+  /** As stored; null = falls back to `tenant_name`. */
+  display_name: string | null;
+  primary_color: string | null;
+  accent_color: string | null;
+  support: BrandSupportLine;
+  /** Keyed by surface (`BRAND_SURFACES` in shared/tenantBrand.ts). */
+  support_overrides: Record<string, BrandSupportLine>;
+  logo: TenantBrandLogo | null;
+  /** Every logo ever published, newest first, withdrawn ones included. */
+  logos: TenantBrandLogoRecord[];
+  /** How many published (not withdrawn) logos may be kept at once. */
+  logo_limit: number;
+  updated_at: string | null;
+  updated_by_name: string | null;
+}
+
+/**
+ * PUT /api/tenants/:id/brand. A field left out is unchanged; null or '' clears
+ * it. `support_overrides`, when present, REPLACES the whole set.
+ */
+export interface TenantBrandUpdateRequest {
+  display_name?: string | null;
+  primary_color?: string | null;
+  accent_color?: string | null;
+  support?: Partial<BrandSupportLine> | null;
+  support_overrides?: Record<string, Partial<BrandSupportLine> | null> | null;
 }

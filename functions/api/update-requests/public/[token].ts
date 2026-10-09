@@ -27,6 +27,7 @@ import {
 } from '../../../lib/records/updateRequests';
 import { logRecordsActivity } from '../../../lib/records/helpers';
 import { handleUpdateRequestResponse } from '../../../lib/records/workflows';
+import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
 import type {
   PublicUpdateRequestSubmitRequest,
@@ -159,6 +160,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       fields,
       current_values: currentValues,
     };
+    // The organisation's brand (0140), from the tenant of the request this
+    // token resolved to. No brand record: the payload is what it was before.
+    const brand = await loadPublicBrand(context.env.DB, ctx.request.tenant_id, 'records_update_request');
+    if (brand) view.brand = brand;
 
     return new Response(JSON.stringify(view), {
       headers: {

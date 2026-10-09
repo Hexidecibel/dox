@@ -66,6 +66,8 @@ function flattenRows(raw) {
  * @param {object} [opts]
  * @param {boolean} [opts.remote]  target production D1 (default: local).
  * @param {string}  [opts.db]      D1 database name (default doc-upload-db).
+ * @param {string}  [opts.persistTo]  LOCAL only: wrangler's --persist-to directory
+ *                                 (a git worktree has no .wrangler state of its own).
  * @returns {Array<Record<string, unknown>>}
  */
 function query(sql, opts = {}) {
@@ -79,6 +81,7 @@ function query(sql, opts = {}) {
     'execute',
     db,
     opts.remote ? '--remote' : '--local',
+    ...(!opts.remote && opts.persistTo ? ['--persist-to', opts.persistTo] : []),
     '--json',
     '--command',
     sql,

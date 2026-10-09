@@ -86,6 +86,35 @@ export async function recordAttempt(
     .run();
 }
 
+/**
+ * Record one attempt AND learn how many the window now holds, in one
+ * statement. For a limit that must hold under parallel requests: with
+ * `checkRateLimit` then `recordAttempt`, thirty requests arriving together all
+ * read "under the limit" before any of them has written. Here the increment IS
+ * the gate -- each caller gets a different number back, and compares it to the
+ * limit itself.
+ *
+ * An attempt over the limit is still counted; that only keeps a caller who is
+ * hammering the endpoint over the limit for the rest of the window.
+ */
+export async function takeAttempt(db: D1Database, key: string, windowSeconds: number): Promise<number> {
+  const windowStart = new Date(Date.now() - windowSeconds * 1000)
+    .toISOString()
+    .replace('T', ' ')
+    .replace(/\..*Z$/, '');
+  await db.prepare('DELETE FROM rate_limits WHERE key = ? AND window_start < ?').bind(key, windowStart).run();
+  const row = await db
+    .prepare(
+      `INSERT INTO rate_limits (key, attempts, window_start)
+       VALUES (?, 1, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET attempts = attempts + 1
+       RETURNING attempts`,
+    )
+    .bind(key)
+    .first<{ attempts: number }>();
+  return row?.attempts ?? 1;
+}
+
 export async function clearRateLimit(
   db: D1Database,
   key: string
