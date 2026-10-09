@@ -145,4 +145,16 @@ function proposalToSql(tenantId, p, holdId, sqlStr) {
   ];
 }
 
-module.exports = { planSpecHolds, proposalToSql };
+/**
+ * Product documents split out of one flat extraction that have no register
+ * rows: approved before that path registered anything (it dropped every
+ * result, because nothing said which product document one belonged to). They
+ * cannot be proposed -- there is no stored verdict to read -- so they are
+ * counted and named for a person. `examples` is capped; `ids` is everything.
+ */
+function unregisteredMultiProduct(rows, cap = 25) {
+  const list = (rows || []).map((r) => ({ id: r.id, title: r.title || 'Untitled document', created_at: r.created_at || null }));
+  return { count: list.length, examples: list.slice(0, cap), ids: list.map((r) => r.id) };
+}
+
+module.exports = { planSpecHolds, proposalToSql, unregisteredMultiProduct };

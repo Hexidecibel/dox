@@ -7,7 +7,7 @@
  * result already held -- or held and released -- is left alone.
  */
 import { describe, it, expect } from 'vitest';
-import { planSpecHolds, proposalToSql } from '../../bin/lib/specHoldsPlan';
+import { planSpecHolds, proposalToSql, unregisteredMultiProduct } from '../../bin/lib/specHoldsPlan';
 import { automaticHoldsForResults } from '../../shared/holds';
 import { HOLDING_SPEC_CRITICALITY } from '../../shared/specCriticality';
 
@@ -127,5 +127,18 @@ describe('proposalToSql', () => {
     expect(audit).toContain("'document.hold_placed'");
     expect(audit).toContain('propose-spec-holds');
     expect(audit).toContain("WHERE EXISTS (SELECT 1 FROM document_holds WHERE id = 'hold-1')");
+  });
+});
+
+describe('what the script cannot propose: product documents that were never registered', () => {
+  it('counts and names them, caps the examples, and keeps every id', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({ id: `d${i}`, title: i === 0 ? null : `Product ${i}`, created_at: '2026-09-01 00:00:00' }));
+    const un = unregisteredMultiProduct(rows);
+    expect(un.count).toBe(30);
+    expect(un.examples).toHaveLength(25);
+    expect(un.examples[0]).toEqual({ id: 'd0', title: 'Untitled document', created_at: '2026-09-01 00:00:00' });
+    expect(un.ids).toHaveLength(30);
+    expect(unregisteredMultiProduct([])).toEqual({ count: 0, examples: [], ids: [] });
+    expect(unregisteredMultiProduct(undefined)).toEqual({ count: 0, examples: [], ids: [] });
   });
 });

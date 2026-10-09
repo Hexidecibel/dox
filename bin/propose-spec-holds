@@ -28,6 +28,18 @@
  *   - a row with no result identity (before migration 0105).
  *   Each is counted and reported, never silently dropped.
  *
+ * WHAT IT CANNOT SEE AT ALL
+ *
+ *   Until the fix that shipped with 0139, a file approved as SEVERAL PRODUCT
+ *   DOCUMENTS (one flat extraction split by the reviewer) wrote NO register
+ *   rows: every result was dropped because nothing said which document it
+ *   belonged to. Those documents were never judged on the record, so there is
+ *   nothing here to propose a hold from -- whatever their results were. They
+ *   are COUNTED and named (`queue-<item>-p<n>` documents with no register
+ *   rows) so a person can open them; re-approving is not possible, so the
+ *   remedy is to read the certificate and place a hold by hand if it needs
+ *   one. Approvals after the fix are registered and held like any other.
+ *
  * ONE THING IS NOT FROZEN: an analyte's category (zero-tolerance or not) is
  * read from spec_tests as it stands today. A zero-tolerance proposal says so.
  *
@@ -66,7 +78,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const { flattenRows, isReadOnly, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
-const { planSpecHolds, proposalToSql } = require('./lib/specHoldsPlan');
+const { planSpecHolds, proposalToSql, unregisteredMultiProduct } = require('./lib/specHoldsPlan');
 const { HOLD_SOURCE_LABELS } = require('./lib/shared/holds.js');
 
 function parseArgs(argv) {
@@ -231,7 +243,20 @@ function planTenant(tenantId, opts) {
       ),
     );
   }
-  return { tenantId, ...planSpecHolds(checks, holds, lots) };
+  // Product documents split out of one flat extraction (`queue-<item>-p<n>`)
+  // that have no register rows at all: approved before the multi-product path
+  // registered anything. Nothing can be proposed for them.
+  const unregistered = query(
+    `SELECT d.id, d.title, d.created_at
+       FROM documents d
+      WHERE d.tenant_id = ${sqlStr(tenantId)} AND d.status = 'active'
+        AND (d.external_ref GLOB 'queue-*-p[0-9]' OR d.external_ref GLOB 'queue-*-p[0-9][0-9]')
+        AND NOT EXISTS (SELECT 1 FROM document_spec_checks c WHERE c.document_id = d.id)
+        AND NOT EXISTS (SELECT 1 FROM document_spec_gaps g WHERE g.document_id = d.id)
+      ORDER BY d.created_at DESC`,
+    opts,
+  );
+  return { tenantId, ...planSpecHolds(checks, holds, lots), unregistered_multi_product: unregisteredMultiProduct(unregistered) };
 }
 
 function formatPlan(plan, label) {
@@ -250,6 +275,16 @@ function formatPlan(plan, label) {
   lines.push(`  already held, or held and released (left alone):          ${plan.already_placed}`);
   lines.push(`  WOULD BE PLACED:                                          ${plan.proposals.length} hold(s) on ${plan.documents} document(s)`);
   lines.push('');
+  const un = plan.unregistered_multi_product;
+  if (un && un.count > 0) {
+    lines.push(`  CANNOT BE PROPOSED: ${un.count} document(s) were approved as one of several product documents`);
+    lines.push('  from one file BEFORE that path wrote register rows. Nothing was judged on the record, so');
+    lines.push('  nothing says whether any of them should be on hold. Open each and place a hold by hand if');
+    lines.push('  its results call for one:');
+    for (const d of un.examples) lines.push(`    ${d.title}  (${d.id}, ${d.created_at})`);
+    if (un.count > un.examples.length) lines.push(`    ... and ${un.count - un.examples.length} more (see --json)`);
+    lines.push('');
+  }
   for (const source of ['spec_critical', 'zero_tolerance']) {
     const rows = plan.proposals.filter((p) => p.source === source);
     if (rows.length === 0) continue;
