@@ -46,6 +46,23 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Tenant brand record (C-006, finish-line item 3)
+
+**Status:** done — built 2026-10-08 (migration 0140 tenant_brands). Not yet deployed.
+
+**Source:** the client asked for a per-tenant brand record on 2026-09-14 and believes it exists; the
+design was answered on 2026-09-29 (`~/drops/aj-2026-09-29/brand-table-answer.md`). Decisions
+C-094..C-108 in `docs/decision-log.md`; full notes in `docs/feature-notes.md` under "Tenant Brand
+Record (migration 0140)".
+
+- `migrations/0140_tenant_brands.sql`: `tenant_brands` (one row per tenant) and `tenant_brand_logos`. Additive; no row for anybody.
+- `shared/tenantBrand.ts` (pure): colour parsing and contrast, the palette, support-line resolution, the surfaces, the outsider allow-list, logo sniffing.
+- `functions/lib/tenant-brand.ts` (the one reader and writer, the public logo read) and `functions/lib/brand-mail.ts` (the header, footer line and colours of every outside mail).
+- `GET` / `PUT /api/tenants/:id/brand`, `POST` / `DELETE /api/tenants/:id/brand/logo`, `GET /api/public/brand-logo/:token`.
+- Seven public payloads carry `brand` when the organisation has one; seven pages draw it (`src/components/brand/BrandHeader.tsx`). Five outside mails carry it. Insider mail and the signed-in portal do not.
+- Settings > Brand (`src/pages/admin/BrandSettings.tsx`) with a live preview of the page header and the mail header.
+- Not done: no brand step in the setup wizard (C-108); nothing seeded for any tenant (the client's colours are still owed); nobody has clicked through the screen in a browser.
+
 ### Holds (C-005, finish-line item 2)
 
 **Status:** done — built 2026-10-08 (migration 0139 document_holds). Not yet deployed.

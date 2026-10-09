@@ -109,6 +109,7 @@ See the [API Keys](#api-keys) section below for how to create, list, and revoke 
 - `POST /api/auth/reset-password`
 - `POST /api/graphql` (individual resolvers enforce auth)
 - `GET /api/graphql` (GraphiQL IDE)
+- `GET /api/public/brand-logo/:token` (an organisation's logo; serves nothing else)
 
 ---
 
@@ -640,6 +641,61 @@ curl -X PUT http://localhost:8788/api/tenants/TENANT_ID \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"Updated Name","description":"New desc"}'
 ```
+
+#### GET / PUT /api/tenants/:id/brand
+
+The tenant brand record (migration 0140): what people **outside** the organisation see of it
+on every page they open from a link and in every email the portal sends them. org_admin of the
+tenant or super_admin; an API key may use both verbs.
+
+```bash
+curl http://localhost:8788/api/tenants/TENANT_ID/brand -H "Authorization: Bearer $TOKEN"
+
+curl -X PUT http://localhost:8788/api/tenants/TENANT_ID/brand \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{
+        "display_name": "Northfield Foods",
+        "primary_color": "#0B6E4F",
+        "accent_color": "#F2A900",
+        "support": { "text": "Questions? Contact Purchasing", "email": "purchasing@northfield.example", "phone": "555 0100" },
+        "support_overrides": { "order_send": { "text": "Order desk", "email": "orders@northfield.example" } }
+      }'
+```
+
+- **A patch.** A field left out is unchanged, `null` or `""` clears it, and `support_overrides`
+  replaces the whole set. The first save creates the record; until then `configured` is `false`
+  and every public page and email looks exactly as it did before.
+- **A colour is `#RRGGBB` and nothing else** (400 otherwise, never coerced). It paints the header
+  band, the buttons and the accent rule; the text on them is black or white, whichever is
+  readable, and body text is never coloured. A primary colour too pale to read on white is still
+  accepted: links and small headings stay navy.
+- **Text is one line**, stored as typed and escaped wherever it is drawn (display name 80
+  characters, support text 200, phone 40).
+- **Support-line overrides** are keyed by surface: `supplier_request`, `document_export`,
+  `order_send`, `alert`, `records_form`, `records_update_request`, `records_approval`,
+  `file_drop`. An override replaces the whole line on that page and its email.
+- Every change is audited as `tenant.brand_updated` with the old and new values.
+
+#### POST / DELETE /api/tenants/:id/brand/logo
+
+```bash
+curl -X POST http://localhost:8788/api/tenants/TENANT_ID/brand/logo \
+  -H "Authorization: Bearer $TOKEN" -F 'file=@logo.png'
+```
+
+PNG, JPEG or WebP, decided from the file's bytes (the declared type is ignored); at most 512 KB;
+each side 16-2000 px. **SVG is refused.** A signed-in admin only: an API key gets 403. The logo
+is served from `GET /api/public/brand-logo/<token>` (public, cached for a year; the URL changes
+when the image does). A replaced or removed logo stays reachable at its old URL so email already
+sent keeps showing it.
+
+**How outsiders receive the brand.** There is no endpoint that returns a brand to somebody who
+is not the tenant's admin. Each token-gated public payload (`/api/document-exports/public/:token`,
+`/api/supplier-requests/public/:token`, `/api/alerts/public/:token`, `/api/forms/public/:slug`,
+`/api/update-requests/public/:token`, `/api/workflow-approvals/public/:token`,
+`/api/public/connectors/:slug`) carries a `brand` object when the organisation has a record:
+`display_name`, `logo_url`, `primary_color`, `accent_color` and the one `support` line for that
+page. With no record the key is absent.
 
 #### DELETE /api/tenants/:id
 
