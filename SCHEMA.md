@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 152 tables, 2 views, 279 indexes, 50 triggers.
+Objects: 152 tables, 2 views, 279 indexes, 54 triggers.
 
 ## Core documents & versions
 
@@ -2321,10 +2321,15 @@ Indexes: `idx_spec_unmatched_ignores_key`
   height INTEGER NOT NULL CHECK (height > 0)
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
   created_by TEXT REFERENCES users(id)
+  withdrawn_at TEXT
+  withdrawn_by TEXT REFERENCES users(id)
+  withdrawn_reason TEXT
   UNIQUE (tenant_id, sha256)
 ```
 
 Indexes: `idx_tenant_brand_logos_tenant`
+
+Triggers: `trg_tenant_brand_logos_no_withdraw_current`, `trg_tenant_brand_logos_withdrawal_shape`
 
 ### `tenant_brands`
 
@@ -2343,7 +2348,7 @@ Indexes: `idx_tenant_brand_logos_tenant`
   updated_by TEXT REFERENCES users(id)
 ```
 
-Triggers: `trg_tenant_brands_logo_same_tenant_insert`, `trg_tenant_brands_logo_same_tenant_update`
+Triggers: `trg_tenant_brands_logo_not_withdrawn_insert`, `trg_tenant_brands_logo_not_withdrawn_update`, `trg_tenant_brands_logo_same_tenant_insert`, `trg_tenant_brands_logo_same_tenant_update`
 
 ### `tenant_modules`
 

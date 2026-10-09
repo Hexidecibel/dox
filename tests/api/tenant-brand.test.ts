@@ -26,7 +26,14 @@ import type { RequestFixture, TestUser } from '../helpers/requests';
 import { jpegBytes, pngBytes, webpBytes, SVG_BYTES } from '../helpers/brand';
 import { applyRecordsMigrations } from '../helpers/records';
 import { onRequest as middleware } from '../../functions/api/_middleware';
-import { onRequestGet as brandGet, onRequestPut as brandPut } from '../../functions/api/tenants/[id]/brand/index';
+import {
+  onRequestGet as brandGet,
+  onRequestPut as brandPut,
+  onRequestDelete as brandDelete,
+} from '../../functions/api/tenants/[id]/brand/index';
+import { onRequestPost as logoWithdraw } from '../../functions/api/tenants/[id]/brand/logos/[logoId]/withdraw';
+import { normalizeSettings } from '../../functions/lib/records/forms';
+import { hydrateWorkflow, startWorkflowRun } from '../../functions/lib/records/workflows';
 import { onRequestPost as logoPost, onRequestDelete as logoDelete } from '../../functions/api/tenants/[id]/brand/logo';
 import { onRequestGet as logoGet } from '../../functions/api/public/brand-logo/[token]';
 import { onRequestGet as alertGet } from '../../functions/api/alerts/public/[token]';
@@ -176,8 +183,11 @@ beforeAll(async () => {
   reader = { id: seed.readerId, email: 'reader@test.com', name: 'Reader User', role: 'reader', tenant_id: seed.tenantId };
 }, 30_000);
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
+  // The hourly upload budget is tested on its own; elsewhere it is reset so a
+  // test does not depend on how many uploads ran before it.
+  await db.prepare(`DELETE FROM rate_limits WHERE key LIKE 'brand_logo_upload:%'`).run();
 });
 
 // ===========================================================================
@@ -198,6 +208,8 @@ describe('authority', () => {
       support: { text: null, email: null, phone: null },
       support_overrides: {},
       logo: null,
+      logos: [],
+      logo_limit: 10,
       updated_at: null,
       updated_by_name: null,
     });
@@ -494,12 +506,13 @@ describe('the logo', () => {
     expect(new Uint8Array(await object!.arrayBuffer())).toEqual(first);
   });
 
-  it('is served publicly with the validated type, nosniff and a long immutable cache', async () => {
+  it('is served publicly with the validated type, nosniff and a bounded cache', async () => {
     const res = await fetchLogo(tokenOf(firstUrl));
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe('image/png');
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
-    expect(res.headers.get('Cache-Control')).toBe('public, max-age=31536000, immutable');
+    // One day: a withdrawal has to be able to land (C-112).
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=86400');
     expect(res.headers.get('Content-Length')).toBe('2000');
     expect(res.headers.get('Content-Disposition')).toBe('inline');
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(first);
@@ -834,6 +847,60 @@ async function readSurfaces(s: Surfaces): Promise<Record<string, { status: numbe
   };
 }
 
+async function makeDocument(tenantId: string, adminId: string, title: string): Promise<string> {
+  const id = generateTestId();
+  const typeId = generateTestId();
+  // "Certificate of Analysis" is a send-freely type (C-003), so the test is
+  // about the brand and not about the sharing rule.
+  await db.prepare(`INSERT INTO document_types (id, tenant_id, name, slug, sharing_rule) VALUES (?, ?, 'Certificate of Analysis', ?, 'free')`).bind(typeId, tenantId, `coa-brand-${typeId.slice(0, 6)}`).run();
+  await db
+    .prepare(`INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, document_type_id) VALUES (?, ?, ?, '[]', 1, 'active', ?, ?)`)
+    .bind(id, tenantId, title, adminId, typeId)
+    .run();
+  const key = `docs/${id}/coa.pdf`;
+  await db
+    .prepare(`INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES (?, ?, 1, 'coa.pdf', 9, 'application/pdf', ?, ?)`)
+    .bind(generateTestId(), id, key, adminId)
+    .run();
+  await env.FILES.put(key, new TextEncoder().encode('PDF-BYTES'));
+  return id;
+}
+
+async function sendExport(admin: TestUser, title: string): Promise<{ mail: CapturedMail; token: string }> {
+  const sent = stubMail();
+  const docId = await makeDocument(admin.tenant_id!, admin.id, title);
+  const res = await exportSend(
+    ctx('http://portal.test/api/document-exports/send', {
+      method: 'POST',
+      body: JSON.stringify({ document_ids: [docId], recipients: ['buyer@customer.example'], message: 'As requested.' }),
+      headers: { 'Content-Type': 'application/json' },
+      user: admin,
+    }),
+  );
+  expect(res.status).toBe(200);
+  expect(sent).toHaveLength(1);
+  const token = /\/export\/([A-Za-z0-9_-]+)/.exec(sent[0].html)![1];
+  vi.unstubAllGlobals();
+  return { mail: sent[0], token };
+}
+
+async function sendUpdateRequest(admin: TestUser, s: Surfaces): Promise<CapturedMail> {
+  const sent = stubMail();
+  const res = await updateRequestCreate(
+    ctx(`http://portal.test/api/records/sheets/${s.sheetId}/rows/${s.rowId}/update-requests`, {
+      method: 'POST',
+      body: JSON.stringify({ recipient_email: 'pat@supplier.example', fields_requested: ['name'], message: 'Two minutes.' }),
+      headers: { 'Content-Type': 'application/json' },
+      user: admin,
+      params: { sheetId: s.sheetId, rowId: s.rowId },
+    }),
+  );
+  expect(res.status).toBeLessThan(300);
+  expect(sent).toHaveLength(1);
+  vi.unstubAllGlobals();
+  return sent[0];
+}
+
 describe('every token route carries its own tenant\'s brand and nobody else\'s', () => {
   let a: Surfaces;
   let b: Surfaces;
@@ -946,43 +1013,6 @@ describe('every token route carries its own tenant\'s brand and nobody else\'s',
   // The export page and the two mails this file can send end to end
   // -------------------------------------------------------------------------
 
-  async function makeDocument(tenantId: string, adminId: string, title: string): Promise<string> {
-    const id = generateTestId();
-    const typeId = generateTestId();
-    // "Certificate of Analysis" is a send-freely type (C-003), so the test is
-    // about the brand and not about the sharing rule.
-    await db.prepare(`INSERT INTO document_types (id, tenant_id, name, slug, sharing_rule) VALUES (?, ?, 'Certificate of Analysis', ?, 'free')`).bind(typeId, tenantId, `coa-brand-${typeId.slice(0, 6)}`).run();
-    await db
-      .prepare(`INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, document_type_id) VALUES (?, ?, ?, '[]', 1, 'active', ?, ?)`)
-      .bind(id, tenantId, title, adminId, typeId)
-      .run();
-    const key = `docs/${id}/coa.pdf`;
-    await db
-      .prepare(`INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES (?, ?, 1, 'coa.pdf', 9, 'application/pdf', ?, ?)`)
-      .bind(generateTestId(), id, key, adminId)
-      .run();
-    await env.FILES.put(key, new TextEncoder().encode('PDF-BYTES'));
-    return id;
-  }
-
-  async function sendExport(admin: TestUser, title: string): Promise<{ mail: CapturedMail; token: string }> {
-    const sent = stubMail();
-    const docId = await makeDocument(admin.tenant_id!, admin.id, title);
-    const res = await exportSend(
-      ctx('http://portal.test/api/document-exports/send', {
-        method: 'POST',
-        body: JSON.stringify({ document_ids: [docId], recipients: ['buyer@customer.example'], message: 'As requested.' }),
-        headers: { 'Content-Type': 'application/json' },
-        user: admin,
-      }),
-    );
-    expect(res.status).toBe(200);
-    expect(sent).toHaveLength(1);
-    const token = /\/export\/([A-Za-z0-9_-]+)/.exec(sent[0].html)![1];
-    vi.unstubAllGlobals();
-    return { mail: sent[0], token };
-  }
-
   it('the export mail and the export page carry the sender\'s tenant brand, with the export support line', async () => {
     const { mail, token } = await sendExport(adminA, 'COA for A');
     const logo = (await loadPublicBrand(db, seed.tenantId, 'document_export', { origin: 'http://portal.test' }))!.logo_url!;
@@ -1040,23 +1070,6 @@ describe('every token route carries its own tenant\'s brand and nobody else\'s',
     await putBrand(seed.tenantId2, { display_name: 'Harborline Dairy Co', support: { text: B_SECRET } }, adminB);
   });
 
-  async function sendUpdateRequest(admin: TestUser, s: Surfaces): Promise<CapturedMail> {
-    const sent = stubMail();
-    const res = await updateRequestCreate(
-      ctx(`http://portal.test/api/records/sheets/${s.sheetId}/rows/${s.rowId}/update-requests`, {
-        method: 'POST',
-        body: JSON.stringify({ recipient_email: 'pat@supplier.example', fields_requested: ['name'], message: 'Two minutes.' }),
-        headers: { 'Content-Type': 'application/json' },
-        user: admin,
-        params: { sheetId: s.sheetId, rowId: s.rowId },
-      }),
-    );
-    expect(res.status).toBeLessThan(300);
-    expect(sent).toHaveLength(1);
-    vi.unstubAllGlobals();
-    return sent[0];
-  }
-
   it('the update-request mail names the organisation and carries its line; unbranded it still says SupDox', async () => {
     const mailA = await sendUpdateRequest(adminA, a);
     expect(mailA.html).toContain('alt="Northfield Foods"');
@@ -1075,5 +1088,525 @@ describe('every token route carries its own tenant\'s brand and nobody else\'s',
     expect(BRAND_SURFACES.map((s) => s.key).sort()).toEqual(
       ['alert', 'document_export', 'file_drop', 'order_send', 'records_approval', 'records_form', 'records_update_request', 'supplier_request'].sort(),
     );
+  });
+});
+
+// ===========================================================================
+// After the independent review (2026-10-08): C-109..C-116
+// ===========================================================================
+
+const TENANT_D = 'brand-tenant-d';
+const ADMIN_D = 'brand-admin-d';
+const TENANT_E = 'brand-tenant-e';
+const ADMIN_E = 'brand-admin-e';
+let adminD: TestUser;
+let adminE: TestUser;
+const cp = (n: number) => String.fromCodePoint(n);
+
+const deleteBrand = (tenantId: string, user: TestUser, data?: Record<string, unknown>) =>
+  brandDelete(ctx(`/api/tenants/${tenantId}/brand`, { method: 'DELETE', user, params: { id: tenantId }, data }));
+
+const withdraw = (tenantId: string, logoId: string, reason: unknown, user: TestUser, data?: Record<string, unknown>) =>
+  logoWithdraw(
+    ctx(`/api/tenants/${tenantId}/brand/logos/${logoId}/withdraw`, {
+      method: 'POST',
+      body: JSON.stringify(reason === undefined ? {} : { reason }),
+      headers: { 'Content-Type': 'application/json' },
+      user,
+      params: { id: tenantId, logoId },
+      data,
+    }),
+  );
+
+const brandRow = (tenantId: string) =>
+  db.prepare('SELECT * FROM tenant_brands WHERE tenant_id = ?').bind(tenantId).first<Record<string, unknown>>();
+const auditCount = async (tenantId: string) =>
+  (await db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE tenant_id = ? AND action LIKE ?').bind(tenantId, 'tenant.brand%').first<{ n: number }>())!.n;
+const clearUploadBudget = () => db.prepare(`DELETE FROM rate_limits WHERE key LIKE 'brand_logo_upload:%'`).run();
+
+async function makeTenant(id: string, adminId: string, name: string): Promise<TestUser> {
+  await db.prepare(`INSERT OR IGNORE INTO tenants (id, name, slug, active) VALUES (?, ?, ?, 1)`).bind(id, name, `${id}-slug`).run();
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO users (id, email, name, role, tenant_id, password_hash, active, force_password_change)
+       VALUES (?, ?, ?, 'org_admin', ?, 'x', 1, 0)`,
+    )
+    .bind(adminId, `${adminId}@test.com`, `Admin of ${name}`, id)
+    .run();
+  return { id: adminId, email: `${adminId}@test.com`, name: `Admin of ${name}`, role: 'org_admin', tenant_id: id };
+}
+
+/** A mail with the parts that differ from one send to the next taken out. */
+const stable = (html: string) =>
+  html
+    .replace(/\/(export|u|a|r)\/[A-Za-z0-9_-]+/g, '/$1/TOKEN')
+    .replace(/works until [^<.]+/g, 'works until DATE');
+
+describe('an empty brand is no brand (C-109)', () => {
+  let surfaces: Surfaces;
+
+  beforeAll(async () => {
+    adminD = await makeTenant(TENANT_D, ADMIN_D, 'Delta Plain Co');
+    adminE = await makeTenant(TENANT_E, ADMIN_E, 'Echo Plain Co');
+    surfaces = await makeSurfaces(TENANT_D, ADMIN_D, 'd');
+  }, 30_000);
+
+  afterEach(async () => {
+    await clearUploadBudget();
+  });
+
+  it('an empty PUT on a tenant with no brand writes no row and no audit entry', async () => {
+    for (const bodyOf of [{}, { display_name: null }, { display_name: '', primary_color: '', accent_color: null }, { support: null }, { support: { text: '' }, support_overrides: {} }, { support_overrides: { alert: { text: '' } } }]) {
+      const res = await putBrand(TENANT_D, bodyOf, adminD);
+      expect(res.status, JSON.stringify(bodyOf)).toBe(200);
+      expect((await body<TenantBrandResponse>(res)).configured).toBe(false);
+    }
+    expect(await brandRow(TENANT_D)).toBeNull();
+    expect(await auditCount(TENANT_D)).toBe(0);
+  });
+
+  it('setting a colour and clearing it leaves NO row: the tenant is unbranded again, and the audit says so', async () => {
+    expect((await body<TenantBrandResponse>(await putBrand(TENANT_D, { primary_color: '#0B6E4F' }, adminD))).configured).toBe(true);
+    expect(await loadPublicBrand(db, TENANT_D, 'alert')).not.toBeNull();
+
+    const cleared = await body<TenantBrandResponse>(await putBrand(TENANT_D, { primary_color: null }, adminD));
+    expect(cleared.configured).toBe(false);
+    expect(cleared.updated_at).toBeNull();
+    expect(await brandRow(TENANT_D)).toBeNull();
+    expect(await loadPublicBrand(db, TENANT_D, 'alert')).toBeNull();
+
+    const audit = await brandAudit(TENANT_D);
+    expect(audit).toHaveLength(2);
+    expect(audit[0].details).toMatchObject({ created: true, changes: { primary_color: { from: null, to: '#0B6E4F' } } });
+    expect(audit[0].details).not.toHaveProperty('removed');
+    expect(audit[1].details).toMatchObject({ created: false, removed: true, changes: { primary_color: { from: '#0B6E4F', to: null } } });
+  });
+
+  it('uploading a logo and removing it leaves no row either; the published image stays', async () => {
+    const up = await body<TenantBrandResponse>(await postLogo(TENANT_D, pngBytes(200, 60, 900, 41), adminD));
+    expect(up.configured).toBe(true);
+    const removed = await body<TenantBrandResponse>(await deleteLogo(TENANT_D, adminD));
+    expect(removed.configured).toBe(false);
+    expect(removed.logo).toBeNull();
+    expect(await brandRow(TENANT_D)).toBeNull();
+    expect(await loadPublicBrand(db, TENANT_D, 'alert')).toBeNull();
+    // C-098 still holds: what was published is still reachable, and listed.
+    expect((await fetchLogo(tokenOf(up.logo!.url))).status).toBe(200);
+    expect(removed.logos.map((l) => ({ url: l.url, current: l.current, withdrawn_at: l.withdrawn_at }))).toEqual([
+      { url: up.logo!.url, current: false, withdrawn_at: null },
+    ]);
+    const audit = await brandAudit(TENANT_D);
+    expect(audit[audit.length - 1].details).toMatchObject({ removed: true });
+  });
+
+  it('a row with NOTHING in it reads exactly as no row: same payloads, same mail, byte for byte', async () => {
+    expect(await brandRow(TENANT_D)).toBeNull();
+    // -- with no row
+    const noRow = {
+      admin: await body<TenantBrandResponse>(await getBrand(TENANT_D, adminD)),
+      pages: await readSurfaces(surfaces),
+      exportMail: (await sendExport(adminD, 'COA D')).mail,
+      updateMail: await sendUpdateRequest(adminD, surfaces),
+    };
+    // -- with an all-empty row (left by an older writer, or put there by hand)
+    await db.prepare('INSERT INTO tenant_brands (tenant_id, updated_by) VALUES (?, ?)').bind(TENANT_D, ADMIN_D).run();
+    const emptyRow = {
+      admin: await body<TenantBrandResponse>(await getBrand(TENANT_D, adminD)),
+      pages: await readSurfaces(surfaces),
+      exportMail: (await sendExport(adminD, 'COA D')).mail,
+      updateMail: await sendUpdateRequest(adminD, surfaces),
+    };
+
+    expect(emptyRow.admin).toEqual(noRow.admin);
+    expect(emptyRow.admin.configured).toBe(false);
+    expect(await loadPublicBrand(db, TENANT_D, 'supplier_request')).toBeNull();
+    expect(await loadOutwardName(db, TENANT_D, 'x')).toBe('Delta Plain Co');
+
+    for (const [surface, { status, payload }] of Object.entries(emptyRow.pages)) {
+      expect(status, surface).toBe(200);
+      expect(Object.prototype.hasOwnProperty.call(payload, 'brand'), surface).toBe(false);
+      expect(payload, surface).toEqual(noRow.pages[surface].payload);
+    }
+
+    expect(stable(emptyRow.exportMail.html)).toBe(stable(noRow.exportMail.html));
+    expect(emptyRow.exportMail.subject).toBe(noRow.exportMail.subject);
+    expect(stable(emptyRow.updateMail.html)).toBe(stable(noRow.updateMail.html));
+    // The update-request header still names the product, and no footer line appeared.
+    expect(emptyRow.updateMail.html).toContain('font-weight:600;">SupDox</h1>');
+    expect(emptyRow.updateMail.html).not.toContain('<strong>Delta Plain Co</strong>');
+    expect(emptyRow.exportMail.html).not.toContain('<strong>Delta Plain Co</strong>');
+
+    const sent = await db.prepare("SELECT details FROM audit_log WHERE action = 'document_export.sent' AND tenant_id = ? ORDER BY id DESC LIMIT 1").bind(TENANT_D).first<{ details: string }>();
+    expect(Object.prototype.hasOwnProperty.call(JSON.parse(sent!.details), 'brand')).toBe(false);
+
+    // An empty PUT on the empty row is still nothing; a real save still works.
+    const before = await auditCount(TENANT_D);
+    await putBrand(TENANT_D, {}, adminD);
+    expect(await auditCount(TENANT_D)).toBe(before);
+    const real = await body<TenantBrandResponse>(await putBrand(TENANT_D, { display_name: 'Delta Foods' }, adminD));
+    expect(real.configured).toBe(true);
+    const audit = await brandAudit(TENANT_D);
+    expect(audit[audit.length - 1].details).toMatchObject({ created: true });
+  });
+
+  it('a row holding only what the reader refuses is as empty as an empty one', async () => {
+    // By hand: a display name that is one Hangul filler, and unusable overrides.
+    await db
+      .prepare('UPDATE tenant_brands SET display_name = ?, support_overrides = ? WHERE tenant_id = ?')
+      .bind(cp(0x3164), JSON.stringify({ nonsense: { text: 'x' } }), TENANT_D)
+      .run();
+    const brand = await loadTenantBrand(db, TENANT_D);
+    expect(brand).toMatchObject({ configured: false, stored: true, display_name: 'Delta Plain Co' });
+    expect(await loadPublicBrand(db, TENANT_D, 'alert')).toBeNull();
+    await db.prepare(`UPDATE tenant_brands SET display_name = 'Delta Foods', support_overrides = NULL WHERE tenant_id = ?`).bind(TENANT_D).run();
+  });
+
+  it('"Remove brand" returns a tenant to unbranded in one act, audited; an admin of that tenant only, and a person', async () => {
+    await putBrand(TENANT_D, { primary_color: '#7A1F5C', support: { text: 'Call us' }, support_overrides: { alert: { text: 'QA desk' } } }, adminD);
+    const withLogo = await body<TenantBrandResponse>(await postLogo(TENANT_D, pngBytes(210, 60, 900, 42), adminD));
+    expect(withLogo.configured).toBe(true);
+
+    for (const who of [reader, plainUser, adminA, adminB]) expect((await deleteBrand(TENANT_D, who)).status).toBe(403);
+    const viaKey = await deleteBrand(TENANT_D, adminD, { authMethod: 'api_key' });
+    expect(viaKey.status).toBe(403);
+    expect(await brandRow(TENANT_D)).not.toBeNull();
+
+    const before = (await brandAudit(TENANT_D)).length;
+    const res = await deleteBrand(TENANT_D, adminD);
+    expect(res.status).toBe(200);
+    const gone = await body<TenantBrandResponse>(res);
+    expect(gone).toMatchObject({ configured: false, display_name: null, primary_color: null, logo: null, support: { text: null, email: null, phone: null }, support_overrides: {} });
+    expect(await brandRow(TENANT_D)).toBeNull();
+    expect(await loadPublicBrand(db, TENANT_D, 'alert')).toBeNull();
+    // It does not withdraw anything: published logos are still there.
+    expect((await fetchLogo(tokenOf(withLogo.logo!.url))).status).toBe(200);
+
+    const audit = await brandAudit(TENANT_D);
+    expect(audit).toHaveLength(before + 1);
+    const last = audit[audit.length - 1];
+    expect(last.user_id).toBe(ADMIN_D);
+    expect(last.details).toMatchObject({
+      removed: true,
+      created: false,
+      changes: {
+        display_name: { from: 'Delta Foods', to: null },
+        primary_color: { from: '#7A1F5C', to: null },
+        support_text: { from: 'Call us', to: null },
+        support_overrides: { from: { alert: { text: 'QA desk', email: null, phone: null } }, to: null },
+        logo: { to: null },
+      },
+    });
+
+    // Removing what is not there is not an event.
+    expect((await deleteBrand(TENANT_D, adminD)).status).toBe(200);
+    expect((await brandAudit(TENANT_D)).length).toBe(before + 1);
+    expect((await deleteBrand('no-such-tenant', superAdmin)).status).toBe(404);
+  });
+});
+
+describe('invisible and direction-changing characters (C-110)', () => {
+  it('are refused in the display name, the support line and an override, and nothing is written', async () => {
+    const before = await brandRow(seed.tenantId);
+    const cases: unknown[] = [
+      { display_name: `${cp(0x202e)}moc.elpmaxe` },
+      { display_name: `North${cp(0x200b)}field` },
+      { display_name: cp(0x3164) },
+      { display_name: `${cp(0x115f)}${cp(0x1160)}` },
+      { display_name: `Northfield${cp(0x2066)}` },
+      { display_name: '---' },
+      { display_name: '***' },
+      { support: { text: `Call${cp(0x200d)}us` } },
+      { support: { text: `${cp(0x202e)}su llaC` } },
+      { support_overrides: { alert: { text: `QA${cp(0xfeff)}desk` } } },
+    ];
+    for (const bad of cases) {
+      const res = await putBrand(seed.tenantId, bad, adminA);
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+    }
+    const blank = await putBrand(seed.tenantId, { display_name: '---' }, adminA);
+    expect((await body<{ error: string }>(blank)).error).toBe('Display name must contain at least one letter or digit');
+    expect(await brandRow(seed.tenantId)).toEqual(before);
+  });
+
+  it('a stored name that carries one is dropped by the reader, so it never reaches a From name or a header', async () => {
+    const was = (await brandRow(seed.tenantId2))!.display_name as string;
+    await db.prepare('UPDATE tenant_brands SET display_name = ? WHERE tenant_id = ?').bind(`${cp(0x202e)}oC yriaD enilrobraH`, seed.tenantId2).run();
+    const brand = await loadTenantBrand(db, seed.tenantId2);
+    expect(brand!.stored_display_name).toBeNull();
+    expect(brand!.display_name).toBe('Other Corp');
+    expect(await loadOutwardName(db, seed.tenantId2, 'x')).toBe('Other Corp');
+    await db.prepare('UPDATE tenant_brands SET display_name = ? WHERE tenant_id = ?').bind(was, seed.tenantId2).run();
+  });
+});
+
+describe('withdrawing a published logo, and what bounds uploads (C-111..C-114)', () => {
+  const one = pngBytes(180, 50, 700, 51);
+  const two = pngBytes(180, 50, 700, 52);
+  let urlOne = '';
+  let urlTwo = '';
+  let idOne = '';
+  let idTwo = '';
+
+  afterEach(async () => {
+    await clearUploadBudget();
+  });
+
+  it('the public logo is cached for a day, not for ever', async () => {
+    const res = await body<TenantBrandResponse>(await postLogo(TENANT_E, one, adminE));
+    urlOne = res.logo!.url;
+    idOne = res.logos.find((l) => l.current)!.id;
+    const served = await fetchLogo(tokenOf(urlOne));
+    expect(served.headers.get('Cache-Control')).toBe('public, max-age=86400');
+    expect(served.headers.get('Cache-Control')).not.toContain('immutable');
+  });
+
+  it('the admin sees every published logo, the current one marked', async () => {
+    const res = await body<TenantBrandResponse>(await postLogo(TENANT_E, two, adminE));
+    urlTwo = res.logo!.url;
+    expect(res.logo_limit).toBe(10);
+    expect(res.logos.map((l) => ({ url: l.url, current: l.current, withdrawn_at: l.withdrawn_at })).sort((a, b) => a.url.localeCompare(b.url))).toEqual(
+      [
+        { url: urlOne, current: false, withdrawn_at: null },
+        { url: urlTwo, current: true, withdrawn_at: null },
+      ].sort((a, b) => a.url.localeCompare(b.url)),
+    );
+    idTwo = res.logos.find((l) => l.current)!.id;
+    // The list is the admin's: an outsider's payload has no such thing.
+    expect(JSON.stringify(await loadPublicBrand(db, TENANT_E, 'alert'))).not.toContain(idOne);
+  });
+
+  it('only a signed-in admin of that tenant may withdraw, and only with a reason', async () => {
+    for (const who of [reader, plainUser, adminA, adminB]) expect((await withdraw(TENANT_E, idOne, 'x', who)).status).toBe(403);
+    expect((await withdraw(TENANT_E, idOne, 'old artwork', adminE, { authMethod: 'api_key' })).status).toBe(403);
+
+    for (const bad of [undefined, '', '   ', 42, 'x'.repeat(301), `because${cp(0x202e)}`, 'two\nlines', '...']) {
+      expect((await withdraw(TENANT_E, idOne, bad, adminE)).status, JSON.stringify(bad)).toBe(400);
+    }
+    // Another tenant's logo id is not there, the same as an invented one.
+    const idOfA = (await db.prepare('SELECT id FROM tenant_brand_logos WHERE tenant_id = ? LIMIT 1').bind(seed.tenantId).first<{ id: string }>())!.id;
+    const foreign = await withdraw(TENANT_E, idOfA, 'not mine', adminE);
+    const invented = await withdraw(TENANT_E, 'no-such-logo', 'not there', adminE);
+    expect(foreign.status).toBe(404);
+    expect(invented.status).toBe(404);
+    expect(await foreign.text()).toBe(await invented.text());
+    expect((await withdraw('no-such-tenant', idOne, 'x y', superAdmin)).status).toBe(404);
+
+    // Nothing above withdrew anything.
+    expect((await fetchLogo(tokenOf(urlOne))).status).toBe(200);
+    const untouched = await db.prepare('SELECT withdrawn_at FROM tenant_brand_logos WHERE id = ?').bind(idOfA).first<{ withdrawn_at: string | null }>();
+    expect(untouched!.withdrawn_at).toBeNull();
+  });
+
+  it('a withdrawn logo is deleted, its URL is a 404 from then on, and the record says who and why', async () => {
+    const key = (await db.prepare('SELECT r2_key FROM tenant_brand_logos WHERE id = ?').bind(idOne).first<{ r2_key: string }>())!.r2_key;
+    expect(await env.FILES.head(key)).not.toBeNull();
+
+    const res = await withdraw(TENANT_E, idOne, 'Old artwork, should not be seen', adminE);
+    expect(res.status).toBe(200);
+    const after = await body<TenantBrandResponse>(res);
+    const row = after.logos.find((l) => l.id === idOne)!;
+    expect(row).toMatchObject({ current: false, withdrawn_reason: 'Old artwork, should not be seen', withdrawn_by_name: 'Admin of Echo Plain Co' });
+    expect(row.withdrawn_at).toBeTruthy();
+    // The brand still shows its current logo.
+    expect(after.logo!.url).toBe(urlTwo);
+
+    const gone = await fetchLogo(tokenOf(urlOne));
+    expect(gone.status).toBe(404);
+    expect(gone.headers.get('Cache-Control')).toBe('no-store');
+    expect(await env.FILES.head(key)).toBeNull();
+    expect((await fetchLogo(tokenOf(urlTwo))).status).toBe(200);
+
+    const audit = await db.prepare("SELECT user_id, details FROM audit_log WHERE action = 'tenant.brand_logo_withdrawn' AND tenant_id = ?").bind(TENANT_E).all<{ user_id: string; details: string }>();
+    expect(audit.results).toHaveLength(1);
+    expect(audit.results![0].user_id).toBe(ADMIN_E);
+    expect(JSON.parse(audit.results![0].details)).toMatchObject({
+      logo_id: idOne,
+      reason: 'Old artwork, should not be seen',
+      was_current: false,
+      object_deleted: true,
+      logo: { content_type: 'image/png', width: 180, height: 50 },
+    });
+
+    // Withdrawing it again is not an error and not a second event.
+    expect((await withdraw(TENANT_E, idOne, 'again', adminE)).status).toBe(200);
+    const again = await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'tenant.brand_logo_withdrawn' AND tenant_id = ?").bind(TENANT_E).first<{ n: number }>();
+    expect(again!.n).toBe(1);
+  });
+
+  it('a withdrawn row whose object is still there is not served either', async () => {
+    const key = (await db.prepare('SELECT r2_key FROM tenant_brand_logos WHERE id = ?').bind(idOne).first<{ r2_key: string }>())!.r2_key;
+    await env.FILES.put(key, one);
+    expect((await fetchLogo(tokenOf(urlOne))).status).toBe(404);
+    expect(await readBrandLogo(env, tokenOf(urlOne))).toBeNull();
+    await env.FILES.delete(key);
+  });
+
+  it('withdrawing the CURRENT logo takes it off the brand; if it was all the brand held, the tenant is unbranded', async () => {
+    const res = await withdraw(TENANT_E, idTwo, 'Wrong file uploaded', adminE);
+    expect(res.status).toBe(200);
+    const after = await body<TenantBrandResponse>(res);
+    expect(after.logo).toBeNull();
+    expect(after.configured).toBe(false);
+    expect(await brandRow(TENANT_E)).toBeNull();
+    expect((await fetchLogo(tokenOf(urlTwo))).status).toBe(404);
+    const audit = await db.prepare("SELECT details FROM audit_log WHERE action = 'tenant.brand_logo_withdrawn' AND tenant_id = ? ORDER BY id DESC LIMIT 1").bind(TENANT_E).first<{ details: string }>();
+    expect(JSON.parse(audit!.details)).toMatchObject({ logo_id: idTwo, was_current: true });
+  });
+
+  it('uploading a withdrawn image again publishes it again, at the same URL, on purpose', async () => {
+    const res = await postLogo(TENANT_E, one, adminE);
+    expect(res.status).toBe(200);
+    const after = await body<TenantBrandResponse>(res);
+    expect(after.logo!.url).toBe(urlOne);
+    expect(after.logos.find((l) => l.id === idOne)).toMatchObject({ current: true, withdrawn_at: null, withdrawn_reason: null });
+    const served = await fetchLogo(tokenOf(urlOne));
+    expect(served.status).toBe(200);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(one);
+    const audit = await brandAudit(TENANT_E);
+    expect(audit[audit.length - 1].details).toMatchObject({ restored_withdrawn_logo: true });
+    // The other one stays withdrawn.
+    expect((await fetchLogo(tokenOf(urlTwo))).status).toBe(404);
+  });
+
+  it('two uploads of the same NEW image at the same moment both succeed and are one logo', async () => {
+    const fresh = jpegBytes(300, 90, 1500, 77);
+    const [a, b] = await Promise.all([postLogo(TENANT_E, fresh, adminE), postLogo(TENANT_E, fresh, adminE)]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const [ra, rb] = [await body<TenantBrandResponse>(a), await body<TenantBrandResponse>(b)];
+    expect(ra.logo!.url).toBe(rb.logo!.url);
+    const rows = await db.prepare('SELECT COUNT(*) AS n FROM tenant_brand_logos WHERE tenant_id = ? AND url_token = ?').bind(TENANT_E, tokenOf(ra.logo!.url)).first<{ n: number }>();
+    expect(rows!.n).toBe(1);
+    // ...and four at once, of an image nobody has seen.
+    const another = webpBytes(200, 60, 'VP8L', { total: 800, seed: 78 });
+    const all = await Promise.all([1, 2, 3, 4].map(() => postLogo(TENANT_E, another, adminE)));
+    expect(all.map((r) => r.status)).toEqual([200, 200, 200, 200]);
+    expect(new Set(await Promise.all(all.map(async (r) => (await body<TenantBrandResponse>(r)).logo!.url))).size).toBe(1);
+  });
+
+  it('an animated PNG is refused at the door', async () => {
+    const res = await postLogo(TENANT_E, pngBytes(200, 60, 900, 79, { animated: true }), adminE);
+    expect(res.status).toBe(400);
+    expect((await body<{ error: string }>(res)).error).toContain('PNG, JPEG or WebP');
+  });
+
+  it('a tenant keeps at most ten published logos: the eleventh is refused with the reason, and nothing is withdrawn for them', async () => {
+    const kept = async () => (await db.prepare('SELECT COUNT(*) AS n FROM tenant_brand_logos WHERE tenant_id = ? AND withdrawn_at IS NULL').bind(TENANT_E).first<{ n: number }>())!.n;
+    let seedN = 100;
+    while ((await kept()) < 10) {
+      expect((await postLogo(TENANT_E, pngBytes(160, 48, 600, (seedN += 1)), adminE)).status).toBe(200);
+      await clearUploadBudget();
+    }
+    const before = await kept();
+    const refused = await postLogo(TENANT_E, pngBytes(160, 48, 600, 999), adminE);
+    expect(refused.status).toBe(409);
+    const err = await body<{ error: string; code: string }>(refused);
+    expect(err.code).toBe('logo_limit');
+    expect(err.error).toContain('already keeps 10 published logos');
+    expect(err.error).toContain('Withdraw one');
+    expect(await kept()).toBe(before);
+    expect((await env.FILES.list({ prefix: `brand/${TENANT_E}/` })).objects).toHaveLength(before);
+
+    // An image already published is not "another": choosing it again is fine.
+    expect((await postLogo(TENANT_E, one, adminE)).status).toBe(200);
+    // A withdrawn image is: putting it back needs room too.
+    expect((await postLogo(TENANT_E, two, adminE)).status).toBe(409);
+
+    // The admin makes room, by choice, and then it fits.
+    const spare = (await db.prepare(`SELECT l.id FROM tenant_brand_logos l WHERE l.tenant_id = ? AND l.withdrawn_at IS NULL AND l.id NOT IN (SELECT logo_id FROM tenant_brands WHERE tenant_id = ? AND logo_id IS NOT NULL) LIMIT 1`).bind(TENANT_E, TENANT_E).first<{ id: string }>())!.id;
+    expect((await withdraw(TENANT_E, spare, 'Making room', adminE)).status).toBe(200);
+    expect((await postLogo(TENANT_E, pngBytes(160, 48, 600, 999), adminE)).status).toBe(200);
+    expect(await kept()).toBe(10);
+  });
+
+  it('uploads are throttled per tenant: twenty attempts an hour, refused ones included', async () => {
+    await clearUploadBudget();
+    const junk = new TextEncoder().encode('not an image, but an attempt all the same');
+    for (let i = 0; i < 20; i += 1) expect((await postLogo(TENANT_E, junk, adminE)).status, `attempt ${i + 1}`).toBe(400);
+    const throttled = await postLogo(TENANT_E, one, adminE);
+    expect(throttled.status).toBe(429);
+    expect((await body<{ error: string }>(throttled)).error).toContain('20 at most');
+    // Even a valid image waits. Another tenant has its own budget.
+    expect((await postLogo(seed.tenantId, pngBytes(320, 96, 2000, 1), adminA)).status).toBe(200);
+    // Somebody who may not upload does not spend the tenant's budget.
+    await clearUploadBudget();
+    for (let i = 0; i < 25; i += 1) await postLogo(TENANT_E, junk, adminB);
+    expect((await postLogo(TENANT_E, one, adminE)).status).toBe(200);
+  });
+});
+
+describe("a form's accent is a colour or nothing (C-116)", () => {
+  it('the server normalises a hex colour and refuses anything else, and no longer stores an outside logo link', () => {
+    expect(normalizeSettings({ accent_color: '#abc', logo_url: 'https://elsewhere.example/x.png' })).toEqual({
+      thank_you_message: null,
+      redirect_url: null,
+      accent_color: '#AABBCC',
+    });
+    expect(normalizeSettings({ accent_color: '#1a365d' }).accent_color).toBe('#1A365D');
+    expect(normalizeSettings({ accent_color: '' }).accent_color).toBeNull();
+    expect(normalizeSettings({}).accent_color).toBeNull();
+    for (const bad of ['red', '#12345', 'rgb(0,0,0)', '#abc;x', 12]) {
+      expect(() => normalizeSettings({ accent_color: bad }), String(bad)).toThrow(/hex colour/);
+    }
+  });
+
+  it('a short hex stored before the builder checked it is still drawn; a colour name falls back', async () => {
+    const s = await makeSurfaces(TENANT_D, ADMIN_D, 'accent');
+    const read = async () => ((await readJson(await formGet(ctx(`/api/forms/public/${s.formSlug}`, { params: { slug: s.formSlug } })))) as { form: { accent_color: string | null; logo_url: string | null } }).form;
+    await db.prepare(`UPDATE records_forms SET settings = ? WHERE public_slug = ?`).bind(JSON.stringify({ accent_color: '#abc', logo_url: 'https://elsewhere.example/x.png' }), s.formSlug).run();
+    expect(await read()).toMatchObject({ accent_color: '#AABBCC', logo_url: null });
+    await db.prepare(`UPDATE records_forms SET settings = ? WHERE public_slug = ?`).bind(JSON.stringify({ accent_color: 'navy' }), s.formSlug).run();
+    expect((await read()).accent_color).toBeNull();
+  });
+});
+
+describe('the sign-off mail, through the workflow engine', () => {
+  async function runApprovalWorkflow(tenantId: string, adminId: string, tag: string): Promise<CapturedMail> {
+    const s = await makeSurfaces(tenantId, adminId, tag);
+    const row = await db.prepare('SELECT * FROM records_workflows WHERE sheet_id = ?').bind(s.sheetId).first<Record<string, unknown>>();
+    const sent = stubMail();
+    await startWorkflowRun(
+      { DB: db, RESEND_API_KEY: 'test-resend-key', appOrigin: 'http://portal.test' },
+      { workflow: hydrateWorkflow(row as never), rowId: s.rowId, triggeredByUserId: adminId },
+    );
+    vi.unstubAllGlobals();
+    expect(sent).toHaveLength(1);
+    return sent[0];
+  }
+
+  it('carries the brand of the workflow\'s own tenant: name, logo, colours, the sign-off support line', async () => {
+    await putBrand(seed.tenantId, { support_overrides: { supplier_request: { text: 'Supplier desk A', email: 'suppliers@northfield.example' }, document_export: { text: 'Customer Service A' }, records_approval: { text: 'Sign-off desk A', phone: '555 0177' } } }, adminA);
+    const mail = await runApprovalWorkflow(seed.tenantId, seed.orgAdminId, 'wf-a');
+    const logo = (await loadPublicBrand(db, seed.tenantId, 'records_approval', { origin: 'http://portal.test' }))!.logo_url!;
+    expect(mail.to).toEqual(['qa@outside.example']);
+    expect(mail.html).toContain(`<img src="${logo}" alt="Northfield Foods"`);
+    expect(mail.html).toContain('<strong>Northfield Foods</strong> &middot; Sign-off desk A &middot; 555 0177');
+    expect(mail.html).toContain('background:#0B6E4F;color:#ffffff;');
+    expect(mail.html).toMatch(/http:\/\/portal\.test\/a\/[A-Za-z0-9_-]+/);
+    for (const leak of [A_SECRET, 'Supplier desk A', 'Customer Service A', 'Harborline', B_SECRET, 'font-weight:600;">SupDox</h1>']) {
+      expect(mail.html).not.toContain(leak);
+    }
+    // The page that link opens shows the same line.
+    const token = /\/a\/([A-Za-z0-9_-]+)/.exec(mail.html)![1];
+    const page = (await readJson(await approvalGet(ctx(`/api/workflow-approvals/public/${token}`, { params: { token } })))) as Payload;
+    expect(page.brand!.support).toEqual({ text: 'Sign-off desk A', email: null, phone: '555 0177' });
+  });
+
+  it('a hostile display name and support line are escaped in the sign-off mail that is really sent', async () => {
+    await putBrand(seed.tenantId2, { display_name: `<script>alert(1)</script>"'`, support: { text: `"><img src=x onerror=alert(2)>` } }, adminB);
+    const mail = await runApprovalWorkflow(seed.tenantId2, seed.orgAdmin2Id, 'wf-b');
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).not.toContain('onerror=alert(2)>');
+    expect(mail.html).toContain('alt="&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;"');
+    expect(mail.html).toContain('&quot;&gt;&lt;img src=x onerror=alert(2)&gt;');
+    for (const leak of ['Northfield', A_SECRET, 'Sign-off desk A']) expect(mail.html).not.toContain(leak);
+    await putBrand(seed.tenantId2, { display_name: 'Harborline Dairy Co', support: { text: B_SECRET } }, adminB);
+  });
+
+  it('a tenant with no brand gets the sign-off mail as it always was', async () => {
+    const mail = await runApprovalWorkflow(TENANT_C, ADMIN_C, 'wf-c');
+    expect(mail.html).toContain('<h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox</h1>');
+    expect(mail.html).not.toContain('<img');
+    expect(mail.html).not.toContain('<strong>Plain Corp</strong>');
+    for (const leak of ['Northfield', 'Harborline', A_SECRET, B_SECRET]) expect(mail.html).not.toContain(leak);
   });
 });

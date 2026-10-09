@@ -12,7 +12,12 @@
  *      it is refused; a logo is one of three raster types; the lengths are
  *      capped; one row per tenant.
  *   3. A brand can only point at a logo of ITS OWN tenant.
- *   4. Both tables go with their tenant. Running the file twice changes nothing.
+ *   4. A WITHDRAWAL is a time and a reason together; a logo the brand shows
+ *      cannot be withdrawn, and a brand cannot point at a withdrawn logo.
+ *   5. Both tables go with their tenant. The file was amended once (the three
+ *      withdrawal columns): run over its own first cut, with each ADD COLUMN
+ *      whose column is there left out -- what `bin/migrate --reapply` does --
+ *      it changes nothing.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
@@ -91,7 +96,7 @@ describe('0140 on a populated database', () => {
     expect(await all('SELECT id FROM tenant_brand_logos')).toEqual([]);
   });
 
-  it('adds two tables, one index and two triggers, and nothing else', async () => {
+  it('adds two tables, one index and six triggers, and nothing else', async () => {
     expect((await all("SELECT name FROM pragma_table_info('tenant_brands')")).map((c) => c.name)).toEqual([
       'tenant_id', 'display_name', 'primary_color', 'accent_color',
       'support_text', 'support_email', 'support_phone', 'support_overrides',
@@ -100,6 +105,7 @@ describe('0140 on a populated database', () => {
     expect((await all("SELECT name FROM pragma_table_info('tenant_brand_logos')")).map((c) => c.name)).toEqual([
       'id', 'tenant_id', 'url_token', 'sha256', 'r2_key', 'content_type',
       'size_bytes', 'width', 'height', 'created_at', 'created_by',
+      'withdrawn_at', 'withdrawn_by', 'withdrawn_reason',
     ]);
     const made = (
       await all("SELECT name, type FROM sqlite_master WHERE tbl_name LIKE 'tenant_brand%' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -108,6 +114,10 @@ describe('0140 on a populated database', () => {
       'index:idx_tenant_brand_logos_tenant',
       'table:tenant_brand_logos',
       'table:tenant_brands',
+      'trigger:trg_tenant_brand_logos_no_withdraw_current',
+      'trigger:trg_tenant_brand_logos_withdrawal_shape',
+      'trigger:trg_tenant_brands_logo_not_withdrawn_insert',
+      'trigger:trg_tenant_brands_logo_not_withdrawn_update',
       'trigger:trg_tenant_brands_logo_same_tenant_insert',
       'trigger:trg_tenant_brands_logo_same_tenant_update',
     ]);
@@ -122,6 +132,7 @@ describe('0140 on a populated database', () => {
     expect(await all("SELECT \"table\" AS t, \"from\" AS f, on_delete FROM pragma_foreign_key_list('tenant_brand_logos') ORDER BY f")).toEqual([
       { t: 'users', f: 'created_by', on_delete: 'NO ACTION' },
       { t: 'tenants', f: 'tenant_id', on_delete: 'CASCADE' },
+      { t: 'users', f: 'withdrawn_by', on_delete: 'NO ACTION' },
     ]);
   });
 
@@ -190,16 +201,64 @@ describe('0140 on a populated database', () => {
     await expect(run(`DELETE FROM tenant_brand_logos WHERE id = 'l-a'`)).rejects.toThrow(/FOREIGN KEY/);
   });
 
-  it('running the file again changes nothing', async () => {
-    const snap = async () => JSON.stringify([await all('SELECT * FROM tenant_brands ORDER BY tenant_id'), await all('SELECT * FROM tenant_brand_logos ORDER BY id')]);
+  it('a withdrawal is a time and a reason together, or neither', async () => {
+    // A third, spare logo of tenant A that no brand shows.
+    await run(logo('l-a-old', A, 'e'.repeat(40), '4'.repeat(64)));
+    const fresh = await all(`SELECT withdrawn_at, withdrawn_by, withdrawn_reason FROM tenant_brand_logos WHERE id = 'l-a-old'`);
+    expect(fresh).toEqual([{ withdrawn_at: null, withdrawn_by: null, withdrawn_reason: null }]);
+
+    await expect(run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now') WHERE id = 'l-a-old'`)).rejects.toThrow(/time and a reason/);
+    await expect(run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now'), withdrawn_reason = '   ' WHERE id = 'l-a-old'`)).rejects.toThrow(/time and a reason/);
+    await expect(run(`UPDATE tenant_brand_logos SET withdrawn_reason = 'why' WHERE id = 'l-a-old'`)).rejects.toThrow(/time and a reason/);
+    await expect(run(`UPDATE tenant_brand_logos SET withdrawn_by = '${U}' WHERE id = 'l-a-old'`)).rejects.toThrow(/time and a reason/);
+    await expect(run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now'), withdrawn_reason = 'x', withdrawn_by = 'no-such-user' WHERE id = 'l-a-old'`)).rejects.toThrow();
+
+    await run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now'), withdrawn_by = '${U}', withdrawn_reason = 'wrong artwork' WHERE id = 'l-a-old'`);
+    // ...and it can be put back, all three together.
+    await run(`UPDATE tenant_brand_logos SET withdrawn_at = NULL, withdrawn_by = NULL, withdrawn_reason = NULL WHERE id = 'l-a-old'`);
+    await run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now'), withdrawn_by = '${U}', withdrawn_reason = 'wrong artwork' WHERE id = 'l-a-old'`);
+  });
+
+  it('a logo the brand shows cannot be withdrawn, and a brand cannot point at a withdrawn logo', async () => {
+    // l-a is tenant A's current logo.
+    await expect(
+      run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now'), withdrawn_reason = 'x' WHERE id = 'l-a'`),
+    ).rejects.toThrow(/off the brand/);
+    // l-a-old is withdrawn.
+    await expect(run(`UPDATE tenant_brands SET logo_id = 'l-a-old' WHERE tenant_id = '${A}'`)).rejects.toThrow(/withdrawn/);
+    await run(`DELETE FROM tenant_brands WHERE tenant_id = '${A}'`);
+    await expect(run(brand(A, { logo_id: `'l-a-old'` }))).rejects.toThrow(/withdrawn/);
+    await run(brand(A, { display_name: `'Rehearsal Foods'`, primary_color: `'#0B6E4F'`, logo_id: `'l-a'`, updated_by: `'${U}'` }));
+    // Taken off the brand first, it can be withdrawn.
+    await run(`UPDATE tenant_brands SET logo_id = NULL WHERE tenant_id = '${A}'`);
+    await run(`UPDATE tenant_brand_logos SET withdrawn_at = datetime('now'), withdrawn_reason = 'retired' WHERE id = 'l-a'`);
+    await run(`UPDATE tenant_brand_logos SET withdrawn_at = NULL, withdrawn_reason = NULL WHERE id = 'l-a'`);
+    await run(`UPDATE tenant_brands SET logo_id = 'l-a' WHERE tenant_id = '${A}'`);
+  });
+
+  it('run again over its own first cut (each ADD COLUMN that is already there left out), it changes nothing', async () => {
+    const snap = async () =>
+      JSON.stringify([
+        await all('SELECT * FROM tenant_brands ORDER BY tenant_id'),
+        await all('SELECT * FROM tenant_brand_logos ORDER BY id'),
+        await all("SELECT name, sql FROM sqlite_master WHERE tbl_name LIKE 'tenant_brand%' ORDER BY name"),
+      ]);
     const was = await snap();
-    await db.batch(splitStatements(m0140).map((s) => db.prepare(s)));
+    const statements = splitStatements(m0140);
+    const adds = statements.filter((st) => /^ALTER TABLE \w+ ADD COLUMN/i.test(st.trim()));
+    // The three withdrawal columns, each a one-line ALTER the reapply can see.
+    expect(adds).toHaveLength(3);
+    for (const add of adds) {
+      expect(add.trim().split('\n')).toHaveLength(1);
+      await expect(run(add)).rejects.toThrow(/duplicate column name/);
+    }
+    await db.batch(statements.filter((st) => !adds.includes(st)).map((st) => db.prepare(st)));
     expect(await snap()).toBe(was);
   });
 
   it('both tables go with their tenant', async () => {
     await run(`DELETE FROM tenants WHERE id = '${B}'`);
     expect((await all('SELECT tenant_id FROM tenant_brands')).map((r) => r.tenant_id)).toEqual([A]);
-    expect((await all('SELECT id FROM tenant_brand_logos ORDER BY id')).map((r) => r.id)).toEqual(['l-a']);
+    expect((await all('SELECT id FROM tenant_brand_logos ORDER BY id')).map((r) => r.id)).toEqual(['l-a', 'l-a-old']);
   });
 });

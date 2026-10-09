@@ -8742,12 +8742,35 @@ export interface TenantBrandLogo {
   uploaded_at: string;
 }
 
+/**
+ * One logo the organisation has published, current or past, as the admin
+ * screen lists it. A past logo stays reachable at its URL (mail already sent
+ * points at it) until an admin WITHDRAWS it.
+ */
+export interface TenantBrandLogoRecord extends TenantBrandLogo {
+  id: string;
+  /** The logo the brand shows now. */
+  current: boolean;
+  /** Set once withdrawn: the URL answers 404 and the image is deleted. */
+  withdrawn_at: string | null;
+  withdrawn_reason: string | null;
+  withdrawn_by_name: string | null;
+}
+
+/** POST /api/tenants/:id/brand/logos/:logoId/withdraw */
+export interface TenantBrandLogoWithdrawRequest {
+  reason: string;
+}
+
 /** GET / PUT /api/tenants/:id/brand -- the admin's view of the record. */
 export interface TenantBrandResponse {
   tenant_id: string;
   /** `tenants.name`: what the display name falls back to. */
   tenant_name: string;
-  /** False until somebody saves a brand or uploads a logo. */
+  /**
+   * True when at least one field is set or a logo is current. A record with
+   * nothing in it IS no record: false, and every surface is unbranded.
+   */
   configured: boolean;
   /** As stored; null = falls back to `tenant_name`. */
   display_name: string | null;
@@ -8757,6 +8780,10 @@ export interface TenantBrandResponse {
   /** Keyed by surface (`BRAND_SURFACES` in shared/tenantBrand.ts). */
   support_overrides: Record<string, BrandSupportLine>;
   logo: TenantBrandLogo | null;
+  /** Every logo ever published, newest first, withdrawn ones included. */
+  logos: TenantBrandLogoRecord[];
+  /** How many published (not withdrawn) logos may be kept at once. */
+  logo_limit: number;
   updated_at: string | null;
   updated_by_name: string | null;
 }

@@ -413,9 +413,9 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
   {
     path: 'functions/lib/tenant-brand.ts',
     classification: 'not_exit',
-    signature: { bucket: 6, gets: 2, readers: 0, checks: 0 },
+    signature: { bucket: 10, gets: 2, readers: 0, checks: 0 },
     reason:
-      'Writes and reads an organisation logo. readBrandLogo takes a 40-hex token, finds a tenant_brand_logos row by it, REBUILDS the key from that row (brand/<tenant>/logo-<sha256>.<ext>) and refuses unless it equals the stored key, so no caller-supplied string reaches the bucket and no document key can be formed. The second .get( is the per-request brand cache, a Map.',
+      'Writes, reads and deletes an organisation logo. readBrandLogo takes a 40-hex token, finds a tenant_brand_logos row by it, refuses a WITHDRAWN row, REBUILDS the key from the row (brand/<tenant>/logo-<sha256>.<ext>) and refuses unless it equals the stored key, so no caller-supplied string reaches the bucket and no document key can be formed. withdrawBrandLogo deletes only a key it rebuilt the same way from a row found by id AND tenant. The second .get( is the per-request brand cache, a Map. Still one bucket read; the bucket mentions that moved the count are the delete on withdrawal.',
   },
   {
     path: 'functions/api/public/brand-logo/[token].ts',
@@ -430,5 +430,12 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
     signature: { bucket: 2, gets: 1, readers: 0, checks: 0 },
     reason:
       'An admin uploads or removes the organisation logo. It writes INTO the bucket (through storeBrandLogo) and returns the brand record as JSON, never file bytes. The .get( is FormData.get on the upload.',
+  },
+  {
+    path: 'functions/api/tenants/[id]/brand/logos/[logoId]/withdraw.ts',
+    classification: 'not_exit',
+    signature: { bucket: 2, gets: 0, readers: 0, checks: 0 },
+    reason:
+      'An admin withdraws a published logo: the object is DELETED and its public URL answers 404 from then on. It hands the bucket to withdrawBrandLogo and returns the brand record as JSON. Nothing is read out of storage here.',
   },
 ];

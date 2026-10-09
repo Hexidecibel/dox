@@ -22,6 +22,7 @@
 import {
   cleanBrandColor,
   cleanBrandText,
+  cleanDisplayName,
   cleanSupportLine,
   cleanSupportOverrides,
   isEmptySupportLine,
@@ -29,7 +30,8 @@ import {
   parseBrandColor,
   parseStoredOverrides,
   toPublicBrand,
-  BRAND_DISPLAY_NAME_MAX,
+  BRAND_LOGO_RETAINED_MAX,
+  BRAND_WITHDRAW_REASON_MAX,
   LOGO_CONTENT_TYPES,
 } from '../../shared/tenantBrand';
 import type { BrandSource, BrandSurface, LogoContentType } from '../../shared/tenantBrand';
@@ -37,6 +39,7 @@ import type {
   BrandSupportLine,
   PublicBrand,
   TenantBrandLogo,
+  TenantBrandLogoRecord,
   TenantBrandResponse,
   TenantBrandUpdateRequest,
 } from '../../shared/types';
@@ -108,11 +111,22 @@ interface BrandRow {
   logo_created_at: string | null;
 }
 
-/** A brand with every fallback applied. `configured` false = no row. */
+/**
+ * A brand with every fallback applied.
+ *
+ * `configured` is THE question every reader asks, and it is not "is there a
+ * row". It is true when at least one field is set or a logo is current. A row
+ * with nothing in it -- every field cleared, the logo taken off -- reads
+ * exactly as no row: `configured` false, no `brand` in any payload, the
+ * unbranded mail byte for byte. (The writer also deletes such a row, so the
+ * reader's rule is the safety net and the writer's is the tidy state.)
+ */
 export interface ResolvedTenantBrand extends BrandSource {
   tenant_id: string;
   tenant_name: string;
   configured: boolean;
+  /** A `tenant_brands` row exists, set or not. Only the writer cares. */
+  stored: boolean;
   /** As stored (null = `display_name` above is the tenant name). */
   stored_display_name: string | null;
   support_overrides: Partial<Record<BrandSurface, BrandSupportLine>>;
@@ -144,35 +158,46 @@ export function requestBrandCache(data: Record<string, unknown> | undefined | nu
   return cache;
 }
 
-function cleanStored(value: string | null, max: number): string | null {
-  const r = cleanBrandText(value, 'value', max);
-  return r.ok ? r.value : null;
-}
-
 function toResolved(row: BrandRow): ResolvedTenantBrand {
-  const configured = row.has_row === 1;
+  const stored = row.has_row === 1;
   // Every stored value goes back through the same validation it was written
   // through. A row edited by hand can lose a field this way; it cannot put an
   // unchecked string on a page.
-  const storedName = configured ? cleanStored(row.display_name, BRAND_DISPLAY_NAME_MAX) : null;
-  const support = configured
+  const name = stored ? cleanDisplayName(row.display_name) : null;
+  const storedName = name && name.ok ? name.value : null;
+  const supportResult = stored
     ? cleanSupportLine({ text: row.support_text, email: row.support_email, phone: row.support_phone }, 'support')
     : null;
+  const support = supportResult && supportResult.ok ? supportResult.value : null;
+  const primary = stored ? parseBrandColor(row.primary_color) : null;
+  const accent = stored ? parseBrandColor(row.accent_color) : null;
+  const overrides = stored ? parseStoredOverrides(row.support_overrides) : {};
   const logoOk =
-    configured &&
+    stored &&
     row.logo_token !== null &&
     LOGO_TOKEN.test(row.logo_token) &&
     (LOGO_CONTENT_TYPES as readonly string[]).includes(row.logo_content_type ?? '');
+  // Judged on what SURVIVED validation: a row holding only values the reader
+  // dropped is as empty as one holding none.
+  const configured =
+    stored &&
+    (storedName !== null ||
+      primary !== null ||
+      accent !== null ||
+      !isEmptySupportLine(support) ||
+      Object.keys(overrides).length > 0 ||
+      logoOk);
   return {
     tenant_id: row.tenant_id,
     tenant_name: row.tenant_name,
     configured,
+    stored,
     stored_display_name: storedName,
     display_name: storedName ?? row.tenant_name,
-    primary_color: configured ? parseBrandColor(row.primary_color) : null,
-    accent_color: configured ? parseBrandColor(row.accent_color) : null,
-    support: support && support.ok ? support.value : null,
-    support_overrides: configured ? parseStoredOverrides(row.support_overrides) : {},
+    primary_color: primary,
+    accent_color: accent,
+    support,
+    support_overrides: overrides,
     logo_path: logoOk ? brandLogoPath(row.logo_token!) : null,
     logo: logoOk
       ? {
@@ -204,7 +229,8 @@ async function readBrand(db: D1Database, tenantId: string): Promise<ResolvedTena
               l.created_at AS logo_created_at
          FROM tenants t
          LEFT JOIN tenant_brands b ON b.tenant_id = t.id
-         LEFT JOIN tenant_brand_logos l ON l.id = b.logo_id AND l.tenant_id = t.id
+         LEFT JOIN tenant_brand_logos l
+           ON l.id = b.logo_id AND l.tenant_id = t.id AND l.withdrawn_at IS NULL
          LEFT JOIN users u ON u.id = b.updated_by
         WHERE t.id = ?`,
     )
@@ -215,8 +241,9 @@ async function readBrand(db: D1Database, tenantId: string): Promise<ResolvedTena
 
 /**
  * The tenant's brand, fully resolved. Null only when the tenant does not
- * exist. A tenant with no brand row comes back with `configured: false`, the
- * tenant name as its display name and nothing else set.
+ * exist. A tenant with no brand -- no row, or a row with nothing in it -- comes
+ * back with `configured: false`, the tenant name as its display name and
+ * nothing else set.
  */
 export function loadTenantBrand(
   db: D1Database,
@@ -254,7 +281,42 @@ export async function loadPublicBrand(
   }
 }
 
-export function toBrandResponse(brand: ResolvedTenantBrand): TenantBrandResponse {
+interface LogoListRow extends LogoRow {
+  created_at: string;
+  withdrawn_by_name: string | null;
+}
+
+/** Every logo the tenant has published, newest first, withdrawn ones included. */
+export async function listBrandLogos(db: D1Database, tenantId: string): Promise<TenantBrandLogoRecord[]> {
+  const res = await db
+    .prepare(
+      `SELECT l.*, u.name AS withdrawn_by_name,
+              CASE WHEN b.logo_id = l.id THEN 1 ELSE 0 END AS is_current
+         FROM tenant_brand_logos l
+         LEFT JOIN tenant_brands b ON b.tenant_id = l.tenant_id
+         LEFT JOIN users u ON u.id = l.withdrawn_by
+        WHERE l.tenant_id = ?
+        ORDER BY l.created_at DESC, l.id DESC`,
+    )
+    .bind(tenantId)
+    .all<LogoListRow & { is_current: number }>();
+  return (res.results ?? []).map((l) => ({
+    id: l.id,
+    url: brandLogoPath(l.url_token),
+    content_type: l.content_type,
+    size_bytes: l.size_bytes,
+    width: l.width,
+    height: l.height,
+    uploaded_at: l.created_at,
+    current: l.is_current === 1 && !l.withdrawn_at,
+    withdrawn_at: l.withdrawn_at ?? null,
+    withdrawn_reason: l.withdrawn_reason ?? null,
+    withdrawn_by_name: l.withdrawn_by_name ?? null,
+  }));
+}
+
+/** The admin's view: the record, and every logo behind it. */
+export async function brandResponse(db: D1Database, brand: ResolvedTenantBrand): Promise<TenantBrandResponse> {
   return {
     tenant_id: brand.tenant_id,
     tenant_name: brand.tenant_name,
@@ -265,6 +327,8 @@ export function toBrandResponse(brand: ResolvedTenantBrand): TenantBrandResponse
     support: brand.support ?? { text: null, email: null, phone: null },
     support_overrides: brand.support_overrides as Record<string, BrandSupportLine>,
     logo: brand.logo,
+    logos: await listBrandLogos(db, brand.tenant_id),
+    logo_limit: BRAND_LOGO_RETAINED_MAX,
     updated_at: brand.updated_at,
     updated_by_name: brand.updated_by_name,
   };
@@ -289,6 +353,14 @@ export class BrandValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'BrandValidationError';
+  }
+}
+
+/** The request is well formed and the brand's present state refuses it (409). */
+export class BrandConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BrandConflictError';
   }
 }
 
@@ -330,7 +402,7 @@ export function applyBrandUpdate(current: StoredFields, body: TenantBrandUpdateR
   };
 
   if (has(body, 'display_name')) {
-    const r = cleanBrandText(body.display_name, 'Display name', BRAND_DISPLAY_NAME_MAX);
+    const r = cleanDisplayName(body.display_name);
     next.display_name = r.ok ? r.value : fail(r.error);
   }
   if (has(body, 'primary_color')) {
@@ -391,8 +463,43 @@ export interface BrandActor {
 }
 
 /**
- * Save the text and colour fields. Creates the row on first save. Returns the
- * brand as it now reads; writes nothing and no audit row when nothing changed.
+ * Delete the brand row when NOTHING is left in it. One statement, so two
+ * writers cannot leave an empty row between them. "No brand" is one state, and
+ * clearing the last field is how a tenant gets back to it.
+ */
+async function dropRowIfEmpty(db: D1Database, tenantId: string): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM tenant_brands
+        WHERE tenant_id = ?
+          AND display_name IS NULL AND primary_color IS NULL AND accent_color IS NULL
+          AND support_text IS NULL AND support_email IS NULL AND support_phone IS NULL
+          AND support_overrides IS NULL AND logo_id IS NULL`,
+    )
+    .bind(tenantId)
+    .run();
+}
+
+function isEmptyFields(f: StoredFields): boolean {
+  return (
+    f.display_name === null &&
+    f.primary_color === null &&
+    f.accent_color === null &&
+    f.support_text === null &&
+    f.support_email === null &&
+    f.support_phone === null &&
+    overridesJson(f.support_overrides) === null
+  );
+}
+
+/**
+ * Save the text and colour fields.
+ *
+ *   - Nothing changed: nothing is written and nothing is audited -- including
+ *     an empty body on a tenant that has no brand, which creates no row.
+ *   - Something is set: the row is created or updated.
+ *   - The last thing was cleared (and no logo is current): the row is DELETED.
+ *     The tenant is unbranded again, exactly as if it had never had a brand.
  */
 export async function saveTenantBrand(
   db: D1Database,
@@ -405,7 +512,7 @@ export async function saveTenantBrand(
   const before = storedFields(current);
   const after = applyBrandUpdate(before, body);
   const changes = diffFields(before, after);
-  if (Object.keys(changes).length === 0 && current.configured) return current;
+  if (Object.keys(changes).length === 0) return current;
 
   await db
     .prepare(
@@ -436,7 +543,9 @@ export async function saveTenantBrand(
       actor.userId,
     )
     .run();
+  if (isEmptyFields(after)) await dropRowIfEmpty(db, tenantId);
 
+  const next = await readBrand(db, tenantId);
   await logAudit(
     db,
     actor.userId,
@@ -444,9 +553,61 @@ export async function saveTenantBrand(
     'tenant.brand_updated',
     'tenant',
     tenantId,
-    JSON.stringify({ changes, created: !current.configured, via: actor.via ?? 'jwt' }),
+    JSON.stringify({
+      changes,
+      created: !current.configured,
+      ...(next && !next.configured ? { removed: true } : {}),
+      via: actor.via ?? 'jwt',
+    }),
     actor.ip,
   );
+  return next;
+}
+
+/**
+ * "Remove brand": every field cleared and the logo taken off, in one act. The
+ * tenant is unbranded from the next page and the next mail. Logos already
+ * published stay reachable (mail already sent shows them) until an admin
+ * withdraws them; this does not withdraw anything.
+ */
+export async function removeTenantBrand(
+  db: D1Database,
+  tenantId: string,
+  actor: BrandActor,
+): Promise<ResolvedTenantBrand | null> {
+  const current = await readBrand(db, tenantId);
+  if (!current) return null;
+  if (!current.stored) return current;
+  const before = storedFields(current);
+  const changes = diffFields(before, {
+    display_name: null,
+    primary_color: null,
+    accent_color: null,
+    support_text: null,
+    support_email: null,
+    support_phone: null,
+    support_overrides: {},
+  });
+  const logo = await currentLogo(db, tenantId);
+  await db.prepare('DELETE FROM tenant_brands WHERE tenant_id = ?').bind(tenantId).run();
+  // An empty row was already "no brand": tidying it away is not an event.
+  if (current.configured) {
+    await logAudit(
+      db,
+      actor.userId,
+      tenantId,
+      'tenant.brand_updated',
+      'tenant',
+      tenantId,
+      JSON.stringify({
+        changes: { ...changes, ...(logo ? { logo: { from: logoAudit(logo), to: null } } : {}) },
+        created: false,
+        removed: true,
+        via: actor.via ?? 'jwt',
+      }),
+      actor.ip,
+    );
+  }
   return readBrand(db, tenantId);
 }
 
@@ -460,6 +621,9 @@ interface LogoRow {
   size_bytes: number;
   width: number;
   height: number;
+  withdrawn_at?: string | null;
+  withdrawn_by?: string | null;
+  withdrawn_reason?: string | null;
 }
 
 /** What the audit row says about a logo: what it was, never the image. */
@@ -480,9 +644,25 @@ async function currentLogo(db: D1Database, tenantId: string): Promise<LogoRow | 
     .first<LogoRow>();
 }
 
+const logoBySha = (db: D1Database, tenantId: string, sha256: string) =>
+  db.prepare('SELECT * FROM tenant_brand_logos WHERE tenant_id = ? AND sha256 = ?').bind(tenantId, sha256).first<LogoRow>();
+
 /**
  * Publish a logo: judge the BYTES (never the claimed type), store them under a
  * key built from the tenant and the content hash, and point the brand at them.
+ *
+ * THE SAME IMAGE TWICE IS ONE LOGO, however the two uploads are timed: the row
+ * is written with ON CONFLICT DO NOTHING and read back, so two requests that
+ * arrive together both succeed and both name the same logo.
+ *
+ * AN IMAGE THAT WAS WITHDRAWN AND IS UPLOADED AGAIN IS PUBLISHED AGAIN, at the
+ * URL it had. That is the admin choosing to put it back, and it is audited as
+ * a restoration; mail that showed a broken image shows the logo again.
+ *
+ * THE CAP. A tenant keeps at most BRAND_LOGO_RETAINED_MAX published logos. A
+ * NEW image past that is refused with the reason; nothing is withdrawn to
+ * make room, because withdrawing breaks the image in mail already sent and
+ * that is a person's decision.
  */
 export async function storeBrandLogo(
   env: { DB: D1Database; FILES: R2Bucket },
@@ -496,28 +676,51 @@ export async function storeBrandLogo(
 
   const brand = await readBrand(env.DB, tenantId);
   if (!brand) return null;
-  const previous = await currentLogo(env.DB, tenantId);
 
   const sha256 = await sha256Hex(bytes);
   const key = brandLogoKey(tenantId, sha256, contentType);
   const urlToken = await brandLogoToken(tenantId, sha256);
 
-  let logo = await env.DB.prepare('SELECT * FROM tenant_brand_logos WHERE tenant_id = ? AND sha256 = ?')
-    .bind(tenantId, sha256)
-    .first<LogoRow>();
-  if (!logo) {
-    await env.FILES.put(key, bytes, { httpMetadata: { contentType } });
-    const id = generateId();
-    await env.DB.prepare(
-      `INSERT INTO tenant_brand_logos
-         (id, tenant_id, url_token, sha256, r2_key, content_type, size_bytes, width, height, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  const existing = await logoBySha(env.DB, tenantId, sha256);
+  const restoring = !!existing?.withdrawn_at;
+  if (!existing || restoring) {
+    const kept = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM tenant_brand_logos WHERE tenant_id = ? AND withdrawn_at IS NULL',
     )
-      .bind(id, tenantId, urlToken, sha256, key, contentType, bytes.length, width, height, actor.userId)
-      .run();
-    logo = { id, tenant_id: tenantId, url_token: urlToken, sha256, r2_key: key, content_type: contentType, size_bytes: bytes.length, width, height };
+      .bind(tenantId)
+      .first<{ n: number }>();
+    if ((kept?.n ?? 0) >= BRAND_LOGO_RETAINED_MAX) {
+      throw new BrandConflictError(
+        `This organization already keeps ${BRAND_LOGO_RETAINED_MAX} published logos, the most allowed. ` +
+          'Withdraw one you no longer need (Settings > Brand > Past logos) before uploading another.',
+      );
+    }
   }
 
+  // Idempotent: the key is the content hash, so writing it again writes the
+  // same bytes. It also puts back the object of a withdrawn image.
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType } });
+  await env.DB.prepare(
+    `INSERT INTO tenant_brand_logos
+       (id, tenant_id, url_token, sha256, r2_key, content_type, size_bytes, width, height, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT DO NOTHING`,
+  )
+    .bind(generateId(), tenantId, urlToken, sha256, key, contentType, bytes.length, width, height, actor.userId)
+    .run();
+  if (restoring) {
+    await env.DB.prepare(
+      `UPDATE tenant_brand_logos
+          SET withdrawn_at = NULL, withdrawn_by = NULL, withdrawn_reason = NULL
+        WHERE tenant_id = ? AND sha256 = ?`,
+    )
+      .bind(tenantId, sha256)
+      .run();
+  }
+  const logo = await logoBySha(env.DB, tenantId, sha256);
+  if (!logo) throw new Error('The logo row could not be read back');
+
+  const previous = await currentLogo(env.DB, tenantId);
   if (previous?.id !== logo.id) {
     await env.DB.prepare(
       `INSERT INTO tenant_brands (tenant_id, logo_id, updated_by) VALUES (?, ?, ?)
@@ -536,6 +739,7 @@ export async function storeBrandLogo(
       JSON.stringify({
         changes: { logo: { from: logoAudit(previous), to: logoAudit(logo) } },
         created: !brand.configured,
+        ...(restoring ? { restored_withdrawn_logo: true } : {}),
         via: actor.via ?? 'jwt',
       }),
       actor.ip,
@@ -547,7 +751,8 @@ export async function storeBrandLogo(
 /**
  * Take the logo off the brand. The published object and its row STAY, so mail
  * already sent keeps showing the logo it was sent with; only new mail and
- * pages stop using it.
+ * pages stop using it. (To make a published logo unreachable, withdraw it.)
+ * If the logo was the last thing the brand held, the tenant is unbranded.
  */
 export async function removeBrandLogo(
   db: D1Database,
@@ -562,6 +767,8 @@ export async function removeBrandLogo(
     .prepare(`UPDATE tenant_brands SET logo_id = NULL, updated_by = ?, updated_at = datetime('now') WHERE tenant_id = ?`)
     .bind(actor.userId, tenantId)
     .run();
+  await dropRowIfEmpty(db, tenantId);
+  const next = await readBrand(db, tenantId);
   await logAudit(
     db,
     actor.userId,
@@ -569,10 +776,99 @@ export async function removeBrandLogo(
     'tenant.brand_updated',
     'tenant',
     tenantId,
-    JSON.stringify({ changes: { logo: { from: logoAudit(previous), to: null } }, created: false, via: actor.via ?? 'jwt' }),
+    JSON.stringify({
+      changes: { logo: { from: logoAudit(previous), to: null } },
+      created: false,
+      ...(next && !next.configured ? { removed: true } : {}),
+      via: actor.via ?? 'jwt',
+    }),
     actor.ip,
   );
-  return readBrand(db, tenantId);
+  return next;
+}
+
+export type WithdrawOutcome =
+  | { ok: true; brand: ResolvedTenantBrand; already: boolean }
+  | { ok: false; reason: 'tenant_not_found' | 'logo_not_found' };
+
+/**
+ * WITHDRAW a published logo: its URL answers 404 from now on and the image is
+ * deleted from storage. This is the one way a logo stops being reachable, and
+ * it is a person's act with a stated reason, because mail already sent that
+ * shows this logo will show a broken image instead.
+ *
+ * The row is marked first and the object deleted second: the URL is dead the
+ * moment the row says so (`readBrandLogo` refuses a withdrawn row), so a failed
+ * delete leaves nothing reachable, and asking again deletes what is left.
+ * A logo the brand is showing is taken off the brand as part of the same act.
+ */
+export async function withdrawBrandLogo(
+  env: { DB: D1Database; FILES: R2Bucket },
+  tenantId: string,
+  logoId: string,
+  reasonRaw: unknown,
+  actor: BrandActor,
+): Promise<WithdrawOutcome> {
+  const reason = cleanBrandText(reasonRaw, 'Reason', BRAND_WITHDRAW_REASON_MAX, { requireVisible: true });
+  if (!reason.ok) throw new BrandValidationError(reason.error);
+  if (reason.value === null) throw new BrandValidationError('Say why this logo is being withdrawn');
+
+  const brand = await readBrand(env.DB, tenantId);
+  if (!brand) return { ok: false, reason: 'tenant_not_found' };
+  // Found by id AND tenant: another tenant's logo id is simply not there.
+  const row = await env.DB.prepare('SELECT * FROM tenant_brand_logos WHERE id = ? AND tenant_id = ?')
+    .bind(logoId, tenantId)
+    .first<LogoRow>();
+  if (!row) return { ok: false, reason: 'logo_not_found' };
+
+  // The only key ever deleted is the one this row can be PROVEN to own.
+  const typeOk = (LOGO_CONTENT_TYPES as readonly string[]).includes(row.content_type) && SHA256.test(row.sha256);
+  const key = typeOk ? brandLogoKey(row.tenant_id, row.sha256, row.content_type as LogoContentType) : null;
+  const ownedKey = key !== null && key === row.r2_key ? key : null;
+
+  if (row.withdrawn_at) {
+    if (ownedKey) await env.FILES.delete(ownedKey);
+    return { ok: true, brand, already: true };
+  }
+
+  const current = await currentLogo(env.DB, tenantId);
+  const wasCurrent = current?.id === row.id;
+  if (wasCurrent) {
+    await env.DB.prepare(
+      `UPDATE tenant_brands SET logo_id = NULL, updated_by = ?, updated_at = datetime('now') WHERE tenant_id = ?`,
+    )
+      .bind(actor.userId, tenantId)
+      .run();
+    await dropRowIfEmpty(env.DB, tenantId);
+  }
+  await env.DB.prepare(
+    `UPDATE tenant_brand_logos
+        SET withdrawn_at = datetime('now'), withdrawn_by = ?, withdrawn_reason = ?
+      WHERE id = ? AND tenant_id = ? AND withdrawn_at IS NULL`,
+  )
+    .bind(actor.userId, reason.value, row.id, tenantId)
+    .run();
+  if (ownedKey) await env.FILES.delete(ownedKey);
+
+  await logAudit(
+    env.DB,
+    actor.userId,
+    tenantId,
+    'tenant.brand_logo_withdrawn',
+    'tenant',
+    tenantId,
+    JSON.stringify({
+      logo_id: row.id,
+      logo: logoAudit(row),
+      reason: reason.value,
+      was_current: wasCurrent,
+      object_deleted: ownedKey !== null,
+      via: actor.via ?? 'jwt',
+    }),
+    actor.ip,
+  );
+  const next = await readBrand(env.DB, tenantId);
+  return { ok: true, brand: next ?? brand, already: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -594,7 +890,8 @@ export interface BrandLogoObject {
  * is read is REBUILT here from that row's tenant, hash and type, and must equal
  * the key the row stores. So this can only ever read an object that
  * `storeBrandLogo` wrote under `brand/<tenant>/logo-<hash>.<ext>` -- never a
- * document, whatever is in the URL or in the row.
+ * document, whatever is in the URL or in the row. A WITHDRAWN logo is not
+ * served: its row says so before the bucket is asked.
  */
 export async function readBrandLogo(
   env: { DB: D1Database; FILES: R2Bucket },
@@ -603,6 +900,8 @@ export async function readBrandLogo(
   if (typeof token !== 'string' || !LOGO_TOKEN.test(token)) return null;
   const row = await env.DB.prepare('SELECT * FROM tenant_brand_logos WHERE url_token = ?').bind(token).first<LogoRow>();
   if (!row) return null;
+  // Withdrawn: the URL is dead, whether or not the object is gone yet.
+  if (row.withdrawn_at) return null;
   if (!(LOGO_CONTENT_TYPES as readonly string[]).includes(row.content_type)) return null;
   if (!SHA256.test(row.sha256)) return null;
   const contentType = row.content_type as LogoContentType;

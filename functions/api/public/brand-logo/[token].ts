@@ -15,14 +15,17 @@
  * says. Registered as `not_exit` in tests/unit/exitRegister.allow.ts.
  *
  * ANYTHING ELSE IS ONE 404: a malformed token, an unknown one, a missing
- * object. A replaced or removed logo still answers at its old URL -- mail that
- * was already sent points at it.
+ * object, a WITHDRAWN logo. A replaced or removed logo still answers at its old
+ * URL -- mail that was already sent points at it -- until an admin withdraws it.
  *
- * CACHED FOR A YEAR, IMMUTABLE: the token is a hash of the image, so a new
- * logo is a new URL and an old URL never changes what it returns.
+ * CACHED FOR A DAY, NOT FOREVER. The token is a hash of the image, so a URL
+ * never changes what it returns; but a logo can be withdrawn, and a year's
+ * `immutable` cache would keep serving it from every browser and mail proxy
+ * that had seen it. One day bounds how long a withdrawal takes to land.
  */
 
 import { readBrandLogo } from '../../../lib/tenant-brand';
+import { BRAND_LOGO_CACHE_SECONDS } from '../../../../shared/tenantBrand';
 import type { Env } from '../../../lib/types';
 
 function notFound(): Response {
@@ -51,7 +54,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         // From the validated type stored with the row, never from the upload.
         'Content-Type': logo.contentType,
         'Content-Length': String(logo.size),
-        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Cache-Control': `public, max-age=${BRAND_LOGO_CACHE_SECONDS}`,
         ETag: `"${logo.etag}"`,
         'X-Content-Type-Options': 'nosniff',
         'Content-Disposition': 'inline',

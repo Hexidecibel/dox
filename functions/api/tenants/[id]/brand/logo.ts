@@ -11,8 +11,15 @@
  * the mail clients of people outside the organisation. A key may set the text
  * and colour fields (./index.ts); publishing an image is a signed-in admin.
  *
+ * THROTTLED AND CAPPED. Every upload attempt by an admin counts against one
+ * hourly budget PER TENANT (BRAND_LOGO_UPLOADS_PER_HOUR, 429 beyond it) -- a
+ * refused file counts too, or the budget would not bound the work. And a
+ * tenant keeps a fixed number of published logos (409 with the reason at the
+ * cap; an admin withdraws one, nothing is withdrawn for them).
+ *
  * DELETE takes the logo off the brand. The published file stays reachable at
- * its old URL, because mail already sent points at it.
+ * its old URL, because mail already sent points at it. To make it unreachable,
+ * withdraw it (./logos/[logoId]/withdraw.ts).
  */
 
 import { getClientIp } from '../../../../lib/db';
@@ -22,9 +29,11 @@ import {
   removeBrandLogo,
   requireBrandAdmin,
   storeBrandLogo,
-  toBrandResponse,
+  brandResponse,
+  BrandConflictError,
 } from '../../../../lib/tenant-brand';
-import { BRAND_LOGO_MAX_BYTES } from '../../../../../shared/tenantBrand';
+import { BRAND_LOGO_MAX_BYTES, BRAND_LOGO_UPLOADS_PER_HOUR } from '../../../../../shared/tenantBrand';
+import { checkRateLimit, recordAttempt } from '../../../../lib/ratelimit';
 import type { Env, User } from '../../../../lib/types';
 
 const json = (body: unknown, status = 200) =>
@@ -48,6 +57,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tenantId = context.params.id as string;
     requireBrandAdmin(user, tenantId);
     requirePerson(context.data);
+
+    // One budget per tenant, counted before anything is read or judged.
+    const rlKey = `brand_logo_upload:${tenantId}`;
+    const rl = await checkRateLimit(context.env.DB, rlKey, BRAND_LOGO_UPLOADS_PER_HOUR, 60 * 60);
+    if (!rl.allowed) {
+      return json(
+        {
+          error: `Too many logo uploads for this organization in the last hour (${BRAND_LOGO_UPLOADS_PER_HOUR} at most). Try again later.`,
+        },
+        429,
+      );
+    }
+    await recordAttempt(context.env.DB, rlKey, 60 * 60);
 
     // Refuse an obviously oversize body before reading any of it. The slack
     // is the multipart envelope; the exact cap is applied to the file below.
@@ -75,9 +97,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       ip: getClientIp(context.request),
     });
     if (!brand) return json({ error: 'Tenant not found' }, 404);
-    return json(toBrandResponse(brand));
+    return json(await brandResponse(context.env.DB, brand));
   } catch (err) {
     if (err instanceof BrandValidationError) return json({ error: err.message }, 400);
+    if (err instanceof BrandConflictError) return json({ error: err.message, code: 'logo_limit' }, 409);
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
     console.error('Tenant brand logo upload error:', err);
@@ -96,7 +119,7 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
       ip: getClientIp(context.request),
     });
     if (!brand) return json({ error: 'Tenant not found' }, 404);
-    return json(toBrandResponse(brand));
+    return json(await brandResponse(context.env.DB, brand));
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
