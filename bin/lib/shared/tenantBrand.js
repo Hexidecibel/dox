@@ -222,26 +222,63 @@ var hex = (n) => n.toString(16);
 var INVISIBLE_CLASS = INVISIBLE_RANGES.map(
   ([from, to]) => from === to ? `\\u{${hex(from)}}` : `\\u{${hex(from)}}-\\u{${hex(to)}}`
 ).join("");
-var INVISIBLE = new RegExp(`[${INVISIBLE_CLASS}\\p{Cf}]`, "u");
-var INVISIBLE_ALL = new RegExp(`[${INVISIBLE_CLASS}\\p{Cf}]`, "gu");
+var ZWNJ = 8204;
+var ZWJ = 8205;
+var isJoiner = (code) => code === ZWNJ || code === ZWJ;
+var JOINABLE = /^[\p{L}\p{M}\p{N}\p{Extended_Pictographic}\p{Emoji_Modifier}]$/u;
+var INVISIBLE_OTHER_SOURCE = `(?![\\u{200c}\\u{200d}])[${INVISIBLE_CLASS}\\p{Cf}]`;
+var INVISIBLE_OTHER = new RegExp(INVISIBLE_OTHER_SOURCE, "u");
+var INVISIBLE_OTHER_ALL = new RegExp(INVISIBLE_OTHER_SOURCE, "gu");
+var BIDI = /[\u{061c}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u;
 var VISIBLE = /[\p{L}\p{N}]/u;
+function joinerFits(before, after) {
+  return before !== void 0 && after !== void 0 && JOINABLE.test(before) && JOINABLE.test(after) && !INVISIBLE_OTHER.test(before) && !INVISIBLE_OTHER.test(after);
+}
+function firstRefused(text) {
+  const chars = Array.from(text);
+  for (let i = 0; i < chars.length; i += 1) {
+    const code = chars[i].codePointAt(0);
+    if (isJoiner(code)) {
+      if (!joinerFits(chars[i - 1], chars[i + 1])) {
+        return { code, kind: "a zero-width joiner that is not between two letters" };
+      }
+      continue;
+    }
+    if (INVISIBLE_OTHER.test(chars[i])) {
+      return { code, kind: BIDI.test(chars[i]) ? "a text-direction control character" : "an invisible character" };
+    }
+  }
+  return null;
+}
 function hasInvisibleCharacters(text) {
-  return INVISIBLE.test(text);
+  return firstRefused(text) !== null;
 }
 function stripInvisibleCharacters(text) {
-  return text.replace(INVISIBLE_ALL, "");
+  const chars = Array.from(text.replace(INVISIBLE_OTHER_ALL, ""));
+  const out = [];
+  for (let i = 0; i < chars.length; i += 1) {
+    const code = chars[i].codePointAt(0);
+    if (isJoiner(code) && !joinerFits(out[out.length - 1], chars[i + 1])) continue;
+    out.push(chars[i]);
+  }
+  return out.join("");
 }
 function hasVisibleCharacter(text) {
   return VISIBLE.test(stripInvisibleCharacters(text));
 }
+var codePointLabel = (code) => `U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
 function cleanBrandText(raw, label, max, opts = {}) {
   if (raw === null || raw === void 0) return { ok: true, value: null };
   if (typeof raw !== "string") return { ok: false, error: `${label} must be text` };
   const value = raw.trim();
   if (value === "") return { ok: true, value: null };
   if (CONTROL_CHARS.test(value)) return { ok: false, error: `${label} must be a single line of plain text` };
-  if (hasInvisibleCharacters(value)) {
-    return { ok: false, error: `${label} contains an invisible or text-direction character; type it again as plain text` };
+  const refused = firstRefused(value);
+  if (refused) {
+    return {
+      ok: false,
+      error: `${label} contains ${refused.kind} (${codePointLabel(refused.code)}), which is not allowed here`
+    };
   }
   if (value.length > max) return { ok: false, error: `${label} is too long (${max} characters at most)` };
   if (opts.requireVisible && !VISIBLE.test(value)) {

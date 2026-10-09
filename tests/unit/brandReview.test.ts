@@ -30,7 +30,7 @@ describe('viaSenderName: the From name is cleaned where it is built', () => {
     expect(name).not.toContain(cp(0x202e));
   });
 
-  it.each([0x200b, 0x200d, 0x200e, 0x200f, 0x202a, 0x202d, 0x202e, 0x2060, 0x2066, 0x2069, 0xfeff, 0x00ad, 0x061c])(
+  it.each([0x200b, 0x200e, 0x200f, 0x202a, 0x202d, 0x202e, 0x2060, 0x2066, 0x2069, 0xfeff, 0x00ad, 0x061c])(
     'U+%s is taken out of the middle of a name',
     (code) => {
       expect(viaSenderName(`North${cp(code)}field`)).toBe('Northfield via SupDox');
@@ -45,6 +45,22 @@ describe('viaSenderName: the From name is cleaned where it is built', () => {
     expect(viaSenderName('---')).toBe('SupDox');
     expect(viaSenderName('"<>"')).toBe('SupDox');
     expect(viaSenderName(null)).toBe('SupDox');
+  });
+
+  it('a Persian, an Indic and an emoji-sequence name survive the From name unchanged (C-117)', () => {
+    const persian = `شرکت نمونه${cp(0x200c)}ها`;
+    const indic = `श${cp(0x094d)}${cp(0x200d)}री डेयरी`;
+    const emoji = `Field ${cp(0x1f469)}${cp(0x200d)}${cp(0x1f33e)} Dairy`;
+    for (const name of [persian, indic, emoji]) {
+      expect(viaSenderName(name)).toBe(`${name} via SupDox`);
+    }
+  });
+
+  it('a joiner that is leading, trailing or alone is stripped; U+202E always is', () => {
+    expect(viaSenderName(`${cp(0x200d)}Northfield`)).toBe('Northfield via SupDox');
+    expect(viaSenderName(`Northfield${cp(0x200c)}`)).toBe('Northfield via SupDox');
+    expect(viaSenderName(cp(0x200d))).toBe('SupDox');
+    expect(viaSenderName(`${cp(0x202e)}نمونه${cp(0x200c)}ها`)).toBe(`نمونه${cp(0x200c)}ها via SupDox`);
   });
 
   it('still strips what could break the header', () => {

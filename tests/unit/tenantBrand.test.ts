@@ -347,8 +347,6 @@ describe('invisible and direction-changing characters are refused in every brand
   // Written as code points so no editor or tool can lose them.
   const HOSTILE: Array<[string, number]> = [
     ['zero width space', 0x200b],
-    ['zero width non-joiner', 0x200c],
-    ['zero width joiner', 0x200d],
     ['left-to-right mark', 0x200e],
     ['right-to-left mark', 0x200f],
     ['left-to-right embedding', 0x202a],
@@ -378,7 +376,8 @@ describe('invisible and direction-changing characters are refused in every brand
     expect(hasInvisibleCharacters(text)).toBe(true);
     for (const result of [cleanDisplayName(text), cleanBrandText(text, 'Support line text', 200)]) {
       expect(result.ok).toBe(false);
-      expect(!result.ok && result.error).toContain('invisible or text-direction character');
+      // The message names the KIND of character and its code point.
+      expect(!result.ok && result.error).toMatch(/contains (an invisible character|a text-direction control character) \(U\+[0-9A-F]{4,6}\), which is not allowed here/);
     }
     // At the very front it is refused too -- or, for the one of these that
     // JavaScript counts as white space (U+FEFF), trimmed away. Either way it
@@ -476,5 +475,72 @@ describe("a form's own accent colour", () => {
   it('a value that is not a string is refused', () => {
     expect(normalizeFormAccent(0xabc).ok).toBe(false);
     expect(normalizeFormAccent(['#abc']).ok).toBe(false);
+  });
+});
+
+describe('the two zero-width joiners are allowed where they shape the text, and nowhere else (C-117)', () => {
+  const ZWNJ = cp(0x200c);
+  const ZWJ = cp(0x200d);
+  // Persian: "samples" is written with a ZWNJ inside the word.
+  const PERSIAN = `شرکت نمونه${ZWNJ}ها`;
+  // Devanagari: a ZWJ after the virama shapes the conjunct.
+  const INDIC = `श${cp(0x094d)}${ZWJ}री डेयरी`;
+  // An emoji that is two pictures joined: a farmer.
+  const EMOJI = `Field ${cp(0x1f469)}${ZWJ}${cp(0x1f33e)} Dairy`;
+  // ...and one whose first half carries a variation selector.
+  const EMOJI_VS = `Hot ${cp(0x2764)}${cp(0xfe0f)}${ZWJ}${cp(0x1f525)} Sauce 7`;
+
+  it.each([
+    ['a Persian name with a ZWNJ inside a word', PERSIAN],
+    ['an Indic name with a ZWJ conjunct', INDIC],
+    ['a name with an emoji sequence', EMOJI],
+    ['a name with an emoji sequence after a variation selector', EMOJI_VS],
+  ])('%s is accepted as typed', (_what, name) => {
+    expect(cleanDisplayName(name)).toEqual({ ok: true, value: name });
+    expect(cleanBrandText(name, 'Support line text', 200)).toEqual({ ok: true, value: name });
+    expect(hasInvisibleCharacters(name)).toBe(false);
+    expect(stripInvisibleCharacters(name)).toBe(name);
+    expect(hasVisibleCharacter(name)).toBe(true);
+  });
+
+  it.each([
+    ['leading', `${ZWJ}Northfield`],
+    ['trailing', `Northfield${ZWJ}`],
+    ['alone', ZWJ],
+    ['doubled', `North${ZWJ}${ZWJ}field`],
+    ['after a space', `North ${ZWJ}field`],
+    ['before a space', `North${ZWNJ} field`],
+    ['between punctuation', `North-${ZWNJ}-field`],
+    ['beside a direction override', `North${ZWJ}${cp(0x202e)}field`],
+    ['beside a zero width space', `North${cp(0x200b)}${ZWNJ}field`],
+  ])('a joiner that is %s is refused, and stripped from a From name', (_where, text) => {
+    const r = cleanBrandText(text, 'Display name', 80);
+    // (A lone or edge joiner is not white space to JavaScript, so it is not trimmed away.)
+    expect(r.ok, JSON.stringify(text)).toBe(false);
+    expect(hasInvisibleCharacters(text)).toBe(true);
+    const stripped = stripInvisibleCharacters(text);
+    expect(hasInvisibleCharacters(stripped)).toBe(false);
+  });
+
+  it('says what kind of character it refused, and which', () => {
+    const lone = cleanDisplayName(`Northfield${ZWJ}`);
+    expect(!lone.ok && lone.error).toBe('Display name contains a zero-width joiner that is not between two letters (U+200D), which is not allowed here');
+    const bidi = cleanDisplayName(`${cp(0x202e)}moc.elpmaxe`);
+    expect(!bidi.ok && bidi.error).toBe('Display name contains a text-direction control character (U+202E), which is not allowed here');
+    const zwsp = cleanBrandText(`Call${cp(0x200b)}us`, 'Support line text', 200);
+    expect(!zwsp.ok && zwsp.error).toBe('Support line text contains an invisible character (U+200B), which is not allowed here');
+    const tag = cleanDisplayName(`North${cp(0xe0020)}field`);
+    expect(!tag.ok && tag.error).toContain('(U+E0020)');
+  });
+
+  it('a doubled joiner keeps one; everything else that is invisible still goes', () => {
+    expect(stripInvisibleCharacters(`نمونه${ZWNJ}${ZWNJ}ها`)).toBe(`نمونه${ZWNJ}ها`);
+    expect(stripInvisibleCharacters(`${cp(0x202e)}نمونه${ZWNJ}ها${cp(0x200b)}`)).toBe(`نمونه${ZWNJ}ها`);
+    expect(stripInvisibleCharacters(`${ZWJ}North${ZWJ} field${ZWNJ}`)).toBe('North field');
+  });
+
+  it('a joiner does not make an invisible name visible', () => {
+    expect(cleanDisplayName(`${cp(0x3164)}${ZWJ}${cp(0x3164)}`).ok).toBe(false);
+    expect(hasVisibleCharacter(`${ZWJ}${ZWNJ}`)).toBe(false);
   });
 });

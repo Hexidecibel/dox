@@ -261,8 +261,8 @@ export type FieldResult = { ok: true; value: string | null } | { ok: false; erro
  *
  * WHY THEY ARE REFUSED. A display name becomes the From name and the subject
  * of mail. U+202E in front of a name draws it backwards in an inbox; U+200B or
- * a Hangul filler on its own is a sender with no name at all. None of these
- * has a use in a company name or a support line.
+ * a Hangul filler on its own is a sender with no name at all. The two zero
+ * width JOINERS are in this list and are the exception: see below.
  */
 const INVISIBLE_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x00ad, 0x00ad], // soft hyphen
@@ -287,19 +287,86 @@ const hex = (n: number) => n.toString(16);
 const INVISIBLE_CLASS = INVISIBLE_RANGES.map(([from, to]) =>
   from === to ? `\\u{${hex(from)}}` : `\\u{${hex(from)}}-\\u{${hex(to)}}`,
 ).join('');
-/** Any invisible or direction-changing character, plus the whole Cf category. */
-const INVISIBLE = new RegExp(`[${INVISIBLE_CLASS}\\p{Cf}]`, 'u');
-const INVISIBLE_ALL = new RegExp(`[${INVISIBLE_CLASS}\\p{Cf}]`, 'gu');
+
+/**
+ * THE TWO JOINERS ARE NOT LIKE THE REST. U+200C (zero width non-joiner) and
+ * U+200D (zero width joiner) are part of how real names are written: Persian
+ * puts a ZWNJ inside a word, Indic scripts use a ZWJ to shape a conjunct, and
+ * an emoji such as a farmer is two pictures with a ZWJ between them. Refusing
+ * them refuses those names (decision C-117, correcting C-110).
+ *
+ * So a joiner is allowed in exactly one position: BETWEEN two visible
+ * characters -- a letter, a combining mark, a digit or an emoji on each side.
+ * Never first, never last, never doubled, never beside a space. There it
+ * shapes the text around it; anywhere else it is just an invisible character.
+ */
+const ZWNJ = 0x200c;
+const ZWJ = 0x200d;
+const isJoiner = (code: number) => code === ZWNJ || code === ZWJ;
+const JOINABLE = /^[\p{L}\p{M}\p{N}\p{Extended_Pictographic}\p{Emoji_Modifier}]$/u;
+
+/** Every invisible / direction-changing character EXCEPT the two joiners. */
+const INVISIBLE_OTHER_SOURCE = `(?![\\u{200c}\\u{200d}])[${INVISIBLE_CLASS}\\p{Cf}]`;
+const INVISIBLE_OTHER = new RegExp(INVISIBLE_OTHER_SOURCE, 'u');
+const INVISIBLE_OTHER_ALL = new RegExp(INVISIBLE_OTHER_SOURCE, 'gu');
+const BIDI = /[\u{061c}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u;
 const VISIBLE = /[\p{L}\p{N}]/u;
 
-/** Does this text carry an invisible or direction-changing character? */
-export function hasInvisibleCharacters(text: string): boolean {
-  return INVISIBLE.test(text);
+/** May a joiner sit between these two neighbours? */
+function joinerFits(before: string | undefined, after: string | undefined): boolean {
+  return (
+    before !== undefined &&
+    after !== undefined &&
+    JOINABLE.test(before) &&
+    JOINABLE.test(after) &&
+    !INVISIBLE_OTHER.test(before) &&
+    !INVISIBLE_OTHER.test(after)
+  );
 }
 
-/** The text with every such character taken out. */
+/** The first character this text may not carry, or null. */
+function firstRefused(text: string): { code: number; kind: string } | null {
+  const chars = Array.from(text);
+  for (let i = 0; i < chars.length; i += 1) {
+    const code = chars[i].codePointAt(0)!;
+    if (isJoiner(code)) {
+      if (!joinerFits(chars[i - 1], chars[i + 1])) {
+        return { code, kind: 'a zero-width joiner that is not between two letters' };
+      }
+      continue;
+    }
+    if (INVISIBLE_OTHER.test(chars[i])) {
+      return { code, kind: BIDI.test(chars[i]) ? 'a text-direction control character' : 'an invisible character' };
+    }
+  }
+  return null;
+}
+
+/**
+ * Does this text carry a character it may not: an invisible or
+ * direction-changing one, or a joiner anywhere but between two visible
+ * characters?
+ */
+export function hasInvisibleCharacters(text: string): boolean {
+  return firstRefused(text) !== null;
+}
+
+/**
+ * The text with every such character taken out. A joiner that sits between
+ * two visible characters stays, so a Persian, Indic or emoji name comes out
+ * exactly as it went in.
+ */
 export function stripInvisibleCharacters(text: string): string {
-  return text.replace(INVISIBLE_ALL, '');
+  const chars = Array.from(text.replace(INVISIBLE_OTHER_ALL, ''));
+  const out: string[] = [];
+  for (let i = 0; i < chars.length; i += 1) {
+    const code = chars[i].codePointAt(0)!;
+    // Judged against what has been KEPT so far and what comes next, so a
+    // doubled joiner keeps at most one and a leading or trailing one goes.
+    if (isJoiner(code) && !joinerFits(out[out.length - 1], chars[i + 1])) continue;
+    out.push(chars[i]);
+  }
+  return out.join('');
 }
 
 /** Does it contain at least one letter or digit a reader can see? */
@@ -307,13 +374,19 @@ export function hasVisibleCharacter(text: string): boolean {
   return VISIBLE.test(stripInvisibleCharacters(text));
 }
 
+const codePointLabel = (code: number) => `U+${code.toString(16).toUpperCase().padStart(4, '0')}`;
+
 /**
  * One line of text a person typed, to be shown to outsiders. Stored AS TYPED
  * (an ampersand or an angle bracket is a legitimate character in a company
  * name) and escaped wherever it is drawn. What is refused:
  *
  *   - anything that is not one line (a control character, a line break);
- *   - an invisible or direction-changing character (see INVISIBLE_RANGES);
+ *   - an invisible or direction-changing character (see INVISIBLE_RANGES),
+ *     or a zero-width joiner anywhere but between two visible characters. The
+ *     error NAMES the kind of character and its code point, because the person
+ *     cannot see it and "type it again" is not always the fix (it may have
+ *     come from a paste, or from a keyboard that inserts it);
  *   - anything too long;
  *   - with `requireVisible` (the display name): text with no letter or digit.
  *
@@ -330,8 +403,12 @@ export function cleanBrandText(
   const value = raw.trim();
   if (value === '') return { ok: true, value: null };
   if (CONTROL_CHARS.test(value)) return { ok: false, error: `${label} must be a single line of plain text` };
-  if (hasInvisibleCharacters(value)) {
-    return { ok: false, error: `${label} contains an invisible or text-direction character; type it again as plain text` };
+  const refused = firstRefused(value);
+  if (refused) {
+    return {
+      ok: false,
+      error: `${label} contains ${refused.kind} (${codePointLabel(refused.code)}), which is not allowed here`,
+    };
   }
   if (value.length > max) return { ok: false, error: `${label} is too long (${max} characters at most)` };
   if (opts.requireVisible && !VISIBLE.test(value)) {
