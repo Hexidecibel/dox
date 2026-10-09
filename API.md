@@ -663,8 +663,12 @@ curl -X PUT http://localhost:8788/api/tenants/TENANT_ID/brand \
 ```
 
 - **A patch.** A field left out is unchanged, `null` or `""` clears it, and `support_overrides`
-  replaces the whole set. The first save creates the record; until then `configured` is `false`
-  and every public page and email looks exactly as it did before.
+  replaces the whole set. `configured` is `true` when at least one field is set or a logo is
+  current; until then every public page and email looks exactly as it did before. A save that
+  changes nothing writes nothing, and clearing the last field returns the organization to
+  unbranded -- an empty brand is no brand.
+- **Plain text only.** Invisible characters and characters that change the direction of text are
+  refused in every field, and a display name needs at least one letter or digit.
 - **A colour is `#RRGGBB` and nothing else** (400 otherwise, never coerced). It paints the header
   band, the buttons and the accent rule; the text on them is black or white, whichever is
   readable, and body text is never coloured. A primary colour too pale to read on white is still
@@ -685,9 +689,32 @@ curl -X POST http://localhost:8788/api/tenants/TENANT_ID/brand/logo \
 
 PNG, JPEG or WebP, decided from the file's bytes (the declared type is ignored); at most 512 KB;
 each side 16-2000 px. **SVG is refused.** A signed-in admin only: an API key gets 403. The logo
-is served from `GET /api/public/brand-logo/<token>` (public, cached for a year; the URL changes
+is served from `GET /api/public/brand-logo/<token>` (public, cached for one day; the URL changes
 when the image does). A replaced or removed logo stays reachable at its old URL so email already
-sent keeps showing it.
+sent keeps showing it -- until it is withdrawn (below). An animated PNG or WebP is refused.
+Uploads are limited to 20 attempts an hour per organization (429), and an organization keeps at
+most 10 published logos: an eleventh new image is a 409 (`code: "logo_limit"`) until one is
+withdrawn. Two uploads of the same image are one logo, even at the same moment.
+
+#### POST /api/tenants/:id/brand/logos/:logoId/withdraw
+
+```bash
+curl -X POST http://localhost:8788/api/tenants/TENANT_ID/brand/logos/LOGO_ID/withdraw \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"reason":"Old artwork, should not be seen"}'
+```
+
+Deletes the image and makes its URL answer 404 from then on. The record is kept with who
+withdrew it and why (audited `tenant.brand_logo_withdrawn`). **Email already sent that shows this
+logo will show a broken image.** A signed-in admin only (an API key gets 403); `reason` is
+required, one line, 300 characters at most. The logo ids are in `logos` on the brand record.
+Withdrawing the current logo also takes it off the brand. Uploading the same image again
+publishes it again at the same URL.
+
+#### DELETE /api/tenants/:id/brand
+
+"Remove brand": clears every field and takes the logo off, returning the organization to
+unbranded. A signed-in admin only. Published logos are not withdrawn by this.
 
 **How outsiders receive the brand.** There is no endpoint that returns a brand to somebody who
 is not the tenant's admin. Each token-gated public payload (`/api/document-exports/public/:token`,

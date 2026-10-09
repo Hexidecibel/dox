@@ -61,6 +61,7 @@ Record (migration 0140)".
 - `GET` / `PUT /api/tenants/:id/brand`, `POST` / `DELETE /api/tenants/:id/brand/logo`, `GET /api/public/brand-logo/:token`.
 - Seven public payloads carry `brand` when the organisation has one; seven pages draw it (`src/components/brand/BrandHeader.tsx`). Five outside mails carry it. Insider mail and the signed-in portal do not.
 - Settings > Brand (`src/pages/admin/BrandSettings.tsx`) with a live preview of the page header and the mail header.
+- After an independent review (C-109..C-116): an empty brand is no brand and the screen has Remove brand; brand text refuses invisible / bidi characters and every From name is cleaned; a published logo can be withdrawn (one-day cache, 20 uploads an hour, 10 kept); concurrent uploads of one image both succeed; an animated PNG is refused; a form's accent is a validated colour and `bin/report-form-accents` lists the forms that will fall back.
 - Not done: no brand step in the setup wizard (C-108); nothing seeded for any tenant (the client's colours are still owed); nobody has clicked through the screen in a browser.
 
 ### Holds (C-005, finish-line item 2)

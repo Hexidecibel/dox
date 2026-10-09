@@ -132,7 +132,7 @@ components:
       properties:
         tenant_id: { type: string }
         tenant_name: { type: string, description: "What display_name falls back to" }
-        configured: { type: boolean, description: "False until a brand is saved or a logo uploaded" }
+        configured: { type: boolean, description: "True when at least one field is set or a logo is current. An empty brand is no brand." }
         display_name: { type: string, nullable: true }
         primary_color: { type: string, nullable: true }
         accent_color: { type: string, nullable: true }
@@ -150,6 +150,24 @@ components:
             width: { type: integer }
             height: { type: integer }
             uploaded_at: { type: string }
+        logos:
+          type: array
+          description: "Every logo the organisation has published, newest first, withdrawn ones included"
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              url: { type: string }
+              content_type: { type: string }
+              size_bytes: { type: integer }
+              width: { type: integer }
+              height: { type: integer }
+              uploaded_at: { type: string }
+              current: { type: boolean }
+              withdrawn_at: { type: string, nullable: true }
+              withdrawn_reason: { type: string, nullable: true }
+              withdrawn_by_name: { type: string, nullable: true }
+        logo_limit: { type: integer, description: "Published logos an organisation may keep at once (10)" }
         updated_at: { type: string, nullable: true }
         updated_by_name: { type: string, nullable: true }
     HoldFailure:
@@ -2384,15 +2402,18 @@ paths:
       summary: Save the brand's name, colours and support line
       description: |
         A patch: a field left out is unchanged; `null` or `""` clears it;
-        `support_overrides`, when present, replaces the whole set. The first
-        save creates the record. Every change writes one `tenant.brand_updated`
+        `support_overrides`, when present, replaces the whole set. A save that
+        changes nothing writes nothing; clearing the last field returns the
+        organisation to unbranded (an empty brand is no brand). Every change writes one `tenant.brand_updated`
         audit row with the old and new value of each field that moved.
 
         - A colour is exactly `#RRGGBB`. Anything else is a 400; nothing is
           coerced. No colour is refused for contrast: the text drawn on it is
           black or white, whichever is readable.
         - Text is one line, stored as typed and escaped wherever it is drawn:
-          display name 80 characters, support text 200, phone 40.
+          display name 80 characters, support text 200, phone 40. Invisible
+          characters and characters that change the direction of text are
+          refused; a display name needs at least one letter or digit.
         - `support_overrides` is keyed by surface: `supplier_request`,
           `document_export`, `order_send`, `alert`, `records_form`,
           `records_update_request`, `records_approval`, `file_drop`. An unknown
@@ -2428,6 +2449,27 @@ paths:
         '403': { description: Not an administrator of this tenant }
         '404': { description: Tenant not found (super_admin only) }
 
+    delete:
+      tags: [Tenants]
+      summary: Remove the brand
+      description: |
+        Clears every field and takes the logo off in one act, returning the
+        organisation to unbranded: its pages and mail are again exactly what
+        they were before it had a brand. Audited (`tenant.brand_updated`,
+        `removed: true`). Published logos are NOT withdrawn by this.
+        **Requires a signed-in org_admin of this tenant, or super_admin; an API
+        key is refused.**
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The brand record, now unconfigured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantBrand' }
+        '403': { description: Not an administrator of this tenant, or an API key }
+        '404': { description: Tenant not found (super_admin only) }
+
   /api/tenants/{id}/brand/logo:
     post:
       tags: [Tenants]
@@ -2437,13 +2479,15 @@ paths:
         bytes: PNG, JPEG or WebP by magic number, at most 512 KB, each side
         16-2000 pixels. The part's own Content-Type and file name are ignored.
         **SVG is refused** (it can carry script, and a logo is drawn on pages
-        outsiders open), as is an animated WebP.
+        outsiders open), as is an animated WebP or an animated PNG.
 
         The image is stored under a key built from the tenant and the content
         hash and served from `GET /api/public/brand-logo/{token}`. Uploading
         the same image again returns the same URL; a different image is a new
-        URL. A replaced logo stays reachable at its old URL, because mail
-        already sent points at it.
+        URL -- including when the two uploads arrive at the same moment. A
+        replaced logo stays reachable at its old URL, because mail already
+        sent points at it, until it is withdrawn. Uploading an image that was
+        withdrawn publishes it again at the same URL.
 
         **Requires a signed-in org_admin of this tenant, or super_admin. An API
         key is refused (403)**: publishing an image is done by a person.
@@ -2466,7 +2510,9 @@ paths:
               schema: { $ref: '#/components/schemas/TenantBrand' }
         '400': { description: Not a PNG, JPEG or WebP, or the pixel size is out of range }
         '403': { description: Not an administrator of this tenant, or an API key }
+        '409': { description: "The organisation already keeps 10 published logos (code: logo_limit); withdraw one first" }
         '413': { description: Larger than 512 KB }
+        '429': { description: More than 20 upload attempts for this organisation in the last hour }
     delete:
       tags: [Tenants]
       summary: Take the logo off the brand
@@ -2485,6 +2531,46 @@ paths:
               schema: { $ref: '#/components/schemas/TenantBrand' }
         '403': { description: Not an administrator of this tenant, or an API key }
 
+  /api/tenants/{id}/brand/logos/{logoId}/withdraw:
+    post:
+      tags: [Tenants]
+      summary: Withdraw a published logo
+      description: |
+        Deletes the image from storage and makes its public URL answer 404
+        from then on. The record is kept, marked with who withdrew it and why,
+        and the act is audited (`tenant.brand_logo_withdrawn`). **Mail already
+        sent that shows this logo will show a broken image**; because the
+        public route is cached for a day, that can take up to a day to reach
+        everyone who had loaded it.
+
+        Any of the tenant's logos may be withdrawn, the current one included
+        (it is taken off the brand in the same act). Withdrawing twice is not
+        an error. A logo id belonging to another tenant is a 404.
+
+        **Requires a signed-in org_admin of this tenant, or super_admin; an API
+        key is refused.**
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: logoId, in: path, required: true, schema: { type: string }, description: "An id from `logos` on the brand record" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, maxLength: 300, description: "One line; required" }
+      responses:
+        '200':
+          description: The brand record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantBrand' }
+        '400': { description: No reason, or not one line of plain text }
+        '403': { description: Not an administrator of this tenant, or an API key }
+        '404': { description: No such logo for this tenant }
+
   /api/public/brand-logo/{token}:
     get:
       tags: [Tenants]
@@ -2495,10 +2581,10 @@ paths:
         from the tenant and the image; the URL carries no tenant id and the
         response carries no name.
 
-        It serves a logo an admin published (current or earlier) and nothing
-        else: the storage key is rebuilt server-side from the logo's own
+        It serves a logo an admin published (current or earlier) and has not
+        WITHDRAWN, and nothing else: the storage key is rebuilt server-side from the logo's own
         record, so no other stored file is reachable. Anything else is 404.
-        `Cache-Control: public, max-age=31536000, immutable`,
+        `Cache-Control: public, max-age=86400` (one day, so a withdrawal lands),
         `X-Content-Type-Options: nosniff`, and a `Content-Type` taken from the
         validated image type.
       security: []
@@ -2511,7 +2597,7 @@ paths:
             image/png: { schema: { type: string, format: binary } }
             image/jpeg: { schema: { type: string, format: binary } }
             image/webp: { schema: { type: string, format: binary } }
-        '404': { description: Not a published logo }
+        '404': { description: Not a published logo, or one that was withdrawn }
 
   /api/users:
     get:
