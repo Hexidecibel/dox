@@ -12,6 +12,9 @@ import {
   type ApprovalNoticeItem,
 } from './renewal-request-email';
 
+import { mailPalette, mailSupportText, renderMailHeaderCell, renderMailSupportLine } from './brand-mail';
+import type { MailBrand } from './brand-mail';
+
 /** The portal's own sending address. The display name may vary; this never does. */
 export const PORTAL_SENDER_ADDRESS = 'noreply@supdox.com';
 const PORTAL_SENDER_NAME = 'SupDox';
@@ -277,7 +280,13 @@ export function buildUpdateRequestEmail(params: {
   dueDate: string | null;
   fieldCount: number;
   publicUrl: string;
+  /**
+   * The organisation's brand for this surface (0140), from `loadPublicBrand`.
+   * Null / absent draws the header and footer exactly as before.
+   */
+  brand?: MailBrand;
 }): { subject: string; html: string } {
+  const palette = mailPalette(params.brand);
   const subject = `${params.senderName} asked you to update ${params.sheetName}`;
   const greeting = params.recipientName ? `Hi ${params.recipientName},` : 'Hi,';
   const rowLine = params.rowTitle ? ` for <strong>${escapeHtml(params.rowTitle)}</strong>` : '';
@@ -298,9 +307,7 @@ export function buildUpdateRequestEmail(params: {
 <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
-      <td style="background:#1A365D;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox</h1>
-      </td>
+      ${renderMailHeaderCell(params.brand, { fallbackTitle: 'SupDox' })}
     </tr>
     <tr>
       <td style="padding:32px;">
@@ -313,12 +320,12 @@ export function buildUpdateRequestEmail(params: {
         </p>
         ${messageBlock}
         ${dueLine}
-        <a href="${params.publicUrl}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:14px;">
+        <a href="${params.publicUrl}" style="display:inline-block;background:${palette.button};color:${palette.onButton};text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:14px;">
           Open the form
         </a>
         <p style="margin:24px 0 0;color:#999;font-size:12px;">
           If the button doesn't work, copy and paste this URL into your browser:<br>
-          <a href="${params.publicUrl}" style="color:#1A365D;">${params.publicUrl}</a>
+          <a href="${params.publicUrl}" style="color:${palette.text};">${params.publicUrl}</a>
         </p>
         <p style="margin:24px 0 0;color:#888;font-size:13px;line-height:1.6;">
           This link is unique to you. You can fill it in later — no account needed.
@@ -327,7 +334,7 @@ export function buildUpdateRequestEmail(params: {
     </tr>
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
-        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+        ${renderMailSupportLine(params.brand)}<p style="margin:0;color:#999;font-size:12px;text-align:center;">
           This is an automated message from SupDox. If you weren't expecting it, you can ignore it.
         </p>
       </td>
@@ -355,7 +362,13 @@ export function buildApprovalRequestEmail(params: {
   sheetName: string;
   rowTitle: string | null;
   publicUrl: string;
+  /**
+   * The organisation's brand for this surface (0140), from `loadPublicBrand`.
+   * Null / absent draws the header and footer exactly as before.
+   */
+  brand?: MailBrand;
 }): { subject: string; html: string } {
+  const palette = mailPalette(params.brand);
   const subject = `${params.senderName} needs your sign-off on ${params.workflowName}`;
   const greeting = params.recipientName ? `Hi ${params.recipientName},` : 'Hi,';
   const rowLine = params.rowTitle ? ` for <strong>${escapeHtml(params.rowTitle)}</strong>` : '';
@@ -372,9 +385,7 @@ export function buildApprovalRequestEmail(params: {
 <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
-      <td style="background:#1A365D;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox</h1>
-      </td>
+      ${renderMailHeaderCell(params.brand, { fallbackTitle: 'SupDox' })}
     </tr>
     <tr>
       <td style="padding:32px;">
@@ -386,12 +397,12 @@ export function buildApprovalRequestEmail(params: {
           <strong>${escapeHtml(params.senderName)}</strong> (${escapeHtml(params.senderEmail)}) needs your approval on the <strong>${escapeHtml(params.stepName)}</strong> step of the <strong>${escapeHtml(params.workflowName)}</strong> workflow${rowLine} on <strong>${escapeHtml(params.sheetName)}</strong>.
         </p>
         ${messageBlock}
-        <a href="${params.publicUrl}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:14px;">
+        <a href="${params.publicUrl}" style="display:inline-block;background:${palette.button};color:${palette.onButton};text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:14px;">
           Review and decide
         </a>
         <p style="margin:24px 0 0;color:#999;font-size:12px;">
           If the button doesn't work, copy and paste this URL into your browser:<br>
-          <a href="${params.publicUrl}" style="color:#1A365D;">${params.publicUrl}</a>
+          <a href="${params.publicUrl}" style="color:${palette.text};">${params.publicUrl}</a>
         </p>
         <p style="margin:24px 0 0;color:#888;font-size:13px;line-height:1.6;">
           This link is unique to you. No account needed -- just click to approve or reject.
@@ -400,7 +411,7 @@ export function buildApprovalRequestEmail(params: {
     </tr>
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
-        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+        ${renderMailSupportLine(params.brand)}<p style="margin:0;color:#999;font-size:12px;text-align:center;">
           This is an automated message from SupDox. If you weren't expecting it, you can ignore it.
         </p>
       </td>
@@ -1019,7 +1030,13 @@ export function buildDocumentExportEmail(params: {
   documents: { title: string; supplier_name: string | null; document_type_name: string | null; lot_label: string | null }[];
   linkUrl: string;
   expiresAt: string;
+  /**
+   * The organisation's brand for this surface (0140), from `loadPublicBrand`.
+   * Null / absent draws the header and footer exactly as before.
+   */
+  brand?: MailBrand;
 }): { subject: string; html: string; text: string } {
+  const palette = mailPalette(params.brand);
   const count = params.documents.length;
   const subject =
     count === 1
@@ -1054,18 +1071,15 @@ export function buildDocumentExportEmail(params: {
 <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
-      <td style="background:#1A365D;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">${escapeHtml(params.tenantName)}</h1>
-        <p style="margin:6px 0 0;color:#cbd5e0;font-size:13px;">${count} document${count === 1 ? '' : 's'}</p>
-      </td>
+      ${renderMailHeaderCell(params.brand, { fallbackTitle: params.tenantName, subtitleHtml: `${count} document${count === 1 ? '' : 's'}` })}
     </tr>
     <tr>
       <td style="padding:32px;">
         <p style="margin:0 0 16px;color:#555;line-height:1.6;">${sentLine}</p>
-        ${params.message ? `<p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid #1A365D;color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.message)}</p>` : ''}
+        ${params.message ? `<p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid ${palette.stripe};color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.message)}</p>` : ''}
         <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">${rows}</table>
         <p style="margin:0 0 24px;text-align:center;">
-          <a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
+          <a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:${palette.button};color:${palette.onButton};text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
         </p>
         <p style="margin:0;color:#666;font-size:13px;line-height:1.6;">
           The link works until ${escapeHtml(formatFriendlyDate(params.expiresAt))} and shows only the documents listed above.
@@ -1075,7 +1089,7 @@ export function buildDocumentExportEmail(params: {
     </tr>
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
-        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+        ${renderMailSupportLine(params.brand)}<p style="margin:0;color:#999;font-size:12px;text-align:center;">
           Sent through SupDox by ${escapeHtml(params.senderEmail)}.
         </p>
       </td>
@@ -1092,7 +1106,8 @@ export function buildDocumentExportEmail(params: {
       .map((d) => `- ${d.title}${d.supplier_name ? ` (${d.supplier_name})` : ''}${d.lot_label ? ` — Lot ${d.lot_label}` : ''}`)
       .join('\n') +
     `\n\nOpen them here: ${params.linkUrl}\nThe link works until ${formatFriendlyDate(params.expiresAt)}.\n` +
-    `Reply to this email to reach ${params.senderName} (${params.senderEmail}).\n`;
+    `Reply to this email to reach ${params.senderName} (${params.senderEmail}).\n` +
+    (params.brand ? `\n${mailSupportText(params.brand)}` : '');
 
   return { subject, html, text };
 }
