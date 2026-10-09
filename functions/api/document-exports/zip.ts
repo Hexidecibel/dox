@@ -47,6 +47,7 @@ import {
 import {
   auditQaRelease,
   exitActorForRequest,
+  outwardRefusalMessage,
   refusedHeaderValue,
   sharingRefusedResponse,
 } from '../../lib/sharing-rule';
@@ -126,7 +127,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       tenant_name: tenant?.name ?? '',
       exported_by: user.name || user.email,
       exported_at: new Date().toISOString(),
-      not_included: refused_rows.map((r) => ({ row: r.row, reason: r.refusal.message })),
+      not_included: refused_rows.map((r) => ({ row: r.row, reason: outwardRefusalMessage(r.refusal) })),
     });
 
     if (built.entries.length === 0) {

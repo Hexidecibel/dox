@@ -80,6 +80,7 @@ import EntityNotes from '../components/EntityNotes';
 import { ReceivedAgainPanel } from '../components/IntakeDuplicateNotes';
 import { DocumentSpecResults } from '../components/DocumentSpecResults';
 import { DocumentSharingRule } from '../components/DocumentSharingRule';
+import { DocumentHolds } from '../components/DocumentHolds';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -755,6 +756,10 @@ export function DocumentDetail() {
         {/* May this document leave the organization (migration 0137). Shown
             to everybody; the Change button only to QA and administrators. */}
         <DocumentSharingRule documentId={doc.id} sharing={doc.sharing} onChanged={loadDocument} />
+
+        {/* Holds (migration 0139): a banner when this certificate is on hold,
+            which lot rows, Place hold, and Release for QA and administrators. */}
+        <DocumentHolds documentId={doc.id} onChanged={loadDocument} />
 
         {/* Supplier — read-only chip for everyone; admins can change it. */}
         {(doc.supplierName || isAdmin) && (

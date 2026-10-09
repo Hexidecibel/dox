@@ -216,9 +216,9 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
   {
     path: 'functions/lib/order-items.ts',
     classification: 'not_exit',
-    signature: { bucket: 1, gets: 8, readers: 0, checks: 0 },
+    signature: { bucket: 1, gets: 9, readers: 0, checks: 0 },
     reason:
-      'Hands the bucket to coa-original.ts so an order line can say whether its whole original is on file. Reads nothing itself.',
+      'Hands the bucket to coa-original.ts so an order line can say whether its whole original is on file. Reads nothing itself. (9th .get( since 0139: a Map lookup of the line\'s active hold, for display.)',
   },
   {
     path: 'functions/lib/connectors/pollR2.ts',

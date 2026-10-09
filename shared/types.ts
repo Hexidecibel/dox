@@ -42,10 +42,124 @@ export interface SharingRefusal {
   document_type_name: string | null;
   /** The document's rule at the moment it was refused. */
   rule: SharingRule;
-  /** `locked` = never leaves; `needs_qa` = the caller may not release it. */
+  /**
+   * `locked` = never leaves; `needs_qa` = the caller may not release it;
+   * `held` = the certificate has an active hold (migration 0139) and nobody
+   * sends it until the hold is released.
+   */
   reason: SharingRefusalReason;
   /** One sentence a screen can print as it stands. */
   message: string;
+  /** The hold behind a `held` refusal. Absent on every other reason. */
+  hold?: DocumentHoldBrief;
+}
+
+// ---------------------------------------------------------------------------
+// Holds (decision C-005, migration 0139). The rule is shared/holds.ts.
+// ---------------------------------------------------------------------------
+
+export type { HoldSource } from './holds';
+import type { HoldSource } from './holds';
+
+/** The least a screen needs to say "on hold, and why". */
+export interface DocumentHoldBrief {
+  id: string;
+  /** The lot row the hold is on, or null for the whole certificate. */
+  lot_id: string | null;
+  /** "1042 / 03", or null for the whole certificate. */
+  lot_label: string | null;
+  reason: string;
+  source: HoldSource;
+  placed_at: string;
+}
+
+/** One hold, active or released, as the API returns it. */
+export interface ApiDocumentHold extends DocumentHoldBrief {
+  document_id: string;
+  document_title: string | null;
+  document_type_name: string | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
+  /** The products linked to the certificate, for the Holds list. */
+  product_names: string[];
+  /** The document version that was current when the hold was placed. */
+  document_version: number | null;
+  /** For an automatic hold: the judged result that placed it, frozen. */
+  detail: {
+    test: string;
+    value: string | null;
+    unit: string | null;
+    limit: string | null;
+    location: string | null;
+    why: string | null;
+  } | null;
+  /** Null for an automatic hold. */
+  placed_by: string | null;
+  placed_by_name: string | null;
+  active: boolean;
+  released_by: string | null;
+  released_by_name: string | null;
+  released_at: string | null;
+  release_reason: string | null;
+}
+
+/** One lot row of a certificate, for choosing what a hold is on. */
+export interface DocumentHoldLot {
+  lot_id: string;
+  lot_number: string;
+  sub_lot_code: string | null;
+  lot_label: string;
+  /** The active hold on this lot row, if any. */
+  hold: DocumentHoldBrief | null;
+}
+
+/** GET /api/documents/:id/holds */
+export interface DocumentHoldsResponse {
+  /** Active holds, oldest first. Any one of them stops the certificate leaving. */
+  active: ApiDocumentHold[];
+  /** Released holds, newest release first. */
+  history: ApiDocumentHold[];
+  /** The certificate's lot rows. Empty when it has none. */
+  lots: DocumentHoldLot[];
+  /** May the caller place a hold (any login but a read-only one; an API key may)? */
+  can_place: boolean;
+  /** May the caller release one (a QA releaser or an administrator, signed in)? */
+  can_release: boolean;
+}
+
+/** POST /api/documents/:id/holds */
+export interface PlaceHoldRequest {
+  /** A lot row of this certificate. Omit or null for the whole certificate. */
+  lot_id?: string | null;
+  reason: string;
+}
+
+/** POST /api/holds/:id/release */
+export interface ReleaseHoldRequest {
+  reason: string;
+}
+
+/** GET /api/holds */
+export interface HoldsListResponse {
+  holds: ApiDocumentHold[];
+  total: number;
+  /** Rows were cut at the page size; narrow the filter to see the rest. */
+  truncated: boolean;
+  can_release: boolean;
+}
+
+/** GET /api/holds?count=1 */
+export interface HoldsCountResponse {
+  /** Active holds in the organization. */
+  count: number;
+}
+
+/** The hold summary `GET /api/documents/:id` carries. */
+export interface DocumentHoldState {
+  /** Active holds, oldest first. Empty = not on hold. */
+  active: DocumentHoldBrief[];
+  can_place: boolean;
+  can_release: boolean;
 }
 
 /** The sharing rule of one document, as `GET /api/documents/:id` reports it. */
@@ -1407,6 +1521,8 @@ export interface ApiDocument {
    * `GET` / `PUT /api/documents/:id`; absent on list rows.
    */
   sharing?: DocumentSharingInfo;
+  /** Active holds on this document (migration 0139). `GET /api/documents/:id` only. */
+  holds?: DocumentHoldState;
 }
 
 export interface ApiDocumentVersion {
@@ -1662,6 +1778,13 @@ export interface Document {
   classificationReviewedBy?: string | null;
   /** The sharing rule in force (migration 0137). On `GET` / `PUT /api/documents/:id` only. */
   sharing?: DocumentSharingInfo;
+  /** Active holds (migration 0139). On `GET /api/documents/:id` only. */
+  holds?: DocumentHoldState;
+  /**
+   * Set on a SEARCH RESULT row whose document has an active hold: the oldest
+   * one. Display only -- search does not filter or judge on it.
+   */
+  active_hold?: DocumentHoldBrief | null;
   // Search-result convenience fields inlined by the search endpoints
   // (GET /api/documents/search, POST /api/documents/search/natural,
   // GET /api/search) so a result renders "Letter of Guarantee, v2, expires
@@ -3358,6 +3481,12 @@ export interface ApiOrderItem extends OrderItemRow {
   /** Size of the document's current file, bytes. */
   coa_file_size?: number | null;
   coa_original?: OrderLineOriginalState | null;
+  /**
+   * The active hold that stops this line's certificate leaving (migration
+   * 0139): one on this line's lot row, on another lot of the same file, or on
+   * the whole certificate. Null when the certificate is not on hold.
+   */
+  coa_hold?: DocumentHoldBrief | null;
   picked_by_name?: string | null;
   /** The linked lot row, as the lot register holds it. */
   lot_row_number?: string | null;
@@ -3525,9 +3654,12 @@ export interface OrderSendPreview {
     reason: string;
     /**
      * Set when the SHARING RULE is why (migration 0137): the document is
-     * locked, or needs a QA approval the sender cannot give.
+     * locked, or needs a QA approval the sender cannot give. `held` when the
+     * certificate has an active hold (migration 0139).
      */
     sharing_refusal?: SharingRefusalReason;
+    /** The hold behind `sharing_refusal: 'held'`. */
+    hold?: DocumentHoldBrief;
     document_id?: string;
     /**
      * Set when this is a DOCUMENT line (0138), not a COA line. `order_item_id`
@@ -3687,6 +3819,8 @@ export type OrderDocumentReason =
   | 'inactive'
   | 'no_file'
   | 'locked'
+  /** The document has an active hold (migration 0139). */
+  | 'held'
   | 'refused'
   | 'already_released'
   | 'stale';
@@ -3720,6 +3854,8 @@ export interface ApiOrderDocument {
   rule_at_resolve: SharingRule | null;
   /** The document's rule NOW. Null when the line has no document. */
   sharing_rule: SharingRule | null;
+  /** The active hold on the document NOW (migration 0139), or null. */
+  hold: DocumentHoldBrief | null;
   release_status: OrderDocumentReleaseStatus;
   /** The send that put the line in front of QA. Fixed while the line waits. */
   pending_send_id: string | null;
@@ -3913,6 +4049,8 @@ export interface PendingOrderDocument {
   stuck: boolean;
   /** The document's rule NOW. */
   sharing_rule: SharingRule | null;
+  /** The document's active hold NOW (0139). A held document is not releasable. */
+  hold: DocumentHoldBrief | null;
   requested_by_name: string | null;
   requested_at: string | null;
   /** Who the release will mail: the recipients of the send that asked. */
@@ -5434,6 +5572,8 @@ export interface UniversalSearchDocument extends SearchResultCoverage {
   snippet?: string;
   snippet_extracted?: string;
   snippet_supplier?: string;
+  /** The oldest active hold on this document (0139). Display only; absent when not held. */
+  active_hold?: DocumentHoldBrief | null;
   // Allow extra fields from `d.*` projection.
   [k: string]: unknown;
 }

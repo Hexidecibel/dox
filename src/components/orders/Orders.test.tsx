@@ -92,6 +92,28 @@ describe('OrderLines', () => {
     expect(within(row).getByText('Dana Reid')).toBeInTheDocument();
   });
 
+  it('a line whose certificate is on hold says it will not be sent, and why (migration 0139)', () => {
+    const first = render(wrap(<OrderLines {...props} items={[line()]} />));
+    expect(screen.queryByTestId('order-line-hold')).toBeNull();
+    first.unmount();
+
+    render(
+      wrap(
+        <OrderLines
+          {...props}
+          items={[
+            line({
+              coa_hold: { id: 'h1', lot_id: 'lot1', lot_label: '10426203 / 03', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' },
+            }),
+          ]}
+        />,
+      ),
+    );
+    const chip = screen.getByTestId('order-line-hold');
+    expect(chip).toHaveTextContent('On hold: will not be sent');
+    expect(chip).toHaveAttribute('title', 'On hold (lot 10426203 / 03): Retest pending. QA or an administrator releases a hold.');
+  });
+
   it('marks a date held with doubt instead of printing it as fact', () => {
     render(
       wrap(

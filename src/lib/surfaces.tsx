@@ -54,6 +54,7 @@ import {
   Timeline as ActivityIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
+  PanTool as HoldsIcon,
   ShoppingCart as OrdersIcon,
   HowToReg as WaitingForQaIcon,
   Inventory2 as LotsIcon,
@@ -108,6 +109,7 @@ import { ProcessingStatus } from '../pages/admin/ProcessingStatus';
 import { Orders } from '../pages/Orders';
 import { OrderDetail } from '../pages/OrderDetail';
 import { OrdersWaitingForQa } from '../pages/OrdersWaitingForQa';
+import { Holds } from '../pages/Holds';
 import { Lots } from '../pages/Lots';
 import { Reports } from '../pages/Reports';
 import { Expirations } from '../pages/Expirations';
@@ -141,6 +143,12 @@ export interface SurfaceNav {
    * rail entry is narrowed, by `Layout`, from GET /api/order-documents/pending.
    */
   requires?: 'qa_release';
+  /**
+   * A number drawn beside the entry. `active_holds` = how many certificates
+   * are on hold (migration 0139), from GET /api/holds?count=1: one cheap count,
+   * asked by `Layout` on mount and on a timer, never on navigation.
+   */
+  badge?: 'active_holds';
 }
 
 export interface Surface {
@@ -252,6 +260,18 @@ export const SURFACES: Surface[] = [
     module: 'library',
     roles: CONTRIBUTOR,
     nav: { label: 'Review Queue', icon: <RateReviewIcon />, order: 30 },
+  },
+  {
+    // Holds (migration 0139): every certificate that is on hold, and the
+    // release. Beside the Review Queue, where QA already works -- NOT under
+    // fulfillment: a hold exists whether or not the organization sends orders.
+    // Open to every role, a read-only account included, because the person
+    // asking "why did this certificate not go" is often not QA; the API says
+    // who may release, and the page offers the button only to them.
+    path: '/holds',
+    element: <Holds />,
+    module: 'library',
+    nav: { label: 'Holds', icon: <HoldsIcon />, order: 35, badge: 'active_holds' },
   },
   {
     path: '/admin/suppliers',

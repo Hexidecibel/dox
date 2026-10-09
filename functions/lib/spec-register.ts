@@ -22,7 +22,13 @@
  * a METHOD mismatch (MPN against CFU) or a smaller presence/absence SAMPLE than
  * the limit requires. Those two are never judged (D1) but must always reach a
  * person, worded as notify-only. Every other could-not-check stays in the
- * review queue and the register, exactly as before. Nothing here holds a lot.
+ * review queue and the register, exactly as before.
+ *
+ * WHAT HOLDS (migration 0139). After the verdicts are written, the approval
+ * path hands them to `placeAutomaticHolds` (functions/lib/holds.ts): a Critical
+ * result out of spec, or a zero-tolerance sample-size mismatch, puts that
+ * lot's certificate on hold. The hold is a consequence of a written verdict and
+ * never an input to one; the bulk recheck never reaches it.
  *
  * NEVER BLOCKS, NEVER THROWS UPWARD. Registering a result and notifying about it
  * are strictly best-effort: an approval that already succeeded must not fail
@@ -50,6 +56,7 @@ import {
 } from '../../shared/specSnapshot';
 import { compareSpecCriticality } from '../../shared/specCriticality';
 import { SPEC_BAND_LABELS, specBandRank } from '../../shared/specBand';
+import { placeAutomaticHolds } from './holds';
 
 export interface RegisterContext {
   tenantId: string;
@@ -595,6 +602,28 @@ export async function registerAndNotifyForApproval(
         },
         docVerdicts,
         limits
+      );
+
+      // HOLDS (rules table B1 / E2, migration 0139). Written AFTER the verdicts,
+      // from the verdicts: a Critical result out of spec, or a zero-tolerance
+      // presence test on too small a sample, puts this document's lot on hold.
+      // Placed before the spec alert goes out so the alert's reader finds the
+      // certificate already held. Never an input to anything above.
+      await placeAutomaticHolds(
+        db,
+        apiKey,
+        {
+          tenantId: base.tenantId,
+          documentId: doc.documentId,
+          documentTitle: doc.title,
+          versionNumber: doc.versionNumber ?? 1,
+          supplierId: base.supplierId,
+          documentTypeId: base.documentTypeId,
+          queueItemId: base.queueItemId,
+          approvedBy: base.approvedBy,
+          appUrl: base.appUrl,
+        },
+        docVerdicts
       );
 
       await notifySpecFailures(db, apiKey, {

@@ -43,6 +43,7 @@ import { SetupBanner } from './SetupPrompt';
 import { navGroupsForRole, pinnedNavSurfaces } from '../lib/surfaces';
 import { api } from '../lib/api';
 import { QA_WAITING_CHANGED, QA_WAITING_POLL_MS } from '../lib/qaWaiting';
+import { HOLDS_CHANGED, HOLDS_POLL_MS } from '../lib/holds';
 import type { Surface } from '../lib/surfaces';
 
 const DRAWER_WIDTH = 260;
@@ -170,6 +171,41 @@ export function Layout() {
     };
   }, [wantsQaWaiting, selectedTenantId]);
 
+  // "Holds" (migration 0139) carries the number of certificates on hold. The
+  // same discipline as the count above: ONE cheap COUNT, on mount and on a
+  // timer, and again at once when a screen places or releases a hold
+  // (`HOLDS_CHANGED`) -- never on navigation. A failure shows no number.
+  const wantsHolds = useMemo(
+    () => roleGroups.some((g) => g.items.some((s) => s.nav?.badge === 'active_holds')),
+    [roleGroups]
+  );
+  const [activeHolds, setActiveHolds] = useState(0);
+  useEffect(() => {
+    if (!wantsHolds) {
+      setActiveHolds(0);
+      return;
+    }
+    let cancelled = false;
+    const ask = () => {
+      api.holds
+        .count({ tenant_id: selectedTenantId || undefined })
+        .then((r) => {
+          if (!cancelled) setActiveHolds(r.count);
+        })
+        .catch(() => {
+          if (!cancelled) setActiveHolds(0);
+        });
+    };
+    ask();
+    const timer = window.setInterval(ask, HOLDS_POLL_MS);
+    window.addEventListener(HOLDS_CHANGED, ask);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener(HOLDS_CHANGED, ask);
+    };
+  }, [wantsHolds, selectedTenantId]);
+
   const navGroups = useMemo(
     () =>
       roleGroups
@@ -202,6 +238,9 @@ export function Layout() {
           />
           {surface.nav!.requires === 'qa_release' && qaWaiting.count > 0 && (
             <Chip size="small" color="warning" label={qaWaiting.count} data-testid="nav-waiting-for-qa-count" />
+          )}
+          {surface.nav!.badge === 'active_holds' && activeHolds > 0 && (
+            <Chip size="small" color="error" label={activeHolds} data-testid="nav-holds-count" />
           )}
         </ListItemButton>
       </ListItem>

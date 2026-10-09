@@ -235,7 +235,12 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
   const documents = plan?.documents ?? null;
   // A document line that will not go is in `documents.will_not_go`; the plain
   // "Not sent" list keeps the COA lines only, so nothing is printed twice.
-  const coaLinesNotSent = (plan?.lines_not_sent ?? []).filter((l) => !l.order_document_id);
+  // ON HOLD (migration 0139) is its own group, COA lines and document lines
+  // together: a hold is the one reason a person can act on from here (QA
+  // releases it), so it is not buried among "no document on this line".
+  const linesOnHold = (plan?.lines_not_sent ?? []).filter((l) => l.sharing_refusal === 'held');
+  const heldDocumentLineIds = new Set(linesOnHold.map((l) => l.order_document_id).filter(Boolean));
+  const coaLinesNotSent = (plan?.lines_not_sent ?? []).filter((l) => !l.order_document_id && l.sharing_refusal !== 'held');
   const onlyAsksQa = documents?.only_asks_qa === true;
   const canSend = !!plan && !blocked && plan.email_configured && recipients.trim() !== '' && !busy && !loading;
 
@@ -307,7 +312,12 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
                     )}
                     <DocumentGroup title="Goes now" testId="send-documents-goes-now" lines={documents.goes_now} tone="success.dark" />
                     <DocumentGroup title="Waits for QA" testId="send-documents-waits" lines={documents.waits_for_qa} tone="warning.dark" />
-                    <DocumentGroup title="Will not go" testId="send-documents-will-not-go" lines={documents.will_not_go} tone="text.secondary" />
+                    <DocumentGroup
+                      title="Will not go"
+                      testId="send-documents-will-not-go"
+                      lines={documents.will_not_go.filter((l) => !heldDocumentLineIds.has(l.order_document_id))}
+                      tone="text.secondary"
+                    />
                     {documents.goes_now.some((l) => l.delivery === 'link') && (
                       <Typography variant="caption" color="text.secondary">
                         Documents go on one link that works for {documents.link_days} days. Certificates of analysis are attached.
@@ -350,6 +360,36 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
                         {[r.product_name ?? 'No product named', r.lot_label ? `Lot ${r.lot_label}` : null].filter(Boolean).join(' · ')} — {r.summary}
                         {r.delivery_contact ? ` · to ${r.delivery_contact.name || r.delivery_contact.email}` : ''}
                         {r.missing ? ' · no certificate on this line' : ''}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
+
+                {linesOnHold.length > 0 && (
+                  <Box data-testid="send-lines-on-hold">
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700, color: 'error.main' }}>
+                      On hold ({linesOnHold.length})
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                      These will not be sent. QA or an administrator releases a hold, on the certificate or on the Holds page.
+                    </Typography>
+                    {linesOnHold.map((l) => (
+                      <Typography
+                        key={l.order_document_id || l.order_item_id}
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: 'block' }}
+                        data-testid="send-line-on-hold"
+                      >
+                        {[
+                          l.product_name ?? 'No product named',
+                          l.order_document_id ? l.document_type_name : null,
+                          !l.order_document_id && l.lot_number ? `Lot ${l.lot_number}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                        {': '}
+                        {l.reason}
                       </Typography>
                     ))}
                   </Box>

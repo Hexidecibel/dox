@@ -21,6 +21,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var specCriticality_exports = {};
 __export(specCriticality_exports, {
   DEFAULT_SPEC_CRITICALITY: () => DEFAULT_SPEC_CRITICALITY,
+  HOLDING_SPEC_CRITICALITY: () => HOLDING_SPEC_CRITICALITY,
   SPEC_CRITICALITY_COLOR: () => SPEC_CRITICALITY_COLOR,
   SPEC_CRITICALITY_FORMER_LABELS: () => SPEC_CRITICALITY_FORMER_LABELS,
   SPEC_CRITICALITY_HELP: () => SPEC_CRITICALITY_HELP,
@@ -34,6 +35,7 @@ __export(specCriticality_exports, {
 module.exports = __toCommonJS(specCriticality_exports);
 var SPEC_CRITICALITY_VALUES = ["high", "medium", "low"];
 var DEFAULT_SPEC_CRITICALITY = "medium";
+var HOLDING_SPEC_CRITICALITY = SPEC_CRITICALITY_VALUES[0];
 function isSpecCriticality(value) {
   return typeof value === "string" && SPEC_CRITICALITY_VALUES.includes(value);
 }
@@ -57,7 +59,7 @@ var SPEC_CRITICALITY_FORMER_LABELS = {
   low: ["Informational"]
 };
 var SPEC_CRITICALITY_HELP = {
-  high: "This result stops the shipment. It can't ship until QA resolves it. (Holds are not enforced yet \u2014 today this flags and alerts.)",
+  high: "This result stops the shipment. It can't ship until QA resolves it. An out-of-spec result puts the lot's certificate on hold: it cannot be sent until QA releases the hold.",
   medium: "This result missed target and is being tracked. On its own it doesn't stop anything, but repeated misses can move the supplier onto watch.",
   low: "This result is recorded for the file. It doesn't affect whether the shipment ships."
 };
@@ -69,6 +71,7 @@ var SPEC_CRITICALITY_COLOR = {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   DEFAULT_SPEC_CRITICALITY,
+  HOLDING_SPEC_CRITICALITY,
   SPEC_CRITICALITY_COLOR,
   SPEC_CRITICALITY_FORMER_LABELS,
   SPEC_CRITICALITY_HELP,

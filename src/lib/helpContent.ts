@@ -413,7 +413,7 @@ const orders: ModuleHelpExpanded = {
           "The customer receives an exact copy of each certificate attached to the email, from your organization's name with replies coming to you. " +
           "A certificate that covers several lots is sent whole, once, even when several lines came from it. If the whole certificate is not on file the screen says so and the page for that lot is sent instead. " +
           "When the files do not fit in one email they go as numbered emails, 1 of 3 and so on, and the screen shows the split before you send. A single file too large to attach goes as a link in the first email; that link does not expire and can be revoked from Sent documents. An order that would need more than ten emails is refused with the number, so send it in two goes. " +
-          "Lines with no certificate, or whose certificate has since been archived, are listed as not sent. " +
+          "Lines with no certificate, or whose certificate has since been archived, are listed as not sent. A line whose certificate is on hold is listed under On hold with the reason, and goes once QA or an administrator releases the hold. " +
           "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot pick certificates or send an order.",
       },
       {
@@ -442,7 +442,7 @@ const orders: ModuleHelpExpanded = {
           "Review and send sorts every document into one of three groups, and the send does exactly what the screen shows. " +
           "Goes now: send freely documents, on one link that works for 30 days, and certificates of analysis, attached. If you can release QA documents, the ones that need approval go now too, and sending is your approval. " +
           "Waits for QA: a document that needs approval you cannot give. It is in no email and on no link. QA is told once. A line already waiting says since when and for which addresses; sending the order again does not ask again and does not change who it goes to. " +
-          "Will not go: locked, missing, expired, archived, or refused by QA, each with the reason. " +
+          "Will not go: locked, missing, expired, archived, or refused by QA, each with the reason. A document on hold is listed under On hold and is not queued for QA; it goes once the hold is released. " +
           "If nothing can go yet but QA has something new to hear, the button reads Ask QA and no email reaches the customer. If there is nothing to send and nothing new to ask, there is nothing to send. " +
           "When QA releases or refuses what you asked for, you get an email saying which documents, who they went to, or QA's note.",
       },
@@ -1064,6 +1064,53 @@ const namingTemplates: ModuleHelpExpanded = {
   },
 };
 
+const holds: ModuleHelpExpanded = {
+  headline: 'Holds',
+  well:
+    "A hold stops one certificate being sent until QA or an administrator releases it. Place one from the certificate's own page with a reason. A certificate approved with a Critical result out of spec is put on hold automatically.",
+  list: {
+    headline: 'Holds',
+    well:
+      "Every certificate on hold, why, and since when. Open the certificate to see the result behind an automatic hold. Release needs a written reason and is for QA and administrators.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a hold does',
+        body:
+          "A hold is a status in the portal on one certificate. While it is active the certificate cannot be sent on an order, put in a ZIP, mailed as a link, downloaded in a bundle or read with an API key. A link sent before the hold stops serving it too, and serves it again once the hold is released. " +
+          "A signed-in person can still open and download the file in the portal: that is not leaving. Nothing is sent to a warehouse system. " +
+          "Nobody sends a held certificate, QA and administrators included. The hold is released first.",
+      },
+      {
+        heading: 'What a hold is on',
+        body:
+          "A hold is on one lot row of a certificate, or on the whole certificate. Choose when you place it. " +
+          "A file is what leaves, so a hold on one lot stops the file that prints it. When a certificate covers several lots and was filed as one page per lot, the other lots' own pages still go; the whole original, which prints every lot, stays in until the hold is released, and the order says so.",
+      },
+      {
+        heading: 'Placing and releasing',
+        body:
+          "Anyone except a read-only account can place a hold, and must say why. QA is told by email unless the person placing it is QA. " +
+          "Only a person on the QA owner route, the organization's master user when there is no route, or an administrator can release one, and must say why. Both the hold and the release are kept on the certificate and in the audit trail; a hold is never edited or deleted. " +
+          "Replacing the file does not lift a hold. It stays on the certificate until somebody releases it.",
+      },
+      {
+        heading: 'Automatic holds',
+        body:
+          "Two things place a hold when a certificate is approved. A result that is out of spec against a limit marked Critical. And a presence test on a zero-tolerance analyte, such as Salmonella, that was run on a smaller sample than the limit requires: the result is not judged, and the lot holds until QA settles it with the supplier's lab. " +
+          "Nothing else places one. A Major or Minor result, a result the portal could not check, and an MPN result against a CFU limit all notify as before and hold nothing. " +
+          "Each judged result places a hold once. If QA releases it, approving the same file again does not put it back; a new version of the certificate that still fails is held again. Certificates approved before holds existed are not held retroactively.",
+      },
+      {
+        heading: 'What is not built',
+        body:
+          "Supplier probation, where every lot from a supplier is held until its own certificate passes, is not built: there are no supplier watch statuses yet. A hold never reaches a warehouse system.",
+      },
+    ],
+  },
+};
+
 const bundles: ModuleHelpExpanded = {
   headline: 'Bundles',
   well:
@@ -1654,6 +1701,7 @@ export const helpContent = {
   document_types: documentTypes,
   naming_templates: namingTemplates,
   bundles,
+  holds,
   reports,
   activity,
   audit,

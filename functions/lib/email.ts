@@ -885,7 +885,7 @@ export function buildSpecAlertEmail(params: {
         ${link ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">See the result</a></p>` : ''}
         ${alertLink ? `<p style="margin:8px 0 0;color:#999;font-size:12px;">No login needed. This link works for 30 days.${portalLink ? ` If you have a SupDox account, the full record is <a href="${escapeHtml(portalLink)}" style="color:#1A365D;">here</a>.` : ''}</p>` : ''}
         <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">
-          These values were read from the document and compared against the limits on file. SupDox does not reject or hold anything on its own — this is for a person to look at.
+          These values were read from the document and compared against the limits on file. SupDox rejects nothing on its own. A Critical result that is out of spec puts that lot's certificate on hold until QA releases it; everything else here is for a person to look at.
         </p>
       </td>
     </tr>
@@ -910,7 +910,7 @@ export function buildSpecAlertEmail(params: {
   const missingLines = missing.map(
     (x) => `- ${x.analyte}: required, ${x.why === 'no_result' ? 'listed with no result' : 'not on the certificate'}`
   );
-  const text = `${n > 0 ? 'Out of spec' : m > 0 ? 'Incomplete certificate' : 'Result not judged'} — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${[...textLines, ...missingLines, ...notJudgedLines].join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
+  const text = `${n > 0 ? 'Out of spec' : m > 0 ? 'Incomplete certificate' : 'Result not judged'} — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${[...textLines, ...missingLines, ...notJudgedLines].join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox rejects nothing on its own. A Critical result that is out of spec puts that lot's certificate on hold until QA releases it; everything else here is for a person to look at.\n`;
 
   return { subject, html, text };
 }
@@ -1140,7 +1140,64 @@ export function buildExpiredOnArrivalEmail(params: {
         ${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join('\n')}
       </ul>
       ${params.appUrl ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(params.appUrl.replace(/\/$/, ''))}/documents" style="color:#1A365D;">Open SupDox</a></p>` : ''}
-      <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">SupDox does not reject or hold anything on its own — this is for a person to act on.</p>
+      <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">Nothing was rejected or put on hold because of this. It is for a person to act on.</p>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+  const text = `${lead}\n\n${lines.map((l) => `- ${l}`).join('\n')}\n`;
+  return { subject, html, text };
+}
+
+/**
+ * A certificate was put on hold (decision C-005, migration 0139).
+ *
+ * Two audiences, never mistaken for each other, in the expired-on-arrival
+ * mould: `routingGap: false` is the notice to the QA route ("this is on hold,
+ * it does not leave until one of you releases it"); `routingGap: true` goes to
+ * the organization's administrators and says NOBODY on the QA route was told.
+ *
+ * INTERNAL MAIL. The hold's reason is printed because the reader is the person
+ * who has to act on it. Nothing here ever reaches a customer or a supplier.
+ */
+export function buildHoldPlacedEmail(params: {
+  tenantName: string;
+  documentId: string;
+  documentTitle: string;
+  supplierName: string | null;
+  /** Who placed it, or null when the portal placed it at approval. */
+  placedByName: string | null;
+  holds: Array<{ lot_label: string | null; reason: string; source_label: string }>;
+  appUrl?: string;
+  routingGap?: boolean;
+}): { subject: string; html: string; text: string } {
+  const n = params.holds.length;
+  const subject = params.routingGap
+    ? `SupDox: ${params.documentTitle} was put on hold and no QA owner is set. Nobody was alerted`
+    : `SupDox: ${params.documentTitle} is on hold`;
+  const from = params.supplierName ? ` from ${params.supplierName}` : '';
+  const who = params.placedByName ? `${params.placedByName} put` : 'The portal put';
+  const what = `${who} ${params.documentTitle}${from} on hold${n > 1 ? ` (${n} holds)` : ''}.`;
+  const lead = params.routingGap
+    ? `${what} No QA owner route is configured for ${params.tenantName}, so nobody on the QA route was told. Add a route for the "QA" owner label in Settings › Owner Routing. Until the hold is released, this certificate cannot be sent on an order, in a ZIP, by link, in a bundle or read with an API key.`
+    : `${what} Until QA or an administrator releases the hold with a written reason, this certificate cannot be sent on an order, in a ZIP, by link, in a bundle or read with an API key. It can still be opened in the portal.`;
+  const lines = params.holds.map(
+    (h) => `${h.lot_label ? `Lot ${h.lot_label}` : 'Whole certificate'} (${h.source_label}): ${h.reason}`
+  );
+  const base = params.appUrl ? params.appUrl.replace(/\/$/, '') : null;
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr><td style="background:#8a1c1c;padding:24px 32px;"><h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox: ${params.routingGap ? 'routing gap' : 'certificate on hold'}</h1></td></tr>
+    <tr><td style="padding:32px;">
+      <p style="margin:0 0 16px;color:#555;line-height:1.6;">${escapeHtml(lead)}</p>
+      <ul style="margin:0 0 24px;padding-left:20px;color:#333;line-height:1.8;">
+        ${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join('\n')}
+      </ul>
+      ${base ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(base)}/documents/${escapeHtml(params.documentId)}" style="color:#1A365D;">Open the certificate</a> &nbsp; <a href="${escapeHtml(base)}/holds" style="color:#1A365D;">All holds</a></p>` : ''}
+      <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">A hold is a status in SupDox only. Nothing was sent to a warehouse system.</p>
     </td></tr>
   </table>
 </body>

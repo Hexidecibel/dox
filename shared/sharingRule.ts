@@ -33,10 +33,17 @@
  * that is not one of the three words, and every caller treats null as "not
  * stored" and falls through to a default that is never `free` by accident.
  *
+ * A HOLD IS ASKED AT THE SAME DOORS (decision C-005, migration 0139,
+ * shared/holds.ts). A certificate with an active hold does not pass any exit
+ * that is "leaving", whatever its rule and whoever is asking: the verdict is
+ * `held`, with the hold's own reason. Nobody releases a held document by
+ * sending it. The hold is released first.
+ *
  * PURE. No D1, no clock. The loader is functions/lib/sharing-rule.ts.
  */
 
 import { looksLikeCoaType, looksLikeSpecSheetType } from './renewalPeriod';
+import { holdRefusalText } from './holds';
 
 export const SHARING_RULES = ['free', 'qa', 'locked'] as const;
 export type SharingRule = (typeof SHARING_RULES)[number];
@@ -225,7 +232,7 @@ export interface ExitActor {
   canReleaseQa: boolean;
 }
 
-export type ExitVerdict = 'allow' | 'needs_qa' | 'locked';
+export type ExitVerdict = 'allow' | 'needs_qa' | 'locked' | 'held';
 
 /**
  * May this rule pass this exit for this actor?
@@ -239,8 +246,17 @@ export type ExitVerdict = 'allow' | 'needs_qa' | 'locked';
  *     nothing, and stops serving the document once it becomes `qa`. `locked`
  *     is never served.
  *   - Everything else that leaves: `free` for anyone, `qa` for a QA releaser.
+ *
+ * `held` (migration 0139) IS ASKED FIRST. A document with an active hold passes
+ * exactly one door, the same one `locked` passes: a logged-in person opening
+ * one file in the portal. Everything else answers `held` -- for a QA releaser
+ * and an administrator too, for an API key, and for a link minted before the
+ * hold was placed. `held` outranks `needs_qa` and `locked` so that the answer
+ * a person reads is the one they can act on first (release the hold), and so a
+ * `qa` document on hold is never queued for a QA release it could not get.
  */
-export function judgeExit(rule: SharingRule, exit: SharingExit, actor: ExitActor): ExitVerdict {
+export function judgeExit(rule: SharingRule, exit: SharingExit, actor: ExitActor, held = false): ExitVerdict {
+  if (held && !(exit === 'portal_file' && actor.method === 'jwt')) return 'held';
   if (actor.method === 'api_key') {
     return rule === 'free' ? 'allow' : rule === 'qa' ? 'needs_qa' : 'locked';
   }
@@ -268,8 +284,13 @@ export type SharingRefusalReason = Exclude<ExitVerdict, 'allow'>;
 /**
  * One sentence for a refused document. `apiKey` changes only the `needs_qa`
  * wording: for a key there is nobody to ask, the answer is "not with a key".
+ * `hold` is the active hold behind a `held` refusal: "On hold: <reason>".
  */
-export function sharingRefusalMessage(reason: SharingRefusalReason, opts: { apiKey?: boolean } = {}): string {
+export function sharingRefusalMessage(
+  reason: SharingRefusalReason,
+  opts: { apiKey?: boolean; hold?: { reason?: string | null; lot_label?: string | null } | null } = {},
+): string {
+  if (reason === 'held') return holdRefusalText(opts.hold);
   if (reason === 'locked') return 'Locked: this document does not leave the portal.';
   return opts.apiKey
     ? 'Needs QA approval: an API key can read only documents marked "Send freely".'
@@ -279,6 +300,9 @@ export function sharingRefusalMessage(reason: SharingRefusalReason, opts: { apiK
 // ---------------------------------------------------------------------------
 // Saying what was left out
 // ---------------------------------------------------------------------------
+
+/** The word for a `held` refusal, beside the three rule labels. */
+export const HELD_LABEL = 'On hold';
 
 /** How many titles one sentence names before it says "and N more". */
 export const REFUSAL_NAMES_SHOWN = 6;
@@ -293,7 +317,7 @@ function nameList(titles: string[]): string {
  * What an exit left out, in words, naming each document under its reason:
  *
  *   "3 documents were not included. Locked: Tax form, Unsorted scan.
- *    Needs QA approval: Guarantee letter."
+ *    Needs QA approval: Guarantee letter. On hold: Lot 1042 certificate."
  *
  * ONE wording for the server's refusal and for every screen that reports a
  * partial one, so a ZIP, a send, a bundle and an order cannot describe the
@@ -303,12 +327,14 @@ export function describeRefusals(
   refused: readonly { title?: string | null; reason: SharingRefusalReason }[],
 ): string {
   if (refused.length === 0) return '';
+  const held = refused.filter((r) => r.reason === 'held').map((r) => r.title ?? '');
   const locked = refused.filter((r) => r.reason === 'locked').map((r) => r.title ?? '');
   const qa = refused.filter((r) => r.reason === 'needs_qa').map((r) => r.title ?? '');
   const n = refused.length;
   const parts = [`${n} document${n === 1 ? ' was' : 's were'} not included.`];
   if (locked.length > 0) parts.push(`${SHARING_RULE_LABELS.locked}: ${nameList(locked)}.`);
   if (qa.length > 0) parts.push(`${SHARING_RULE_LABELS.qa}: ${nameList(qa)}.`);
+  if (held.length > 0) parts.push(`${HELD_LABEL}: ${nameList(held)}.`);
   return parts.join(' ');
 }
 
@@ -327,7 +353,7 @@ export function parseRefusedHeader(
     if (at <= 0) continue;
     const id = part.slice(0, at).trim();
     const reason = part.slice(at + 1).trim();
-    if (id && (reason === 'locked' || reason === 'needs_qa')) out.push({ document_id: id, reason });
+    if (id && (reason === 'locked' || reason === 'needs_qa' || reason === 'held')) out.push({ document_id: id, reason });
   }
   return out;
 }

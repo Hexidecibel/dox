@@ -52,6 +52,14 @@
  * on this order. When that is stricter than the sender may pass, the per-lot
  * page goes instead and the review screen says so.
  *
+ * HOLDS (decision C-005, migration 0139). A certificate with an active hold
+ * does not go: its line is listed in `lines_not_sent` with `sharing_refusal:
+ * 'held'` and the hold's own reason, for every sender, a QA releaser and an
+ * administrator included -- the hold is released first. Because a whole
+ * original prints every lot, a hold on ONE lot keeps the whole original in;
+ * the other lots' own pages still go, with a note saying why (C-074). The same
+ * two checks apply: the plan, and again before each file's bytes are read.
+ *
  * DOCUMENT LINES (migration 0138, decision C-044). An order may also carry
  * lines that ask for a supplier's documents (functions/lib/order-documents.ts).
  * They ride in THE SAME PLAN and the same send:
@@ -365,9 +373,14 @@ export async function planOrderSend(
       if (!whole || whole.verdict !== 'allow') {
         useOriginal = false;
         notes.push(
-          whole && whole.verdict === 'needs_qa'
-            ? 'The whole certificate also covers a document that needs QA approval, so only this lot\'s page is sent.'
-            : 'The whole certificate also covers a document that is locked, so only this lot\'s page is sent.',
+          whole && whole.verdict === 'held'
+            ? // Another lot of the same certificate is on hold (0139). The whole
+              // original prints that lot's results, so it stays in; this lot's
+              // own page carries none of them and goes (C-074).
+              `The whole certificate also covers ${whole.hold?.lot_label ? `lot ${whole.hold.lot_label}, which is on hold` : 'a lot that is on hold'}, so only this lot's page is sent.`
+            : whole && whole.verdict === 'needs_qa'
+              ? 'The whole certificate also covers a document that needs QA approval, so only this lot\'s page is sent.'
+              : 'The whole certificate also covers a document that is locked, so only this lot\'s page is sent.',
         );
       }
     }
@@ -433,6 +446,7 @@ export async function planOrderSend(
         lot_number: lotRowLabel(line.lot_row_number, line.sub_lot_code) ?? line.lot_number ?? null,
         reason: refusal.message,
         sharing_refusal: refusal.reason,
+        ...(refusal.hold ? { hold: refusal.hold } : {}),
         document_id: docId,
       });
       continue;
@@ -464,7 +478,7 @@ export async function planOrderSend(
         l.row.id,
         refusal.reason === 'needs_qa'
           ? { group: 'waits_for_qa', reason: null, text: refusal.message }
-          : { group: 'will_not_go', reason: 'locked', text: refusal.message },
+          : { group: 'will_not_go', reason: refusal.reason === 'held' ? 'held' : 'locked', text: refusal.message },
       );
       continue;
     }
@@ -599,6 +613,9 @@ export async function planOrderSend(
       document_type_name: x.l.api.document_type_name,
       reason: x.o.text,
       ...(x.o.reason === 'locked' ? { sharing_refusal: 'locked' as const } : {}),
+      ...(x.o.reason === 'held'
+        ? { sharing_refusal: 'held' as const, ...(x.l.api.hold ? { hold: x.l.api.hold } : {}) }
+        : {}),
       ...(x.l.api.document_id ? { document_id: x.l.api.document_id } : {}),
     });
   }
@@ -682,7 +699,11 @@ export async function planOrderSend(
     blocked = {
       code: 'nothing_to_send',
       message: heldByRule
-        ? 'Every document on this order is held back by its sharing rule, so there is nothing to send. See the list below.'
+        ? linesNotSent.every((l) => l.sharing_refusal === 'held')
+          ? 'Every certificate on this order is on hold, so there is nothing to send. A hold is released by QA or an administrator. See the list below.'
+          : linesNotSent.some((l) => l.sharing_refusal === 'held')
+            ? 'Every document on this order is on hold or held back by its sharing rule, so there is nothing to send. See the list below.'
+            : 'Every document on this order is held back by its sharing rule, so there is nothing to send. See the list below.'
         : documentLines.length > 0
           ? 'Nothing on this order can go, and QA has already been told about what is waiting, missing or expired. See the list below.'
           : 'No line of this order has an active document on it, so there is nothing to send.',
@@ -1120,6 +1141,10 @@ async function documentLineFileVerdict(
  * original additionally holds every document cut from the same queue item.
  * The strictest of all of them decides (C-042). A file whose documents can no
  * longer be found is refused: nothing says it may leave.
+ *
+ * A HOLD PLACED SINCE THE SEND WAS REVIEWED STOPS THE FILE HERE (0139): the
+ * part fails with "On hold: <reason>" and can be sent again once the hold is
+ * released. A whole original is held by a hold on ANY lot cut from it.
  */
 async function storedFileRefusal(
   db: D1Database,
@@ -1135,7 +1160,7 @@ async function storedFileRefusal(
   const judged = await judgeSharedFile(db, tenantId, [...ids], 'order_send', actor);
   if (judged.verdict !== 'allow') {
     return {
-      problem: `${f.file_name} was not sent. ${sharingRefusalMessage(judged.verdict, { apiKey: actor.method === 'api_key' })}`,
+      problem: `${f.file_name} was not sent. ${sharingRefusalMessage(judged.verdict, { apiKey: actor.method === 'api_key', hold: judged.hold })}`,
       qaReleased: [],
     };
   }
@@ -1148,7 +1173,7 @@ async function storedFileRefusal(
   // Which of them are `qa`, passing only because of who is sending.
   const rules = await loadSharingRules(db, tenantId, [...ids]);
   const qaReleased = [...rules.values()]
-    .filter((r) => r.rule === 'qa' && judgeExit(r.rule, 'order_send', actor) === 'allow')
+    .filter((r) => r.rule === 'qa' && judgeExit(r.rule, 'order_send', actor, r.holds.length > 0) === 'allow')
     .map((r) => r.document_id);
   return { problem: null, qaReleased };
 }

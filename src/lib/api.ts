@@ -1,5 +1,13 @@
 import { parseRefusedHeader, type SharingRefusalReason } from '../../shared/sharingRule';
 import type {
+  ApiDocumentHold,
+  DocumentHoldsResponse,
+  HoldsCountResponse,
+  HoldsListResponse,
+  HoldSource,
+  PlaceHoldRequest,
+} from '../../shared/types';
+import type {
   AuthPayload,
   Document,
   DocumentVersion,
@@ -1675,6 +1683,40 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+  },
+
+  /**
+   * Holds (decision C-005, migration 0139). A hold stops a certificate
+   * leaving until QA or an administrator releases it with a reason.
+   */
+  holds: {
+    /** GET /api/documents/:id/holds — active, history, lot rows, and what the caller may do. */
+    forDocument: (documentId: string) =>
+      fetchApi<DocumentHoldsResponse>(`/documents/${encodeURIComponent(documentId)}/holds`),
+    /** POST /api/documents/:id/holds — place one. `lot_id` omitted = the whole certificate. */
+    place: (documentId: string, body: PlaceHoldRequest) =>
+      fetchApi<{ hold: ApiDocumentHold }>(`/documents/${encodeURIComponent(documentId)}/holds`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    /** POST /api/holds/:id/release — the only way a hold ends. */
+    release: (holdId: string, reason: string) =>
+      fetchApi<{ hold: ApiDocumentHold }>(`/holds/${encodeURIComponent(holdId)}/release`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
+    /** GET /api/holds — the organization's holds. */
+    list: (params?: { tenant_id?: string; state?: 'active' | 'released' | 'all'; source?: HoldSource; supplier_id?: string; product_id?: string }) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params ?? {})) if (v) qs.set(k, String(v));
+      const q = qs.toString();
+      return fetchApi<HoldsListResponse>(`/holds${q ? `?${q}` : ''}`);
+    },
+    /** GET /api/holds?count=1 — one cheap count of active holds, for the rail. */
+    count: (params?: { tenant_id?: string }) => {
+      const qs = params?.tenant_id ? `&tenant_id=${encodeURIComponent(params.tenant_id)}` : '';
+      return fetchApi<HoldsCountResponse>(`/holds?count=1${qs}`);
+    },
   },
 
   /**

@@ -37,6 +37,7 @@ import { sanitizeString } from './validation';
 import { findOrCreateLot, normalizeLotNumber } from './entities/lots';
 import { linkOrderToCoas, parseDistributorCode } from './entities/matching';
 import { orderSideSchemeResolver } from './lot-schemes';
+import { holdForLot, loadActiveHolds } from './hold-state';
 import { resolveWholeOriginals } from './coa-original';
 import { describeLotDate } from '../../shared/orderSend';
 import type { User } from './types';
@@ -178,6 +179,10 @@ export async function loadOrderLines(
 
   const docIds = [...new Set(rows.map((r) => r.coa_document_id).filter((v): v is string => Boolean(v)))];
   const originals = await resolveWholeOriginals(db, files, tenantId, docIds);
+  // Holds (0139), read live: the line shows that its certificate is on hold
+  // and why. The hold on the line's own lot row is named when there is one;
+  // a hold on another lot of the same file stops the file just the same.
+  const holds = await loadActiveHolds(db, tenantId, docIds);
 
   return rows.map((r) => {
     const date = describeLotDate(r.lot_id ? r : null);
@@ -188,6 +193,7 @@ export async function loadOrderLines(
       production_date_label: date.label,
       production_date_note: date.note,
       coa_original: original ? original.state : null,
+      coa_hold: r.coa_document_id ? holdForLot(holds.get(r.coa_document_id), r.lot_id) : null,
     };
   });
 }

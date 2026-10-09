@@ -10,6 +10,7 @@ import {
   auditQaRelease,
   exitActorForRequest,
   judgeDocumentsForExit,
+  outwardRefusalMessage,
   refusedHeaderValue,
   sharingRefusedResponse,
 } from '../../../lib/sharing-rule';
@@ -44,7 +45,7 @@ function notIncludedText(
   ];
   for (const r of refused) {
     lines.push(`- ${r.title || 'Untitled document'}${r.document_type_name ? ` (${r.document_type_name})` : ''}`);
-    lines.push(`  ${r.message}`);
+    lines.push(`  ${outwardRefusalMessage(r)}`);
   }
   for (const u of unavailable) {
     lines.push(`- ${u.title || 'Untitled document'}${u.document_type_name ? ` (${u.document_type_name})` : ''}`);

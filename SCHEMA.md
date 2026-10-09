@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 148 tables, 2 views, 269 indexes, 47 triggers.
+Objects: 149 tables, 2 views, 274 indexes, 48 triggers.
 
 ## Core documents & versions
 
@@ -1593,6 +1593,34 @@ Indexes: `idx_document_claims_document`, `idx_document_claims_subject`, `idx_doc
 ```
 
 Indexes: `idx_document_export_links_sender`, `idx_document_export_links_tenant`, `idx_document_export_links_token`
+
+### `document_holds`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_id TEXT NOT NULL REFERENCES documents(id)
+  lot_id TEXT REFERENCES lots(id)
+  reason TEXT NOT NULL CHECK (length(trim(reason)) > 0)
+  source TEXT NOT NULL CHECK (source IN ('person', 'spec_critical', 'zero_tolerance'))
+  source_key TEXT
+  spec_check_id TEXT
+  document_version INTEGER
+  detail TEXT
+  placed_by TEXT REFERENCES users(id)
+  placed_at TEXT NOT NULL DEFAULT (datetime('now'))
+  qa_notified_at TEXT
+  released_by TEXT REFERENCES users(id)
+  released_at TEXT
+  release_reason TEXT
+  CHECK ((source = 'person') = (source_key IS NULL))
+  CHECK (source != 'person' OR placed_by IS NOT NULL)
+  CHECK ( (released_at IS NULL AND released_by IS NULL AND release_reason IS NULL) OR (released_at IS NOT NULL AND released_by IS NOT NULL AND length(trim(release_reason)) > 0) )
+```
+
+Indexes: `idx_document_holds_auto_once`, `idx_document_holds_document`, `idx_document_holds_lot`, `idx_document_holds_one_active`, `idx_document_holds_tenant_active`
+
+Triggers: `trg_document_holds_immutable`
 
 ### `document_requests`
 
