@@ -1,6 +1,11 @@
 {
-  "current": "2.32.0",
+  "current": "2.33.0",
   "versions": [
+    {
+      "version": "2.33.0",
+      "date": "2026-10-09",
+      "title": "Your name, your colours, on what leaves"
+    },
     {
       "version": "2.32.0",
       "date": "2026-10-08",
