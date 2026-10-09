@@ -413,9 +413,9 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
   {
     path: 'functions/lib/tenant-brand.ts',
     classification: 'not_exit',
-    signature: { bucket: 10, gets: 2, readers: 0, checks: 0 },
+    signature: { bucket: 11, gets: 2, readers: 0, checks: 0 },
     reason:
-      'Writes, reads and deletes an organisation logo. readBrandLogo takes a 40-hex token, finds a tenant_brand_logos row by it, refuses a WITHDRAWN row, REBUILDS the key from the row (brand/<tenant>/logo-<sha256>.<ext>) and refuses unless it equals the stored key, so no caller-supplied string reaches the bucket and no document key can be formed. withdrawBrandLogo deletes only a key it rebuilt the same way from a row found by id AND tenant. The second .get( is the per-request brand cache, a Map. Still one bucket read; the bucket mentions that moved the count are the delete on withdrawal.',
+      'Writes, reads and deletes an organisation logo. readBrandLogo takes a 40-hex token, finds a tenant_brand_logos row by it, refuses a WITHDRAWN row, REBUILDS the key from the row (brand/<tenant>/logo-<sha256>.<ext>) and refuses unless it equals the stored key, so no caller-supplied string reaches the bucket and no document key can be formed. withdrawBrandLogo deletes only a key it rebuilt the same way from a row found by id AND tenant. The second .get( is the per-request brand cache, a Map. Still one bucket read; the bucket mentions that moved the count are the delete on withdrawal and a head() after an upload (does the object the request just wrote still exist), which returns no bytes.',
   },
   {
     path: 'functions/api/public/brand-logo/[token].ts',

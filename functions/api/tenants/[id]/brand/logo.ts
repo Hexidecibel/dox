@@ -33,7 +33,7 @@ import {
   BrandConflictError,
 } from '../../../../lib/tenant-brand';
 import { BRAND_LOGO_MAX_BYTES, BRAND_LOGO_UPLOADS_PER_HOUR } from '../../../../../shared/tenantBrand';
-import { checkRateLimit, recordAttempt } from '../../../../lib/ratelimit';
+import { takeAttempt } from '../../../../lib/ratelimit';
 import type { Env, User } from '../../../../lib/types';
 
 const json = (body: unknown, status = 200) =>
@@ -58,10 +58,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     requireBrandAdmin(user, tenantId);
     requirePerson(context.data);
 
-    // One budget per tenant, counted before anything is read or judged.
-    const rlKey = `brand_logo_upload:${tenantId}`;
-    const rl = await checkRateLimit(context.env.DB, rlKey, BRAND_LOGO_UPLOADS_PER_HOUR, 60 * 60);
-    if (!rl.allowed) {
+    // One budget per tenant, counted before anything is read or judged. THE
+    // INCREMENT IS THE GATE: the attempt is recorded first and the number that
+    // produced is compared, so requests arriving together cannot all read
+    // "under the limit" before any of them has written.
+    const attempts = await takeAttempt(context.env.DB, `brand_logo_upload:${tenantId}`, 60 * 60);
+    if (attempts > BRAND_LOGO_UPLOADS_PER_HOUR) {
       return json(
         {
           error: `Too many logo uploads for this organization in the last hour (${BRAND_LOGO_UPLOADS_PER_HOUR} at most). Try again later.`,
@@ -69,7 +71,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         429,
       );
     }
-    await recordAttempt(context.env.DB, rlKey, 60 * 60);
 
     // Refuse an obviously oversize body before reading any of it. The slack
     // is the multipart envelope; the exact cap is applied to the file below.

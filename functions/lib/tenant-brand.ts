@@ -662,7 +662,9 @@ const logoBySha = (db: D1Database, tenantId: string, sha256: string) =>
  * THE CAP. A tenant keeps at most BRAND_LOGO_RETAINED_MAX published logos. A
  * NEW image past that is refused with the reason; nothing is withdrawn to
  * make room, because withdrawing breaks the image in mail already sent and
- * that is a person's decision.
+ * that is a person's decision. The cap is a condition of the INSERT (and of
+ * the UPDATE that restores a withdrawn image), not a count taken beforehand,
+ * so it holds however many uploads arrive at once.
  */
 export async function storeBrandLogo(
   env: { DB: D1Database; FILES: R2Bucket },
@@ -681,44 +683,59 @@ export async function storeBrandLogo(
   const key = brandLogoKey(tenantId, sha256, contentType);
   const urlToken = await brandLogoToken(tenantId, sha256);
 
-  const existing = await logoBySha(env.DB, tenantId, sha256);
-  const restoring = !!existing?.withdrawn_at;
-  if (!existing || restoring) {
-    const kept = await env.DB.prepare(
-      'SELECT COUNT(*) AS n FROM tenant_brand_logos WHERE tenant_id = ? AND withdrawn_at IS NULL',
-    )
-      .bind(tenantId)
-      .first<{ n: number }>();
-    if ((kept?.n ?? 0) >= BRAND_LOGO_RETAINED_MAX) {
-      throw new BrandConflictError(
-        `This organization already keeps ${BRAND_LOGO_RETAINED_MAX} published logos, the most allowed. ` +
-          'Withdraw one you no longer need (Settings > Brand > Past logos) before uploading another.',
-      );
-    }
-  }
+  const atCap = () =>
+    new BrandConflictError(
+      `This organization already keeps ${BRAND_LOGO_RETAINED_MAX} published logos, the most allowed. ` +
+        'Withdraw one you no longer need (Settings > Brand > Past logos) before uploading another.',
+    );
 
-  // Idempotent: the key is the content hash, so writing it again writes the
-  // same bytes. It also puts back the object of a withdrawn image.
-  await env.FILES.put(key, bytes, { httpMetadata: { contentType } });
+  // THE CAP IS ENFORCED BY THE WRITE ITSELF. The row is inserted only if the
+  // tenant holds fewer than the cap AT THAT MOMENT -- one statement, so thirty
+  // uploads arriving together cannot each count nine and all insert. An image
+  // the tenant already has conflicts and is left alone (ON CONFLICT DO NOTHING).
   await env.DB.prepare(
     `INSERT INTO tenant_brand_logos
        (id, tenant_id, url_token, sha256, r2_key, content_type, size_bytes, width, height, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE (SELECT COUNT(*) FROM tenant_brand_logos
+              WHERE tenant_id = ? AND withdrawn_at IS NULL) < ?
+         OR EXISTS (SELECT 1 FROM tenant_brand_logos WHERE tenant_id = ? AND sha256 = ?)
      ON CONFLICT DO NOTHING`,
   )
-    .bind(generateId(), tenantId, urlToken, sha256, key, contentType, bytes.length, width, height, actor.userId)
+    .bind(
+      generateId(), tenantId, urlToken, sha256, key, contentType, bytes.length, width, height, actor.userId,
+      tenantId, BRAND_LOGO_RETAINED_MAX,
+      tenantId, sha256,
+    )
     .run();
-  if (restoring) {
-    await env.DB.prepare(
+  let logo = await logoBySha(env.DB, tenantId, sha256);
+  // No row: it was a new image and there was no room.
+  if (!logo) throw atCap();
+
+  // A withdrawn image is put back the same way: only if there is room NOW.
+  let restoring = false;
+  if (logo.withdrawn_at) {
+    const restored = await env.DB.prepare(
       `UPDATE tenant_brand_logos
           SET withdrawn_at = NULL, withdrawn_by = NULL, withdrawn_reason = NULL
-        WHERE tenant_id = ? AND sha256 = ?`,
+        WHERE tenant_id = ? AND sha256 = ? AND withdrawn_at IS NOT NULL
+          AND (SELECT COUNT(*) FROM tenant_brand_logos
+                WHERE tenant_id = ? AND withdrawn_at IS NULL) < ?`,
     )
-      .bind(tenantId, sha256)
+      .bind(tenantId, sha256, tenantId, BRAND_LOGO_RETAINED_MAX)
       .run();
+    restoring = (restored.meta?.changes ?? 0) > 0;
+    logo = await logoBySha(env.DB, tenantId, sha256);
+    if (!logo || logo.withdrawn_at) throw atCap();
   }
-  const logo = await logoBySha(env.DB, tenantId, sha256);
-  if (!logo) throw new Error('The logo row could not be read back');
+
+  // The bytes go in AFTER the row is published, so a refused upload leaves no
+  // object behind. Idempotent: the key is the content hash. Then it is CHECKED:
+  // a withdrawal of this same image that was in flight may delete the object
+  // just after it was written (see withdrawBrandLogo), and this request is the
+  // one still holding the bytes, so it is the one that puts them back.
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType } });
+  if (!(await env.FILES.head(key))) await env.FILES.put(key, bytes, { httpMetadata: { contentType } });
 
   const previous = await currentLogo(env.DB, tenantId);
   if (previous?.id !== logo.id) {
@@ -799,7 +816,9 @@ export type WithdrawOutcome =
  *
  * The row is marked first and the object deleted second: the URL is dead the
  * moment the row says so (`readBrandLogo` refuses a withdrawn row), so a failed
- * delete leaves nothing reachable, and asking again deletes what is left.
+ * delete leaves nothing reachable, and asking again deletes what is left --
+ * but only ever while the row STILL says withdrawn (`deleteIfStillWithdrawn`),
+ * because the same image may be published again in the meantime.
  * A logo the brand is showing is taken off the brand as part of the same act.
  */
 export async function withdrawBrandLogo(
@@ -826,9 +845,27 @@ export async function withdrawBrandLogo(
   const key = typeOk ? brandLogoKey(row.tenant_id, row.sha256, row.content_type as LogoContentType) : null;
   const ownedKey = key !== null && key === row.r2_key ? key : null;
 
+  // THE OBJECT IS DELETED ONLY WHILE THE ROW STILL SAYS WITHDRAWN, asked at
+  // the moment of deleting -- never on the strength of a row read earlier. The
+  // same image can be uploaded again (which publishes it again) while a
+  // withdrawal is in flight or a second "Withdraw" click is being handled, and
+  // a delete decided before that upload would leave a published logo with no
+  // image behind it.
+  const deleteIfStillWithdrawn = async (): Promise<boolean> => {
+    if (!ownedKey) return false;
+    const now = await env.DB.prepare('SELECT withdrawn_at FROM tenant_brand_logos WHERE id = ? AND tenant_id = ?')
+      .bind(row.id, tenantId)
+      .first<{ withdrawn_at: string | null }>();
+    if (!now || !now.withdrawn_at) return false;
+    await env.FILES.delete(ownedKey);
+    return true;
+  };
+
   if (row.withdrawn_at) {
-    if (ownedKey) await env.FILES.delete(ownedKey);
-    return { ok: true, brand, already: true };
+    // Already withdrawn when this request looked: finish a delete that may
+    // have failed, if it is STILL withdrawn. No second audit row.
+    await deleteIfStillWithdrawn();
+    return { ok: true, brand: (await readBrand(env.DB, tenantId)) ?? brand, already: true };
   }
 
   const current = await currentLogo(env.DB, tenantId);
@@ -841,14 +878,19 @@ export async function withdrawBrandLogo(
       .run();
     await dropRowIfEmpty(env.DB, tenantId);
   }
-  await env.DB.prepare(
+  const marked = await env.DB.prepare(
     `UPDATE tenant_brand_logos
         SET withdrawn_at = datetime('now'), withdrawn_by = ?, withdrawn_reason = ?
       WHERE id = ? AND tenant_id = ? AND withdrawn_at IS NULL`,
   )
     .bind(actor.userId, reason.value, row.id, tenantId)
     .run();
-  if (ownedKey) await env.FILES.delete(ownedKey);
+  const objectDeleted = await deleteIfStillWithdrawn();
+  // Another request withdrew it between our read and our write: theirs is the
+  // act on record.
+  if ((marked.meta?.changes ?? 0) === 0) {
+    return { ok: true, brand: (await readBrand(env.DB, tenantId)) ?? brand, already: true };
+  }
 
   await logAudit(
     env.DB,
@@ -862,7 +904,7 @@ export async function withdrawBrandLogo(
       logo: logoAudit(row),
       reason: reason.value,
       was_current: wasCurrent,
-      object_deleted: ownedKey !== null,
+      object_deleted: objectDeleted,
       via: actor.via ?? 'jwt',
     }),
     actor.ip,

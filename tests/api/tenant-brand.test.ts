@@ -53,6 +53,7 @@ import {
   loadPublicBrand,
   loadTenantBrand,
   readBrandLogo,
+  withdrawBrandLogo,
   createBrandCache,
 } from '../../functions/lib/tenant-brand';
 import { BRAND_LOGO_MAX_BYTES, BRAND_SURFACES } from '../../shared/tenantBrand';
@@ -1315,7 +1316,8 @@ describe('invisible and direction-changing characters (C-110)', () => {
       { display_name: `Northfield${cp(0x2066)}` },
       { display_name: '---' },
       { display_name: '***' },
-      { support: { text: `Call${cp(0x200d)}us` } },
+      { support: { text: `Call${cp(0x200b)}us` } },
+      { support: { text: `Call us${cp(0x200d)}` } },
       { support: { text: `${cp(0x202e)}su llaC` } },
       { support_overrides: { alert: { text: `QA${cp(0xfeff)}desk` } } },
     ];
@@ -1608,5 +1610,217 @@ describe('the sign-off mail, through the workflow engine', () => {
     expect(mail.html).not.toContain('<img');
     expect(mail.html).not.toContain('<strong>Plain Corp</strong>');
     for (const leak of ['Northfield', 'Harborline', A_SECRET, B_SECRET]) expect(mail.html).not.toContain(leak);
+  });
+});
+
+// ===========================================================================
+// After the re-review (2026-10-08): C-117..C-119
+// ===========================================================================
+
+describe('the upload caps hold under parallel requests (C-118)', () => {
+  const TENANT_F = 'brand-tenant-f';
+  let adminF: TestUser;
+  const kept = async () =>
+    (await db.prepare('SELECT COUNT(*) AS n FROM tenant_brand_logos WHERE tenant_id = ? AND withdrawn_at IS NULL').bind(TENANT_F).first<{ n: number }>())!.n;
+  const objects = async () => (await env.FILES.list({ prefix: `brand/${TENANT_F}/` })).objects.length;
+  const tally = (statuses: number[]) => statuses.reduce<Record<number, number>>((t, s) => ({ ...t, [s]: (t[s] ?? 0) + 1 }), {});
+
+  beforeAll(async () => {
+    adminF = await makeTenant(TENANT_F, 'brand-admin-f', 'Foxtrot Plain Co');
+  });
+  afterEach(async () => {
+    await clearUploadBudget();
+  });
+
+  it('thirty different images at once on a fresh tenant: twenty get past the throttle, ten are kept, and no object is left for a refused one', async () => {
+    await clearUploadBudget();
+    const responses = await Promise.all(
+      Array.from({ length: 30 }, (_, i) => postLogo(TENANT_F, pngBytes(160, 48, 600, 2000 + i), adminF)),
+    );
+    expect(tally(responses.map((r) => r.status))).toEqual({ 200: 10, 409: 10, 429: 10 });
+    expect(await kept()).toBe(10);
+    // The bytes are written after the row is published: a refusal stores nothing.
+    expect(await objects()).toBe(10);
+    // Every kept logo is really served.
+    const tokens = await db.prepare('SELECT url_token FROM tenant_brand_logos WHERE tenant_id = ?').bind(TENANT_F).all<{ url_token: string }>();
+    expect(tokens.results).toHaveLength(10);
+    for (const t of tokens.results!) expect((await fetchLogo(t.url_token)).status).toBe(200);
+  });
+
+  it('the throttle counts exactly: twenty-five attempts at once are twenty judged and five refused', async () => {
+    await clearUploadBudget();
+    const junk = new TextEncoder().encode('not an image, but an attempt all the same');
+    const responses = await Promise.all(Array.from({ length: 25 }, () => postLogo(TENANT_F, junk, adminF)));
+    expect(tally(responses.map((r) => r.status))).toEqual({ 400: 20, 429: 5 });
+  });
+
+  it('at the cap, parallel uploads of new images are all refused, and one already published is not', async () => {
+    expect(await kept()).toBe(10);
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => postLogo(TENANT_F, pngBytes(160, 48, 600, 3000 + i), adminF)),
+    );
+    expect(tally(responses.map((r) => r.status))).toEqual({ 409: 8 });
+    expect(await kept()).toBe(10);
+    expect(await objects()).toBe(10);
+    // An image the tenant already publishes is not "another": it is accepted at the cap.
+    const have = (await db.prepare('SELECT r2_key FROM tenant_brand_logos WHERE tenant_id = ? AND withdrawn_at IS NULL LIMIT 1').bind(TENANT_F).first<{ r2_key: string }>())!.r2_key;
+    const sameBytes = new Uint8Array(await (await env.FILES.get(have))!.arrayBuffer());
+    expect((await postLogo(TENANT_F, sameBytes, adminF)).status).toBe(200);
+    expect(await kept()).toBe(10);
+  });
+
+  it('room for two, five contenders (new images and withdrawn ones being put back): two get in', async () => {
+    await clearUploadBudget();
+    const rows = await db
+      .prepare(`SELECT l.id FROM tenant_brand_logos l WHERE l.tenant_id = ? AND l.withdrawn_at IS NULL AND l.id NOT IN (SELECT logo_id FROM tenant_brands WHERE tenant_id = ? AND logo_id IS NOT NULL) LIMIT 2`)
+      .bind(TENANT_F, TENANT_F)
+      .all<{ id: string }>();
+    const withdrawn: Uint8Array[] = [];
+    for (const r of rows.results!) {
+      const key = (await db.prepare('SELECT r2_key FROM tenant_brand_logos WHERE id = ?').bind(r.id).first<{ r2_key: string }>())!.r2_key;
+      withdrawn.push(new Uint8Array(await (await env.FILES.get(key))!.arrayBuffer()));
+      expect((await withdraw(TENANT_F, r.id, 'Making room', adminF)).status).toBe(200);
+    }
+    expect(await kept()).toBe(8);
+
+    const contenders = [...withdrawn, pngBytes(160, 48, 600, 4001), pngBytes(160, 48, 600, 4002), pngBytes(160, 48, 600, 4003)];
+    const responses = await Promise.all(contenders.map((bytes) => postLogo(TENANT_F, bytes, adminF)));
+    expect(tally(responses.map((r) => r.status))).toEqual({ 200: 2, 409: 3 });
+    expect(await kept()).toBe(10);
+    // Published rows and stored objects agree: nothing published without its image.
+    const published = await db.prepare('SELECT url_token FROM tenant_brand_logos WHERE tenant_id = ? AND withdrawn_at IS NULL').bind(TENANT_F).all<{ url_token: string }>();
+    for (const t of published.results!) expect((await fetchLogo(t.url_token)).status).toBe(200);
+  });
+});
+
+describe('a withdrawal never deletes an image that has been published again (C-119)', () => {
+  const TENANT_G = 'brand-tenant-g';
+  let adminG: TestUser;
+  const image = pngBytes(200, 60, 800, 5001);
+  const other = pngBytes(200, 60, 800, 5002);
+  let id = '';
+  let url = '';
+
+  beforeAll(async () => {
+    adminG = await makeTenant(TENANT_G, 'brand-admin-g', 'Golf Plain Co');
+    const first = await body<TenantBrandResponse>(await postLogo(TENANT_G, image, adminG));
+    url = first.logo!.url;
+    id = first.logos.find((l) => l.current)!.id;
+    await postLogo(TENANT_G, other, adminG);
+    await clearUploadBudget();
+  });
+  afterEach(async () => {
+    await clearUploadBudget();
+  });
+
+  /** A database that runs `between` once, right after the withdrawal has read the logo row. */
+  function interleaving(between: () => Promise<void>): D1Database {
+    let fired = false;
+    return {
+      prepare(sql: string) {
+        const statement = db.prepare(sql);
+        if (fired || !sql.includes('FROM tenant_brand_logos WHERE id = ? AND tenant_id = ?') || !sql.includes('SELECT *')) return statement;
+        return {
+          bind: (...args: unknown[]) => {
+            const bound = statement.bind(...args);
+            return {
+              first: async () => {
+                const row = await bound.first();
+                fired = true;
+                await between();
+                return row;
+              },
+            };
+          },
+        };
+      },
+      batch: db.batch.bind(db),
+    } as unknown as D1Database;
+  }
+
+  it('a second "Withdraw" interleaved with a re-upload of the same image leaves the logo published WITH its image', async () => {
+    expect((await withdraw(TENANT_G, id, 'Wrong artwork', adminG)).status).toBe(200);
+    expect((await fetchLogo(tokenOf(url))).status).toBe(404);
+
+    // The second click reads the row (withdrawn) ... and before it acts, the
+    // admin uploads the same image again, which publishes it again.
+    const racing = interleaving(async () => {
+      expect((await postLogo(TENANT_G, image, adminG)).status).toBe(200);
+    });
+    const outcome = await withdrawBrandLogo({ DB: racing, FILES: env.FILES }, TENANT_G, id, 'Second click', { userId: adminG.id, ip: null });
+    expect(outcome).toMatchObject({ ok: true, already: true });
+
+    const row = await db.prepare('SELECT withdrawn_at, r2_key FROM tenant_brand_logos WHERE id = ?').bind(id).first<{ withdrawn_at: string | null; r2_key: string }>();
+    expect(row!.withdrawn_at).toBeNull();
+    // The decision to delete was taken on a row that is no longer withdrawn: nothing is deleted.
+    expect(await env.FILES.head(row!.r2_key)).not.toBeNull();
+    const served = await fetchLogo(tokenOf(url));
+    expect(served.status).toBe(200);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(image);
+    // One withdrawal on record, not two.
+    const audit = await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'tenant.brand_logo_withdrawn' AND tenant_id = ?").bind(TENANT_G).first<{ n: number }>();
+    expect(audit!.n).toBe(1);
+  });
+
+  it('a second withdraw with nothing in between still finishes a delete that was left undone', async () => {
+    await postLogo(TENANT_G, other, adminG); // take `image` off the brand
+    expect((await withdraw(TENANT_G, id, 'Wrong artwork again', adminG)).status).toBe(200);
+    const key = (await db.prepare('SELECT r2_key FROM tenant_brand_logos WHERE id = ?').bind(id).first<{ r2_key: string }>())!.r2_key;
+    // As if the first delete had failed.
+    await env.FILES.put(key, image);
+    expect((await fetchLogo(tokenOf(url))).status).toBe(404);
+    expect((await withdraw(TENANT_G, id, 'Finish it', adminG)).status).toBe(200);
+    expect(await env.FILES.head(key)).toBeNull();
+  });
+
+  it('a delete that lands just after a restore has written the image is put right by the restore', async () => {
+    // The row is withdrawn and the object gone. Restore it through a bucket in
+    // which a late delete arrives immediately after the first write.
+    const key = (await db.prepare('SELECT r2_key FROM tenant_brand_logos WHERE id = ?').bind(id).first<{ r2_key: string }>())!.r2_key;
+    let late = false;
+    const bucket = {
+      put: async (k: string, v: Uint8Array, o: unknown) => {
+        const r = await env.FILES.put(k, v, o as never);
+        if (!late) {
+          late = true;
+          await env.FILES.delete(k);
+        }
+        return r;
+      },
+      head: (k: string) => env.FILES.head(k),
+      get: (k: string) => env.FILES.get(k),
+      delete: (k: string) => env.FILES.delete(k),
+    } as unknown as R2Bucket;
+    const { storeBrandLogo } = await import('../../functions/lib/tenant-brand');
+    const brand = await storeBrandLogo({ DB: db, FILES: bucket }, TENANT_G, image, { userId: adminG.id, ip: null });
+    expect(brand!.logo!.url).toBe(url);
+    expect(late).toBe(true);
+    expect(await env.FILES.head(key)).not.toBeNull();
+    expect((await fetchLogo(tokenOf(url))).status).toBe(200);
+  });
+});
+
+describe('a joiner inside a name is accepted by the API; one out of place is not (C-117)', () => {
+  it('saves a Persian, an Indic and an emoji-sequence display name as typed, and refuses a stray joiner by name', async () => {
+    const names = [`شرکت نمونه${cp(0x200c)}ها`, `श${cp(0x094d)}${cp(0x200d)}री डेयरी`, `Field ${cp(0x1f469)}${cp(0x200d)}${cp(0x1f33e)} Dairy`];
+    for (const name of names) {
+      const res = await putBrand(TENANT_D, { display_name: name }, adminD);
+      expect(res.status, name).toBe(200);
+      expect((await body<TenantBrandResponse>(res)).display_name).toBe(name);
+      expect((await loadPublicBrand(db, TENANT_D, 'alert'))!.display_name).toBe(name);
+      expect(await loadOutwardName(db, TENANT_D, 'x')).toBe(name);
+    }
+    for (const [bad, kind] of [
+      [`Delta${cp(0x200d)}`, 'a zero-width joiner that is not between two letters (U+200D)'],
+      [`De lta ${cp(0x200c)}Co`, 'a zero-width joiner that is not between two letters (U+200C)'],
+      [`${cp(0x202e)}atleD`, 'a text-direction control character (U+202E)'],
+      [`Del${cp(0x200b)}ta`, 'an invisible character (U+200B)'],
+    ] as const) {
+      const res = await putBrand(TENANT_D, { display_name: bad }, adminD);
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      if (kind) expect((await body<{ error: string }>(res)).error).toBe(`Display name contains ${kind}, which is not allowed here`);
+    }
+    expect((await brandRow(TENANT_D))!.display_name).toBe(names[2]);
+    await deleteBrand(TENANT_D, adminD);
   });
 });
