@@ -2413,7 +2413,9 @@ paths:
         - Text is one line, stored as typed and escaped wherever it is drawn:
           display name 80 characters, support text 200, phone 40. Invisible
           characters and characters that change the direction of text are
-          refused; a display name needs at least one letter or digit.
+          refused, and the error names the kind and code point; U+200C /
+          U+200D are accepted between two letters, marks, digits or emoji. A
+          display name needs at least one letter or digit.
         - `support_overrides` is keyed by surface: `supplier_request`,
           `document_export`, `order_send`, `alert`, `records_form`,
           `records_update_request`, `records_approval`, `file_drop`. An unknown

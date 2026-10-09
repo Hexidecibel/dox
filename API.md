@@ -668,7 +668,10 @@ curl -X PUT http://localhost:8788/api/tenants/TENANT_ID/brand \
   changes nothing writes nothing, and clearing the last field returns the organization to
   unbranded -- an empty brand is no brand.
 - **Plain text only.** Invisible characters and characters that change the direction of text are
-  refused in every field, and a display name needs at least one letter or digit.
+  refused in every field (the 400 names the kind of character and its code point), and a display
+  name needs at least one letter or digit. The zero-width joiners U+200C / U+200D are accepted
+  between two letters, marks, digits or emoji, which is how Persian, Indic and emoji-sequence
+  names are written; anywhere else they are refused too.
 - **A colour is `#RRGGBB` and nothing else** (400 otherwise, never coerced). It paints the header
   band, the buttons and the accent rule; the text on them is black or white, whichever is
   readable, and body text is never coloured. A primary colour too pale to read on white is still
