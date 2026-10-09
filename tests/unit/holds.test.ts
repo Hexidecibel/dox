@@ -385,6 +385,18 @@ describe('which files a hold stops: a file is what leaves (C-084)', () => {
     expect(fileCarriesLot(page('q1', [1]), page('q1', null))).toBe(true);
   });
 
+  it('a certificate REISSUED since: the file a hold was placed under is found by its versions (C-085)', () => {
+    const reissued = { queue_id: 'q2', queue_ids: ['q1', 'q2'], page_scoped: true, pages: [1] };
+    // A neighbour cut from the reissue, on the same page: carried by the page rule.
+    expect(fileCarriesLot(page('q2', [1]), reissued)).toBe(true);
+    expect(fileCarriesLot(page('q2', [2]), reissued)).toBe(false);
+    // A file still cut from the FIRST issue printed this lot as it stood then;
+    // which page is no longer recorded, so it is carried.
+    expect(fileCarriesLot(page('q1', [2]), reissued)).toBe(true);
+    // And a file from an unrelated queue item is not.
+    expect(fileCarriesLot(page('q3', [1]), reissued)).toBe(false);
+  });
+
   it('a different certificate, or a document not cut from a queue item, carries nothing', () => {
     expect(fileCarriesLot(page('q1', [1]), page('q2', [1]))).toBe(false);
     expect(fileCarriesLot(page(null, [1]), page('q1', [1]))).toBe(false);
@@ -395,16 +407,28 @@ describe('which files a hold stops: a file is what leaves (C-084)', () => {
   it('reads what a document row records about its file', () => {
     expect(filePagesOf({ origin_queue_id: 'q1', external_ref: 'queue-zzz-1', page_scoped: 1, scoped_pages: '[2,3]', source_pages: '[9]' })).toEqual({
       queue_id: 'q1',
+      queue_ids: ['q1'],
       page_scoped: true,
       pages: [2, 3],
     });
     // No origin column: the queue id inside external_ref. No scoped pages: the source pages.
     expect(filePagesOf({ origin_queue_id: null, external_ref: 'queue-abc123-5501', page_scoped: null, source_pages: '[1]' })).toEqual({
       queue_id: 'abc123',
+      queue_ids: ['abc123'],
       page_scoped: false,
       pages: [1],
     });
-    expect(filePagesOf({ external_ref: 'manual-upload', scoped_pages: 'not json' })).toEqual({ queue_id: null, page_scoped: false, pages: null });
+    expect(filePagesOf({ external_ref: 'manual-upload', scoped_pages: 'not json' })).toEqual({ queue_id: null, queue_ids: [], page_scoped: false, pages: null });
+
+    // THE FILE IS THE CURRENT VERSION (C-085). A certificate reissued through
+    // "Replace existing" keeps the origin of version 1; its file is the one
+    // version 2 was cut from.
+    expect(
+      filePagesOf({ current_version: 2, version_queue_id: 'q2', version_queue_ids: 'q1,q2', origin_queue_id: 'q1', external_ref: 'queue-q1-5501', page_scoped: 1, scoped_pages: '[1]' }),
+    ).toEqual({ queue_id: 'q2', queue_ids: ['q1', 'q2'], page_scoped: true, pages: [1] });
+    // A later version nothing recorded a queue item for was uploaded by hand:
+    // its file was cut from no queue item, whatever the document was born from.
+    expect(filePagesOf({ current_version: 2, version_queue_id: null, version_queue_ids: 'q1', origin_queue_id: 'q1' }).queue_id).toBeNull();
     expect(filePagesOf({ origin_queue_id: 'q1', scoped_pages: '[]', source_pages: '["x", 0, -1]' }).pages).toBeNull();
   });
 

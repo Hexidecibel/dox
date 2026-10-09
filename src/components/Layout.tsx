@@ -190,7 +190,8 @@ export function Layout() {
       api.holds
         .count({ tenant_id: selectedTenantId || undefined })
         .then((r) => {
-          if (!cancelled) setActiveHolds(r.count);
+          // A hold that should have been placed and was not needs somebody too.
+          if (!cancelled) setActiveHolds(r.count + (r.failures ?? 0));
         })
         .catch(() => {
           if (!cancelled) setActiveHolds(0);

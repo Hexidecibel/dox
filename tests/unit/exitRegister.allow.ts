@@ -62,6 +62,8 @@ export const SHARING_RULE_CHECKS = [
   'apiKeyFileRefusal',
   'judgeDocumentsForExit',
   'judgeSharedFile',
+  // Several files judged off one read (0139): the per-part check of an order send.
+  'judgeSharedFiles',
   'loadExportDocuments',
   'loadExportLinkDocuments',
   'loadExportLinkSet',
@@ -141,8 +143,9 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
     path: 'functions/lib/order-send.ts',
     classification: 'exit',
     checked_by: 'judgeSharedFile',
-    signature: { bucket: 2, gets: 18, readers: 1, checks: 4 },
+    signature: { bucket: 2, gets: 19, readers: 1, checks: 3 },
     reason:
+      'CHECKS 4 -> 3, AND NO READ LOST ITS CHECK (0139 review): the plan asks loadExportDocuments and judgeSharedFile as before; the per-file check before the bytes are read is now ONE judgeSharedFiles call per part (every file of the part judged off one read) where it was judgeSharedFile per file; and the fourth, judgeDocumentsForExit in markDeliveredIfSent, is gone because "delivered" no longer asks the live rule at all -- it reads which documents actually left (C-090). The one new `.get(` is the Map lookup of a file\'s judgement by its id. ' +
       'An order\'s attachments, first send and resend. The plan judges each line (`order_send`), and runParts judges every stored file again immediately before its bytes are read. ' +
       'Document lines (0138) added seven `.get(` calls and NO read: all seven are Map lookups in the plan (the per-line outcome, the packed file by key, the entry by key, the gate\'s row and refusal by document id). ' +
       'A document line\'s file is never read here unless it is a certificate of analysis, which travels the same attachment path as a COA pick; every other document leaves on a link minted from ids that loadExportDocuments returned for this exit and this actor, and storedFileRefusal judges a link file exactly as it judges an attachment before the link is minted. `readers` and `checks` did not move. ' +

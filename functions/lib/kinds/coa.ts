@@ -386,6 +386,34 @@ async function auditRenewalDecision(
 }
 
 /**
+ * Record WHICH REVIEW QUEUE ITEM WROTE A VERSION (migration 0139, C-085).
+ *
+ * `documents.origin_queue_id` names the queue item a document was born from
+ * and never moves. A version written later by "Replace existing" is cut from
+ * a DIFFERENT file, and every check that asks what a file prints -- the whole
+ * original of a multi-lot certificate, two lots on one page -- has to know
+ * which file that is. So every version an approval writes is stamped here.
+ *
+ * NOT best-effort: a version with no source reads as "uploaded by hand", and a
+ * reissued certificate read that way sent a held lot out. A failure fails the
+ * approval that was writing the version.
+ */
+async function stampVersionSource(
+  db: D1Database,
+  documentId: string,
+  versionNumber: number,
+  queueItemId: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE document_versions SET source_queue_id = ?
+        WHERE document_id = ? AND version_number = ? AND source_queue_id IS NULL`
+    )
+    .bind(queueItemId, documentId, versionNumber)
+    .run();
+}
+
+/**
  * "Replace existing" (migration 0132): turn an approval into a NEW VERSION of
  * a document we already hold instead of a new document.
  *
@@ -482,6 +510,7 @@ async function writeReplacementVersion(
       args.searchText
     )
     .run();
+  await stampVersionSource(db, existing.id, versionNumber, item.id);
 
   const renewal = args.renewal;
   const answered = renewal ? 1 : 0;
@@ -536,8 +565,8 @@ async function writeReplacementVersion(
       userId: args.userId,
       tenantId: item.tenant_id,
       documentId: existing.id,
-      from: ruleBefore.rule,
-      to: ruleAfter.rule,
+      from: ruleBefore.own_rule,
+      to: ruleAfter.own_rule,
       cause: 'type_change',
       via: 'queue_replace',
       previousTypeId: ruleBefore.document_type_id,
@@ -762,6 +791,7 @@ export async function produceCoa(
       item.extracted_text
     )
     .run();
+  await stampVersionSource(db, docId, 1, item.id);
   }
 
   // Link product if a product name is available. Fall back through the approved
@@ -1088,6 +1118,7 @@ export async function produceMultiProductCoa(
     )
       .bind(versionId, docId, item.file_name, item.file_size, item.mime_type, r2Key, checksum, userId, item.extracted_text, scoped ? scoped.text : null)
       .run();
+    await stampVersionSource(db, docId, 1, item.id);
 
     // Link product via the shared resolver (lookup/create + supplier_id
     // backfill + product_suppliers provenance link).
@@ -1617,6 +1648,7 @@ export async function produceCoaRecords(
           scoped ? scoped.text : null
         )
         .run();
+      await stampVersionSource(db, docId, 1, item.id);
       }
     }
 

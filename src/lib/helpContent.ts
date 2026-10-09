@@ -1085,7 +1085,8 @@ const holds: ModuleHelpExpanded = {
       {
         heading: 'What a hold is on',
         body:
-          "A hold is on one lot row of a certificate, or on the whole certificate. Choose when you place it. " +
+          "A hold is on one lot, or on one whole certificate. Choose when you place it. " +
+          "A hold on a lot covers every certificate of that lot: a second scan, a duplicate you kept, a corrected certificate that arrives later. Each of them says it is held and which certificate the hold was placed from, and QA is told when a new certificate arrives for a held lot. One release frees them all. A hold on a whole certificate stays on that one certificate. A different sublot is a different lot. " +
           "A file is what leaves, so a hold on one lot stops every file that prints that lot. When a certificate covers several lots and was filed as one page per lot, the other lots' own pages still go; the whole original, which prints every lot, stays in until the hold is released, and the order says so. " +
           "When two lots share a page, such as a one-page certificate with a row for each lot, the other lot's file shows the held lot's results too, so it is stopped as well. Its page says which lot is on hold and links to that certificate, where the hold is released.",
       },
@@ -1101,6 +1102,8 @@ const holds: ModuleHelpExpanded = {
         body:
           "Two things place a hold when a certificate is approved. A result that is out of spec against a limit marked Critical. And a presence test on a zero-tolerance analyte, such as Salmonella, that was run on a smaller sample than the limit requires: the result is not judged, and the lot holds until QA settles it with the supplier's lab. " +
           "Nothing else places one. A Major or Minor result, a result the portal could not check, and an MPN result against a CFU limit all notify as before and hold nothing. " +
+          "When one file is approved as several product documents, each result is held on the product it belongs to; a result that cannot be tied to one product is recorded on every document from that file and holds each. " +
+          "If a hold should have been placed and could not be written, the certificate is not held: QA is emailed, and the certificate's page and this page say so with a Retry button. " +
           "Each judged result places a hold once. If QA releases it, approving the same file again does not put it back; a new version of the certificate that still fails is held again. Certificates approved before holds existed are not held retroactively.",
       },
       {

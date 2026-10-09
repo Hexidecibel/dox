@@ -81,10 +81,48 @@
 --     else aborts. There is deliberately no DELETE trigger: a tenant delete
 --     cascades, and the application has no delete path to guard.
 --
--- ADDITIVE ONLY. One new table. No existing row changes, nothing is rebuilt,
--- and no existing document is put on hold by this migration:
--- bin/propose-spec-holds lists the documents whose stored approval-time checks
--- would have placed one, and places them only when told to.
+-- document_versions.source_queue_id -- THE REVIEW QUEUE ITEM THAT WROTE THIS
+--     VERSION. A bare pointer, nullable, no foreign key and no default.
+--     WHY: "which documents does this file print" was answered from
+--     `documents.origin_queue_id` / `external_ref`, which name the queue item a
+--     document was BORN from. A certificate reissued through "Replace existing"
+--     keeps both, so its version 2 -- written from a different queue item, cut
+--     from a different file -- was invisible to every check that asks what a
+--     whole original, or a shared page, carries: a held (or locked) lot went
+--     out on the reissued original. The version is where the fact belongs.
+--     Until now it lived only in the `document.version_replaced` audit row.
+--     BACKFILLED WHERE PROVABLE, nothing invented: version 1 from the
+--     document's `origin_queue_id`, else the queue id inside `external_ref`;
+--     a later version from the `document.version_replaced` audit row that
+--     names exactly that version. A version uploaded by hand, or ingested,
+--     stays NULL: no queue item wrote it. NOT `source_packet_queue_id` (0126),
+--     which names the PACKET a part was split out of, a different file.
+--
+-- document_hold_failures -- A HOLD THAT SHOULD HAVE BEEN PLACED AND WAS NOT.
+--     An automatic hold is placed after an approval has already happened, so a
+--     failure to place it cannot undo the approval; it must not be quiet
+--     either. One row per (document, version) whose automatic holds could not
+--     be written, with the proposals as they were computed (`proposals`, JSON:
+--     source, source_key, reason, detail), so a retry places exactly those,
+--     idempotently, against `idx_document_holds_auto_once`. `resolved_at` /
+--     `resolved_by` are stamped by the retry; an unresolved row is shown on
+--     the document page and the Holds page. `qa_notified_at`: when the QA
+--     route (or, with nobody on it, the administrators) was told.
+--     If the database itself is what failed, this row cannot be written
+--     either; the mail still goes, and bin/propose-spec-holds recovers the
+--     hold from the register rows.
+--
+-- ADDITIVE ONLY. Two new tables and one nullable column with a provable
+-- backfill. Nothing is rebuilt, and no existing document is put on hold by
+-- this migration: bin/propose-spec-holds lists the documents whose stored
+-- approval-time checks would have placed one, and places them only when told
+-- to.
+--
+-- NOT RE-RUNNABLE AS A WHOLE (the ALTER). This file was amended once, before
+-- it was applied anywhere but local dev databases (the column and the failures
+-- table, after an independent review); a local database that ran the first cut
+-- takes the amended file with `./bin/migrate --reapply --only <file>`: every
+-- CREATE is IF NOT EXISTS, and the column did not exist in the first cut.
 
 CREATE TABLE IF NOT EXISTS document_holds (
   id TEXT PRIMARY KEY,
@@ -148,3 +186,51 @@ WHEN NEW.id IS NOT OLD.id
 BEGIN
   SELECT RAISE(ABORT, 'document_holds is append-only: a hold is released, never edited');
 END;
+
+ALTER TABLE document_versions ADD COLUMN source_queue_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_document_versions_source_queue ON document_versions(source_queue_id);
+
+UPDATE document_versions
+   SET source_queue_id = (
+         SELECT COALESCE(
+                  d.origin_queue_id,
+                  CASE
+                    WHEN d.external_ref LIKE 'queue-%' AND instr(substr(d.external_ref, 7), '-') > 0
+                      THEN substr(d.external_ref, 7, instr(substr(d.external_ref, 7), '-') - 1)
+                    WHEN d.external_ref LIKE 'queue-%' THEN substr(d.external_ref, 7)
+                  END)
+           FROM documents d
+          WHERE d.id = document_versions.document_id)
+ WHERE version_number = 1 AND source_queue_id IS NULL;
+
+UPDATE document_versions
+   SET source_queue_id = (
+         SELECT json_extract(a.details, '$.queue_item_id')
+           FROM audit_log a
+          WHERE a.action = 'document.version_replaced'
+            AND a.resource_id = document_versions.document_id
+            AND json_valid(a.details)
+            AND json_extract(a.details, '$.new_version') = document_versions.version_number
+          ORDER BY a.id DESC
+          LIMIT 1)
+ WHERE version_number > 1 AND source_queue_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS document_hold_failures (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  document_id TEXT NOT NULL REFERENCES documents(id),
+  document_version INTEGER NOT NULL,
+  proposals TEXT NOT NULL CHECK (json_valid(proposals)),
+  error TEXT,
+  queue_item_id TEXT,
+  approved_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  qa_notified_at TEXT,
+  resolved_at TEXT,
+  resolved_by TEXT,
+  resolution TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_hold_failures_open ON document_hold_failures(tenant_id, resolved_at);
+CREATE INDEX IF NOT EXISTS idx_document_hold_failures_document ON document_hold_failures(document_id, resolved_at);

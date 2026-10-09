@@ -33,6 +33,7 @@ import {
   automaticHoldsForResults,
   cleanHoldReason,
   holdLotLabel,
+  holdSourceKey,
   isHoldSource,
   type AutomaticHoldProposal,
   type HoldJudgedResult,
@@ -42,6 +43,8 @@ import { registerIdentity } from '../../shared/specSnapshot';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type {
   ApiDocumentHold,
+  ApiHoldFailure,
+  DocumentHoldBrief,
   DocumentHoldLot,
   DocumentHoldState,
   DocumentHoldsResponse,
@@ -173,12 +176,16 @@ async function loadHold(db: D1Database, tenantId: string, holdId: string): Promi
     .first<HoldRow>();
 }
 
-/** The certificate's lot rows, each with the active hold on it, if any. */
+/**
+ * The certificate's lot rows, each with the active hold on it, if any. A lot
+ * hold is on the lot ROW (C-086), so the hold shown may have been placed from
+ * another certificate of the same lot.
+ */
 async function loadDocumentLots(
   db: D1Database,
   tenantId: string,
   documentId: string,
-  active: ApiDocumentHold[],
+  active: DocumentHoldBrief[],
 ): Promise<DocumentHoldLot[]> {
   const res = await db
     .prepare(
@@ -198,7 +205,7 @@ async function loadDocumentLots(
       sub_lot_code: l.sub_lot_code || null,
       lot_label: holdLotLabel(l) ?? l.lot_number,
       hold: hold
-        ? { id: hold.id, document_id: hold.document_id, lot_id: hold.lot_id, lot_label: hold.lot_label, reason: hold.reason, source: hold.source, placed_at: hold.placed_at }
+        ? { id: hold.id, document_id: hold.document_id, document_title: hold.document_title ?? null, lot_id: hold.lot_id, lot_label: hold.lot_label, reason: hold.reason, source: hold.source, placed_at: hold.placed_at }
         : null,
     };
   });
@@ -246,7 +253,8 @@ export async function describeDocumentHolds(
     active,
     history,
     also_held_by: effective.filter((h) => h.document_id !== documentId),
-    lots: await loadDocumentLots(db, tenantId, documentId, active),
+    failures: await listOpenHoldFailures(db, tenantId, { documentId }),
+    lots: await loadDocumentLots(db, tenantId, documentId, effective),
     can_place: canPlaceHold(user, tenantId),
     can_release: await canReleaseHold(db, data, user, tenantId),
   };
@@ -375,6 +383,10 @@ interface NoticeContext {
   placedByName: string | null;
   actorUserId: string | null;
   appUrl?: string;
+  /** What is being said. Default `placed`. See `buildHoldPlacedEmail`. */
+  kind?: 'placed' | 'arrived' | 'failed';
+  /** The `document_hold_failures` row to stamp, for `failed`. */
+  failureId?: string | null;
 }
 
 /**
@@ -389,8 +401,15 @@ async function notifyQaOfHolds(
   db: D1Database,
   apiKey: string | undefined,
   ctx: NoticeContext,
-  holds: Array<{ id: string; lot_label: string | null; reason: string; source: HoldSource }>,
+  holds: Array<{ id: string; lot_label: string | null; reason: string; source: HoldSource; from_title?: string | null }>,
 ): Promise<{ via: string; notified: string[] }> {
+  const kind = ctx.kind ?? 'placed';
+  const gapAction =
+    kind === 'failed'
+      ? 'document.hold_place_failed.routing_gap'
+      : kind === 'arrived'
+        ? 'document.held_lot_certificate_arrived.routing_gap'
+        : 'document.hold_placed.routing_gap';
   const result = { via: 'not_sent', notified: [] as string[] };
   if (holds.length === 0) return result;
   try {
@@ -416,8 +435,17 @@ async function notifyQaOfHolds(
       documentTitle: ctx.documentTitle,
       supplierName: supplier?.name ?? null,
       placedByName: ctx.placedByName,
-      holds: holds.map((h) => ({ lot_label: h.lot_label, reason: h.reason, source_label: HOLD_SOURCE_LABELS[h.source] })),
+      holds: holds.map((h) => ({ lot_label: h.lot_label, reason: h.reason, source_label: HOLD_SOURCE_LABELS[h.source], from_title: h.from_title ?? null })),
       appUrl: ctx.appUrl,
+      kind,
+    };
+    const stampFailure = async () => {
+      if (kind === 'failed' && ctx.failureId) {
+        await db
+          .prepare(`UPDATE document_hold_failures SET qa_notified_at = datetime('now') WHERE id = ? AND qa_notified_at IS NULL`)
+          .bind(ctx.failureId)
+          .run();
+      }
     };
 
     let to: string[];
@@ -427,7 +455,7 @@ async function notifyQaOfHolds(
         db,
         ctx.actorUserId,
         ctx.tenantId,
-        'document.hold_placed.routing_gap',
+        gapAction,
         'document',
         ctx.documentId,
         JSON.stringify({ owner_label: QA_RELEASE_OWNER_LABEL, hold_ids: holds.map((h) => h.id) }),
@@ -439,6 +467,8 @@ async function notifyQaOfHolds(
       to = admins.map((a) => a.email);
       const { subject, html } = buildHoldPlacedEmail({ ...emailArgs, routingGap: true });
       if (!(await sendEmail(apiKey, { to, subject, html }))) return result;
+      // A failed hold is not a routine notice: whoever heard, somebody did.
+      await stampFailure();
     } else {
       result.via = routing.via;
       if (!apiKey) return result;
@@ -446,14 +476,19 @@ async function notifyQaOfHolds(
       const { subject, html } = buildHoldPlacedEmail(emailArgs);
       if (!(await sendEmail(apiKey, { to, subject, html }))) return result;
       // Stamped only when the QA route itself was mailed: a routing-gap notice
-      // to administrators is not "QA was told".
-      await db.batch(
-        holds.map((h) =>
-          db
-            .prepare(`UPDATE document_holds SET qa_notified_at = datetime('now') WHERE id = ? AND qa_notified_at IS NULL`)
-            .bind(h.id),
-        ),
-      );
+      // to administrators is not "QA was told". Only for a hold that was just
+      // PLACED: an arrival notice is about somebody else's hold, and a failed
+      // one has no hold row.
+      if (kind === 'placed') {
+        await db.batch(
+          holds.map((h) =>
+            db
+              .prepare(`UPDATE document_holds SET qa_notified_at = datetime('now') WHERE id = ? AND qa_notified_at IS NULL`)
+              .bind(h.id),
+          ),
+        );
+      }
+      await stampFailure();
     }
     result.notified = to;
     return result;
@@ -506,6 +541,24 @@ export async function placeHold(db: D1Database, args: PlaceHoldArgs): Promise<Ap
       .first<{ id: string }>();
     if (!lot) throw new BadRequestError('That lot is not a lot row of this certificate.');
     lotId = lot.id;
+    // A LOT HOLD IS ON THE LOT ROW (C-086): it covers every certificate of
+    // that lot, so the lot is held once, whichever certificate it was placed
+    // from. A second person's hold on it is refused, not stacked: releasing is
+    // one act on one hold.
+    const already = await db
+      .prepare(
+        `SELECT h.id, d.title FROM document_holds h
+           JOIN documents d ON d.id = h.document_id AND d.tenant_id = h.tenant_id
+          WHERE h.tenant_id = ? AND h.lot_id = ? AND h.source = 'person' AND h.released_at IS NULL
+          LIMIT 1`,
+      )
+      .bind(tenantId, lotId)
+      .first<{ id: string; title: string | null }>();
+    if (already) {
+      throw new ConflictError(
+        `That lot is already on hold, from ${already.title || 'another certificate'}. The hold covers every certificate of the lot. Release the hold that is there before placing another.`,
+      );
+    }
   }
 
   const id = generateId();
@@ -783,14 +836,34 @@ export async function placeAutomaticHolds(
   apiKey: string | undefined,
   ctx: AutomaticHoldContext,
   verdicts: SpecVerdict[],
-): Promise<{ placed: number }> {
+  opts: { unattributedNote?: string | null; unattributedVerdicts?: readonly SpecVerdict[] } = {},
+): Promise<{ placed: number; failed: boolean }> {
+  // PURE, and outside the try: whatever goes wrong below, what SHOULD have
+  // been placed is known, and can be written down and mailed.
+  let proposals: AutomaticHoldProposal[] = [];
   try {
-    const proposals = automaticHoldsForResults(verdicts.map(holdResultFromVerdict), {
+    proposals = automaticHoldsForResults(verdicts.map(holdResultFromVerdict), {
       origin: 'approval',
       version: ctx.versionNumber,
     });
-    if (proposals.length === 0) return { placed: 0 };
-
+  } catch (err) {
+    console.error('[holds] deciding automatic holds failed:', err instanceof Error ? err.message : String(err));
+    return { placed: 0, failed: true };
+  }
+  if (proposals.length === 0) return { placed: 0, failed: false };
+  if (opts.unattributedNote) {
+    // The result could not be attributed to one of the documents approved from
+    // the file, so each of them is held (C-089). The hold says so.
+    const keys = opts.unattributedVerdicts
+      ? new Set(opts.unattributedVerdicts.map((v) => holdSourceKey(ctx.versionNumber, v.source, registerIdentity(v).result_key)))
+      : null;
+    proposals = proposals.map((p) =>
+      keys && !keys.has(p.source_key)
+        ? p
+        : { ...p, detail: { ...p.detail, location: [p.detail.location, opts.unattributedNote].filter(Boolean).join(' ') } },
+    );
+  }
+  try {
     // The register rows these verdicts were just written as, by identity.
     const specCheckIds = new Map<string, string>();
     try {
@@ -809,7 +882,7 @@ export async function placeAutomaticHolds(
     }
 
     const placed = await writeAutomaticHolds(db, ctx, proposals, specCheckIds);
-    if (placed.length === 0) return { placed: 0 };
+    if (placed.length === 0) return { placed: 0, failed: false };
     await notifyQaOfHolds(
       db,
       apiKey,
@@ -825,24 +898,309 @@ export async function placeAutomaticHolds(
       },
       placed,
     );
-    return { placed: placed.length };
+    return { placed: placed.length, failed: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[holds] placing automatic holds failed:', message);
-    try {
+    // NOT QUIET (C-087): written down, shown, and mailed.
+    await recordHoldFailure(db, apiKey, ctx, proposals, message);
+    return { placed: 0, failed: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A certificate that arrives for a lot already on hold (C-086)
+// ---------------------------------------------------------------------------
+
+/**
+ * A hold on a lot row covers every certificate of that lot, including one
+ * approved AFTER the hold was placed: it is held from the moment it is linked
+ * to the lot row (`loadEffectiveHolds`), with nothing to write. What this does
+ * is TELL QA, once per certificate and hold, that a new certificate arrived
+ * for a lot they are holding -- because that is usually the corrected
+ * certificate they are waiting for.
+ *
+ * "Once" is the audit row `document.held_lot_certificate_arrived`, checked
+ * before anything is sent. Never throws: the approval stands, and the
+ * certificate is held whether or not anybody could be told.
+ */
+export async function noticeCertificatesForHeldLots(
+  db: D1Database,
+  apiKey: string | undefined,
+  ctx: { tenantId: string; actorUserId: string | null; appUrl?: string },
+  documentIds: string[],
+): Promise<{ notified: number }> {
+  let notified = 0;
+  try {
+    const ids = [...new Set(documentIds.filter(Boolean))];
+    if (ids.length === 0) return { notified };
+    const effective = await loadEffectiveHolds(db, ctx.tenantId, ids);
+    for (const id of ids) {
+      // Only a hold that reaches this certificate THROUGH ITS LOT ROW, placed
+      // from another certificate. One on a neighbour's page is not an arrival.
+      const candidates = (effective.get(id) ?? []).filter((h) => h.document_id !== id && h.lot_id);
+      if (candidates.length === 0) continue;
+      const lots = await db
+        .prepare('SELECT lot_id FROM document_lots WHERE document_id = ?')
+        .bind(id)
+        .all<{ lot_id: string }>();
+      const own = new Set((lots.results ?? []).map((l) => l.lot_id));
+      const told = await db
+        .prepare(
+          `SELECT details FROM audit_log
+            WHERE tenant_id = ? AND action = 'document.held_lot_certificate_arrived' AND resource_id = ?`,
+        )
+        .bind(ctx.tenantId, id)
+        .all<{ details: string | null }>();
+      const toldIds = new Set<string>();
+      for (const r of told.results ?? []) {
+        try {
+          for (const h of (JSON.parse(r.details ?? '{}').hold_ids ?? []) as string[]) toldIds.add(h);
+        } catch {
+          // An unreadable row told nobody anything.
+        }
+      }
+      const fresh = candidates.filter((h) => own.has(h.lot_id as string) && !toldIds.has(h.id));
+      if (fresh.length === 0) continue;
+      const doc = await loadDocument(db, ctx.tenantId, id);
+      if (!doc) continue;
       await logAudit(
         db,
-        ctx.approvedBy,
+        ctx.actorUserId,
         ctx.tenantId,
-        'document.hold_place_failed',
+        'document.held_lot_certificate_arrived',
         'document',
-        ctx.documentId,
-        JSON.stringify({ via: 'approval', queue_item_id: ctx.queueItemId, error: message }),
+        id,
+        JSON.stringify({
+          hold_ids: fresh.map((h) => h.id),
+          lots: fresh.map((h) => ({ lot_id: h.lot_id, lot_label: h.lot_label, held_from_document_id: h.document_id })),
+          note: 'Approved for a lot that is already on hold. Held from the moment it was linked to the lot.',
+        }),
         null,
       );
-    } catch {
-      // Nothing more can be done from here.
+      await notifyQaOfHolds(
+        db,
+        apiKey,
+        {
+          tenantId: ctx.tenantId,
+          documentId: id,
+          documentTitle: doc.title,
+          supplierId: doc.supplier_id,
+          documentTypeId: doc.document_type_id,
+          placedByName: null,
+          actorUserId: ctx.actorUserId,
+          appUrl: ctx.appUrl,
+          kind: 'arrived',
+        },
+        fresh.map((h) => ({ id: h.id, lot_label: h.lot_label, reason: h.reason, source: h.source, from_title: h.document_title ?? null })),
+      );
+      notified++;
     }
-    return { placed: 0 };
+  } catch (err) {
+    console.error('[holds] held-lot arrival notice failed:', err instanceof Error ? err.message : String(err));
   }
+  return { notified };
+}
+
+// ---------------------------------------------------------------------------
+// A hold that should have been placed and was not (C-087)
+// ---------------------------------------------------------------------------
+
+function parseProposals(raw: string | null): AutomaticHoldProposal[] {
+  try {
+    const v = JSON.parse(raw ?? '[]');
+    return Array.isArray(v) ? (v as AutomaticHoldProposal[]).filter((p) => p && isHoldSource(p.source) && typeof p.source_key === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Write down that an automatic hold could not be placed, and TELL SOMEBODY.
+ * The approval has happened and cannot be undone from here; what must not
+ * happen is that a certificate with a Critical failure sits unheld and nobody
+ * knows.
+ *
+ *   1. a `document_hold_failures` row carrying the proposals, so the document
+ *      page and the Holds page show it and Retry places exactly those holds;
+ *   2. a `document.hold_place_failed` audit row;
+ *   3. a mail to the QA route -- or, with nobody on it, to the administrators
+ *      (audited as a routing gap), like every other QA notice.
+ *
+ * Each step is tried on its own: if the database is what failed, the mail may
+ * be the only thing that gets through, and bin/propose-spec-holds still finds
+ * the certificate from its register rows.
+ */
+export async function recordHoldFailure(
+  db: D1Database,
+  apiKey: string | undefined,
+  ctx: AutomaticHoldContext,
+  proposals: AutomaticHoldProposal[],
+  error: string,
+): Promise<void> {
+  if (proposals.length === 0) return;
+  let failureId: string | null = generateId();
+  try {
+    await db
+      .prepare(
+        `INSERT INTO document_hold_failures
+           (id, tenant_id, document_id, document_version, proposals, error, queue_item_id, approved_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(failureId, ctx.tenantId, ctx.documentId, ctx.versionNumber, JSON.stringify(proposals), error.slice(0, 500), ctx.queueItemId, ctx.approvedBy)
+      .run();
+  } catch (err) {
+    failureId = null;
+    console.error('[holds] recording a failed hold failed:', err instanceof Error ? err.message : String(err));
+  }
+  try {
+    await logAudit(
+      db,
+      ctx.approvedBy,
+      ctx.tenantId,
+      'document.hold_place_failed',
+      'document',
+      ctx.documentId,
+      JSON.stringify({
+        via: 'approval',
+        failure_id: failureId,
+        queue_item_id: ctx.queueItemId,
+        document_version: ctx.versionNumber,
+        error,
+        holds_not_placed: proposals.map((p) => ({ source: p.source, source_key: p.source_key, reason: p.reason })),
+      }),
+      null,
+    );
+  } catch {
+    // The mail below is still attempted.
+  }
+  await notifyQaOfHolds(
+    db,
+    apiKey,
+    {
+      tenantId: ctx.tenantId,
+      documentId: ctx.documentId,
+      documentTitle: ctx.documentTitle,
+      supplierId: ctx.supplierId,
+      documentTypeId: ctx.documentTypeId,
+      placedByName: null,
+      actorUserId: ctx.approvedBy,
+      appUrl: ctx.appUrl,
+      kind: 'failed',
+      failureId,
+    },
+    proposals.map((p) => ({ id: p.source_key, lot_label: null, reason: p.reason, source: p.source })),
+  );
+}
+
+/** Holds that should exist and do not, newest first. */
+export async function listOpenHoldFailures(
+  db: D1Database,
+  tenantId: string,
+  filter: { documentId?: string } = {},
+): Promise<ApiHoldFailure[]> {
+  const res = await db
+    .prepare(
+      `SELECT f.id, f.document_id, f.document_version, f.proposals, f.error, f.created_at, d.title AS document_title
+         FROM document_hold_failures f
+         JOIN documents d ON d.id = f.document_id AND d.tenant_id = f.tenant_id
+        WHERE f.tenant_id = ? AND f.resolved_at IS NULL${filter.documentId ? ' AND f.document_id = ?' : ''}
+        ORDER BY f.created_at DESC, f.rowid DESC
+        LIMIT 100`,
+    )
+    .bind(...(filter.documentId ? [tenantId, filter.documentId] : [tenantId]))
+    .all<{ id: string; document_id: string; document_version: number; proposals: string; error: string | null; created_at: string; document_title: string | null }>();
+  return (res.results ?? []).map((r) => ({
+    id: r.id,
+    document_id: r.document_id,
+    document_title: r.document_title,
+    document_version: r.document_version,
+    created_at: r.created_at,
+    error: r.error,
+    holds: parseProposals(r.proposals).map((p) => ({ source: p.source, reason: p.reason })),
+  }));
+}
+
+export async function countOpenHoldFailures(db: D1Database, tenantId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS n FROM document_hold_failures WHERE tenant_id = ? AND resolved_at IS NULL')
+    .bind(tenantId)
+    .first<{ n: number }>();
+  return Number(row?.n) || 0;
+}
+
+/**
+ * RETRY: place the holds a failed approval should have placed. IDEMPOTENT --
+ * the same `INSERT OR IGNORE` against `idx_document_holds_auto_once` the
+ * approval uses, so a hold that was placed after all (by an earlier retry, or
+ * by bin/propose-spec-holds) is not placed twice.
+ *
+ * Anybody who may PLACE a hold may retry: it only tightens. If the write fails
+ * again the failure stays open and the error is the caller's to read.
+ */
+export async function retryHoldFailure(
+  db: D1Database,
+  apiKey: string | undefined,
+  args: { tenantId: string; failureId: string; user: Actor; clientIp: string | null; appUrl?: string },
+): Promise<{ placed: number; already_held: number }> {
+  const row = await db
+    .prepare(
+      `SELECT f.*, d.title AS document_title, d.supplier_id, d.document_type_id, d.status
+         FROM document_hold_failures f
+         JOIN documents d ON d.id = f.document_id AND d.tenant_id = f.tenant_id
+        WHERE f.id = ? AND f.tenant_id = ?`,
+    )
+    .bind(args.failureId, args.tenantId)
+    .first<{
+      id: string; document_id: string; document_version: number; proposals: string; queue_item_id: string | null;
+      approved_by: string | null; resolved_at: string | null; document_title: string; supplier_id: string | null; document_type_id: string | null;
+    }>();
+  if (!row) throw new NotFoundError('Not found');
+  if (!canPlaceHold(args.user, args.tenantId)) throw new ForbiddenError('A read-only account cannot place a hold.');
+  if (row.resolved_at) throw new ConflictError('This has already been retried.');
+
+  const proposals = parseProposals(row.proposals);
+  const ctx = {
+    tenantId: args.tenantId,
+    documentId: row.document_id,
+    versionNumber: Number(row.document_version) || 1,
+    queueItemId: row.queue_item_id,
+    approvedBy: row.approved_by,
+  };
+  const placed = await writeAutomaticHolds(db, ctx, proposals);
+  const res = await db
+    .prepare(
+      `UPDATE document_hold_failures
+          SET resolved_at = datetime('now'), resolved_by = ?, resolution = ?
+        WHERE id = ? AND tenant_id = ? AND resolved_at IS NULL`,
+    )
+    .bind(args.user.id, placed.length > 0 ? 'placed' : 'already_held', row.id, args.tenantId)
+    .run();
+  if (!res.meta?.changes) throw new ConflictError('This has already been retried.');
+  await logAudit(
+    db,
+    args.user.id,
+    args.tenantId,
+    'document.hold_place_retried',
+    'document',
+    row.document_id,
+    JSON.stringify({ failure_id: row.id, placed: placed.map((p) => p.id), already_held: proposals.length - placed.length }),
+    args.clientIp,
+  );
+  await notifyQaOfHolds(
+    db,
+    apiKey,
+    {
+      tenantId: args.tenantId,
+      documentId: row.document_id,
+      documentTitle: row.document_title,
+      supplierId: row.supplier_id,
+      documentTypeId: row.document_type_id,
+      placedByName: null,
+      actorUserId: args.user.id,
+      appUrl: args.appUrl,
+    },
+    placed,
+  );
+  return { placed: placed.length, already_held: proposals.length - placed.length };
 }

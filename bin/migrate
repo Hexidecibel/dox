@@ -15,6 +15,16 @@
 #                                 # SURGICAL: apply exactly the named
 #                                 # migration(s), in the order given, then
 #                                 # stamp them. Nothing else runs.
+#   ./bin/migrate --reapply --only 0139_x.sql [--persist-to DIR]
+#                                 # LOCAL ONLY: run a named migration again
+#                                 # even though it is stamped. For a file that
+#                                 # was AMENDED after a local database ran its
+#                                 # first cut and before it was applied
+#                                 # anywhere else. The file must be safe to run
+#                                 # over its own first cut (IF NOT EXISTS, new
+#                                 # columns only); this flag checks nothing.
+#                                 # Refused with --remote: a migration applied
+#                                 # to production is never amended.
 #   ./bin/migrate --persist-to DIR [--only ...]
 #                                 # LOCAL only: use the local D1 state under
 #                                 # DIR (wrangler's --persist-to). A git
@@ -49,6 +59,7 @@ cd "$(dirname "$0")/.."
 DB="doc-upload-db"
 REMOTE_FLAG=""
 MARK_APPLIED=0
+REAPPLY=0
 ONLY=()
 PERSIST_FLAG=""
 
@@ -60,6 +71,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --mark-applied)
       MARK_APPLIED=1
+      ;;
+    --reapply)
+      REAPPLY=1
       ;;
     --only)
       shift
@@ -85,6 +99,15 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$REAPPLY" = "1" ] && [ -n "$REMOTE_FLAG" ]; then
+  echo "--reapply is for LOCAL D1 only: a migration applied to production is never amended" >&2
+  exit 2
+fi
+if [ "$REAPPLY" = "1" ] && [ "${#ONLY[@]}" -eq 0 ]; then
+  echo "--reapply needs --only <migration>" >&2
+  exit 2
+fi
 
 if [ -n "$REMOTE_FLAG" ] && [ -n "$PERSIST_FLAG" ]; then
   echo "--persist-to is for LOCAL D1 only" >&2
@@ -183,9 +206,12 @@ if [ "${#ONLY[@]}" -gt 0 ]; then
       echo "ERROR: no such migration: $path" >&2
       exit 1
     fi
-    if is_applied "$name"; then
+    if is_applied "$name" && [ "$REAPPLY" != "1" ]; then
       echo "  already applied, skipping: $name"
       continue
+    fi
+    if is_applied "$name"; then
+      echo "  already applied; --reapply given, running it again: $name"
     fi
     echo "Applying: $name"
     if ! d1_exec_file "$path"; then

@@ -10,7 +10,7 @@ vi.mock('../contexts/TenantContext', () => ({
   useTenant: () => ({ selectedTenantId: null }),
 }));
 vi.mock('../lib/api', () => {
-  const m = { list: vi.fn(), release: vi.fn() };
+  const m = { list: vi.fn(), release: vi.fn(), retryFailure: vi.fn() };
   return { api: { holds: m }, __mocks: m };
 });
 
@@ -19,7 +19,7 @@ import { Holds } from './Holds';
 import { HOLDS_CHANGED } from '../lib/holds';
 import type { ApiDocumentHold, HoldsListResponse } from '../../shared/types';
 
-const mocks = (apiModule as unknown as { __mocks: Record<'list' | 'release', ReturnType<typeof vi.fn>> }).__mocks;
+const mocks = (apiModule as unknown as { __mocks: Record<'list' | 'release' | 'retryFailure', ReturnType<typeof vi.fn>> }).__mocks;
 
 function hold(over: Partial<ApiDocumentHold> = {}): ApiDocumentHold {
   return {
@@ -53,6 +53,8 @@ const list = (over: Partial<HoldsListResponse> = {}): HoldsListResponse => ({
   total: 2,
   truncated: false,
   can_release: true,
+  failures: [],
+  can_place: true,
   ...over,
 });
 
@@ -66,6 +68,7 @@ const renderPage = () =>
 beforeEach(() => {
   mocks.list.mockReset();
   mocks.release.mockReset();
+  mocks.retryFailure.mockReset();
   mocks.list.mockResolvedValue(list());
   mocks.release.mockResolvedValue({ hold: hold({ active: false }) });
   window.localStorage.clear();
@@ -156,6 +159,42 @@ describe('Holds page', () => {
     await userEvent.click(screen.getByRole('combobox', { name: 'Placed by' }));
     await userEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: 'Zero-tolerance sample too small' }));
     await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith({ tenant_id: undefined, state: 'released', source: 'zero_tolerance' }));
+  });
+
+  it('a hold that should have been placed and was not is on top, with a retry (C-087)', async () => {
+    mocks.list.mockResolvedValue(
+      list({
+        failures: [{ id: 'f1', document_id: 'd7', document_title: 'Butter COA lot 88', document_version: 1, created_at: '2026-10-08 10:00:00', error: 'D1_ERROR', holds: [{ source: 'spec_critical', reason: 'Critical result out of spec: Coliform 40 CFU/g.' }] }],
+      }),
+    );
+    mocks.retryFailure.mockResolvedValue({ placed: 1, already_held: 0 });
+    const heard = vi.fn();
+    window.addEventListener(HOLDS_CHANGED, heard);
+    renderPage();
+    const box = await screen.findByTestId('holds-failures');
+    expect(box).toHaveTextContent('A hold should have been placed and was not.');
+    expect(box).toHaveTextContent('It is NOT on hold and can be sent until somebody retries.');
+    const row = within(box).getByTestId('holds-failure-row');
+    expect(within(row).getByRole('link', { name: 'Butter COA lot 88' })).toHaveAttribute('href', '/documents/d7');
+    expect(row).toHaveTextContent('Critical result out of spec: Coliform 40 CFU/g.');
+    await userEvent.click(within(row).getByTestId('holds-failure-retry'));
+    await waitFor(() => expect(mocks.retryFailure).toHaveBeenCalledWith('f1'));
+    expect(await screen.findByTestId('holds-notice')).toHaveTextContent('Butter COA lot 88 is now on hold.');
+    expect(heard).toHaveBeenCalled();
+    window.removeEventListener(HOLDS_CHANGED, heard);
+  });
+
+  it('with no failures there is no such notice, and a read-only account gets no retry', async () => {
+    const first = renderPage();
+    await screen.findAllByTestId('hold-row');
+    expect(screen.queryByTestId('holds-failures')).toBeNull();
+    first.unmount();
+    mocks.list.mockResolvedValue(
+      list({ can_place: false, failures: [{ id: 'f1', document_id: 'd7', document_title: 'Butter COA', document_version: 1, created_at: '', error: null, holds: [] }] }),
+    );
+    renderPage();
+    expect(await screen.findByTestId('holds-failures')).toBeInTheDocument();
+    expect(screen.queryByTestId('holds-failure-retry')).toBeNull();
   });
 
   it('nothing on hold is said plainly, and a cut-off list says so', async () => {

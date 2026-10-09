@@ -463,7 +463,7 @@ export async function cleanTables(db: D1Database): Promise<void> {
     'order_documents',
     // 0139 holds: FK documents, lots and users with no action, so they clear
     // ahead of all three.
-    'document_holds',
+    'document_hold_failures', 'document_holds',
     'order_items', 'orders', 'document_versions', 'document_products', 'documents',
     'requirements', 'claim_types',
     // 0098 type-level extraction guidance FKs document_types + tenants, so it

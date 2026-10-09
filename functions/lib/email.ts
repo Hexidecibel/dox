@@ -1167,22 +1167,63 @@ export function buildHoldPlacedEmail(params: {
   supplierName: string | null;
   /** Who placed it, or null when the portal placed it at approval. */
   placedByName: string | null;
-  holds: Array<{ lot_label: string | null; reason: string; source_label: string }>;
+  holds: Array<{ lot_label: string | null; reason: string; source_label: string; from_title?: string | null }>;
   appUrl?: string;
   routingGap?: boolean;
+  /**
+   * `placed` (the default): a hold was put on this certificate.
+   * `arrived`: a certificate was approved for a lot that is ALREADY on hold,
+   *            so it is held from the moment it was filed (C-086).
+   * `failed`:  a hold should have been placed at approval and was NOT (C-087).
+   *            The certificate is not held until somebody retries.
+   */
+  kind?: 'placed' | 'arrived' | 'failed';
 }): { subject: string; html: string; text: string } {
   const n = params.holds.length;
-  const subject = params.routingGap
-    ? `SupDox: ${params.documentTitle} was put on hold and no QA owner is set. Nobody was alerted`
-    : `SupDox: ${params.documentTitle} is on hold`;
+  const kind = params.kind ?? 'placed';
+  const gap = params.routingGap ? ' No QA owner is set. Nobody on the QA route was alerted' : '';
+  const subject =
+    kind === 'failed'
+      ? `SupDox: a hold should have been placed on ${params.documentTitle} and was NOT.${gap}`
+      : kind === 'arrived'
+        ? `SupDox: ${params.documentTitle} arrived for a lot that is on hold.${gap}`
+        : params.routingGap
+          ? `SupDox: ${params.documentTitle} was put on hold and no QA owner is set. Nobody was alerted`
+          : `SupDox: ${params.documentTitle} is on hold`;
   const from = params.supplierName ? ` from ${params.supplierName}` : '';
   const who = params.placedByName ? `${params.placedByName} put` : 'The portal put';
-  const what = `${who} ${params.documentTitle}${from} on hold${n > 1 ? ` (${n} holds)` : ''}.`;
+  const what =
+    kind === 'failed'
+      ? `${params.documentTitle}${from} was approved with ${n === 1 ? 'a result that places' : 'results that place'} a hold, and the hold could NOT be written. THE CERTIFICATE IS NOT ON HOLD and can be sent. Open it and press "Retry" under Holds, or place a hold by hand. (bin/propose-spec-holds also finds it.)`
+      : kind === 'arrived'
+        ? `${params.documentTitle}${from} was approved for ${n === 1 ? 'a lot that is' : 'lots that are'} already on hold. A hold on a lot covers every certificate for that lot, so this one is held too.`
+        : `${who} ${params.documentTitle}${from} on hold${n > 1 ? ` (${n} holds)` : ''}.`;
+  if (kind === 'failed') {
+    const lead = params.routingGap
+      ? `${what} No QA owner route is configured for ${params.tenantName}, so nobody on the QA route was told. Add a route for the "QA" owner label in Settings › Owner Routing.`
+      : what;
+    return holdEmailBody(params, subject, lead, 'a hold was NOT placed');
+  }
   const lead = params.routingGap
     ? `${what} No QA owner route is configured for ${params.tenantName}, so nobody on the QA route was told. Add a route for the "QA" owner label in Settings › Owner Routing. Until the hold is released, this certificate cannot be sent on an order, in a ZIP, by link, in a bundle or read with an API key.`
     : `${what} Until QA or an administrator releases the hold with a written reason, this certificate cannot be sent on an order, in a ZIP, by link, in a bundle or read with an API key. It can still be opened in the portal.`;
+  return holdEmailBody(params, subject, lead, params.routingGap ? 'routing gap' : kind === 'arrived' ? 'certificate for a held lot' : 'certificate on hold');
+}
+
+function holdEmailBody(
+  params: {
+    documentId: string;
+    holds: Array<{ lot_label: string | null; reason: string; source_label: string; from_title?: string | null }>;
+    appUrl?: string;
+    routingGap?: boolean;
+  },
+  subject: string,
+  lead: string,
+  heading: string,
+): { subject: string; html: string; text: string } {
   const lines = params.holds.map(
-    (h) => `${h.lot_label ? `Lot ${h.lot_label}` : 'Whole certificate'} (${h.source_label}): ${h.reason}`
+    (h) =>
+      `${h.lot_label ? `Lot ${h.lot_label}` : 'Whole certificate'} (${h.source_label}${h.from_title ? `, held from ${h.from_title}` : ''}): ${h.reason}`
   );
   const base = params.appUrl ? params.appUrl.replace(/\/$/, '') : null;
   const html = `<!DOCTYPE html>
@@ -1190,7 +1231,7 @@ export function buildHoldPlacedEmail(params: {
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-    <tr><td style="background:#8a1c1c;padding:24px 32px;"><h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox: ${params.routingGap ? 'routing gap' : 'certificate on hold'}</h1></td></tr>
+    <tr><td style="background:#8a1c1c;padding:24px 32px;"><h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox: ${escapeHtml(heading)}</h1></td></tr>
     <tr><td style="padding:32px;">
       <p style="margin:0 0 16px;color:#555;line-height:1.6;">${escapeHtml(lead)}</p>
       <ul style="margin:0 0 24px;padding-left:20px;color:#333;line-height:1.8;">

@@ -907,28 +907,33 @@ export async function markLinesSent(
 }
 
 /**
- * How many document lines of an order are LEFT BEHIND as of this send. An
- * order with one of those is not delivered (C-056).
+ * How many document lines of an order are LEFT BEHIND. An order with one of
+ * those is not delivered (C-056).
  *
- * A line is done in exactly two ways: QA released it, or it went with THIS
- * send and nothing is outstanding on it. Everything else is behind -- waiting
- * for QA, in the middle of a release, refused, missing, expired, locked, or
- * sent only by some other send.
+ * A line is done in exactly two ways: QA released it, or it WENT ON A SEND and
+ * nothing is outstanding on it (`last_send_id`, stamped by `markLinesSent`
+ * only when the mail was accepted, and cleared when the line is refreshed to a
+ * different document). Everything else is behind -- waiting for QA, in the
+ * middle of a release, refused, missing, expired, locked, on hold.
+ *
+ * `sendId` narrows "went" to one particular send. The order's delivered check
+ * does not pass it (C-090): what matters is that the line travelled, on
+ * whichever send, the same rule a COA line is held to.
  */
 export async function countDocumentLinesBehind(
   db: D1Database,
   tenantId: string,
   orderId: string,
-  sendId: string,
+  sendId?: string,
 ): Promise<number> {
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM order_documents
         WHERE tenant_id = ? AND order_id = ?
           AND NOT (release_status = 'released'
-                   OR (release_status = 'none' AND last_send_id IS NOT NULL AND last_send_id = ?))`,
+                   OR (release_status = 'none' AND last_send_id IS NOT NULL${sendId ? ' AND last_send_id = ?' : ''}))`,
     )
-    .bind(tenantId, orderId, sendId)
+    .bind(...(sendId ? [tenantId, orderId, sendId] : [tenantId, orderId]))
     .first<{ n: number }>();
   return Number(row?.n) || 0;
 }

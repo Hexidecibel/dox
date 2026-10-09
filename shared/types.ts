@@ -52,6 +52,11 @@ export interface SharingRefusal {
   message: string;
   /** The hold behind a `held` refusal. Absent on every other reason. */
   hold?: DocumentHoldBrief;
+  /**
+   * Set when the rule that refused is a NEIGHBOUR's: this document's file also
+   * prints that document's lot (two lots on one page), so it takes its rule.
+   */
+  via_document_id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +75,8 @@ export interface DocumentHoldBrief {
    * lots of one certificate on the same page), which stops this file as well.
    */
   document_id: string;
+  /** That certificate's title, for "held from <certificate>". */
+  document_title?: string | null;
   /** The lot row the hold is on, or null for the whole certificate. */
   lot_id: string | null;
   /** "1042 / 03", or null for the whole certificate. */
@@ -118,6 +125,21 @@ export interface DocumentHoldLot {
   hold: DocumentHoldBrief | null;
 }
 
+/**
+ * A hold that should have been placed at approval and was not (C-087). The
+ * certificate is NOT held until somebody retries.
+ */
+export interface ApiHoldFailure {
+  id: string;
+  document_id: string;
+  document_title: string | null;
+  document_version: number;
+  created_at: string;
+  error: string | null;
+  /** The holds that were not placed. */
+  holds: { source: HoldSource; reason: string }[];
+}
+
 /** GET /api/documents/:id/holds */
 export interface DocumentHoldsResponse {
   /** Active holds, oldest first. Any one of them stops the certificate leaving. */
@@ -130,6 +152,8 @@ export interface DocumentHoldsResponse {
    * certificate they are on (`document_id`).
    */
   also_held_by: DocumentHoldBrief[];
+  /** Holds that should have been placed on this certificate and were not. */
+  failures: ApiHoldFailure[];
   /** The certificate's lot rows. Empty when it has none. */
   lots: DocumentHoldLot[];
   /** May the caller place a hold (any login but a read-only one; an API key may)? */
@@ -157,12 +181,18 @@ export interface HoldsListResponse {
   /** Rows were cut at the page size; narrow the filter to see the rest. */
   truncated: boolean;
   can_release: boolean;
+  /** Holds that should have been placed and were not, across the organization. */
+  failures: ApiHoldFailure[];
+  /** May the caller retry one (anybody who may place a hold)? */
+  can_place: boolean;
 }
 
 /** GET /api/holds?count=1 */
 export interface HoldsCountResponse {
   /** Active holds in the organization. */
   count: number;
+  /** Holds that should have been placed and were not. Each needs a retry. */
+  failures: number;
 }
 
 /** The hold summary `GET /api/documents/:id` carries. */

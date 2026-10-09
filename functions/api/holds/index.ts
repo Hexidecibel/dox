@@ -19,7 +19,15 @@
  * organization has orders or compliance switched on.
  */
 import { BadRequestError, errorToResponse, requireTenantAccess } from '../../lib/permissions';
-import { canReleaseHold, countActiveHolds, listHolds, parseHoldsFilter } from '../../lib/holds';
+import {
+  canPlaceHold,
+  canReleaseHold,
+  countActiveHolds,
+  countOpenHoldFailures,
+  listHolds,
+  listOpenHoldFailures,
+  parseHoldsFilter,
+} from '../../lib/holds';
 import type { HoldsCountResponse, HoldsListResponse } from '../../../shared/types';
 import type { Env, User } from '../../lib/types';
 
@@ -37,7 +45,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, tenantId);
 
     if (url.searchParams.get('count') === '1') {
-      const body: HoldsCountResponse = { count: await countActiveHolds(context.env.DB, tenantId) };
+      const body: HoldsCountResponse = {
+        count: await countActiveHolds(context.env.DB, tenantId),
+        // A hold that should exist and does not is something to act on too.
+        failures: await countOpenHoldFailures(context.env.DB, tenantId),
+      };
       return json(body);
     }
     const filter = parseHoldsFilter(url.searchParams);
@@ -45,6 +57,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const body: HoldsListResponse = {
       ...listed,
       can_release: await canReleaseHold(context.env.DB, context.data, user, tenantId),
+      failures: await listOpenHoldFailures(context.env.DB, tenantId),
+      can_place: canPlaceHold(user, tenantId),
     };
     return json(body);
   } catch (err) {

@@ -65,6 +65,21 @@ beforeAll(async () => {
       `INSERT INTO lots (id, tenant_id, supplier_id, lot_number, lot_key) VALUES ('l-2', '${T}', 's-1', '5502', '5502')`,
       `INSERT INTO document_lots (id, document_id, lot_id) VALUES ('dl-1', 'd-1', 'l-1')`,
       `INSERT INTO document_lots (id, document_id, lot_id) VALUES ('dl-2', 'd-2', 'l-2')`,
+      // Versions, for the `source_queue_id` backfill. d-1: born from a queue
+      // item (the origin column), then reissued through "Replace existing"
+      // from another. d-2: older, the queue id only inside external_ref. d-3:
+      // uploaded by hand, then given a second version by hand.
+      `UPDATE documents SET origin_queue_id = 'q-first', external_ref = 'queue-q-first-5501', current_version = 2 WHERE id = 'd-1'`,
+      `UPDATE documents SET external_ref = 'queue-qold-5502' WHERE id = 'd-2'`,
+      `INSERT INTO documents (id, tenant_id, title, status, created_by, supplier_id, external_ref, current_version) VALUES ('d-3', '${T}', 'By hand', 'active', '${U}', 's-1', 'manual-upload', 2)`,
+      `INSERT INTO documents (id, tenant_id, title, status, created_by, supplier_id, external_ref) VALUES ('d-4', '${T}', 'Whole ref', 'active', '${U}', 's-1', 'queue-qwhole')`,
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES ('v-1-1', 'd-1', 1, 'a.pdf', 1, 'application/pdf', 'k11', '${U}')`,
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES ('v-1-2', 'd-1', 2, 'a2.pdf', 1, 'application/pdf', 'k12', '${U}')`,
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES ('v-2-1', 'd-2', 1, 'b.pdf', 1, 'application/pdf', 'k21', '${U}')`,
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES ('v-3-1', 'd-3', 1, 'c.pdf', 1, 'application/pdf', 'k31', '${U}')`,
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES ('v-3-2', 'd-3', 2, 'c2.pdf', 1, 'application/pdf', 'k32', '${U}')`,
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by) VALUES ('v-4-1', 'd-4', 1, 'd.pdf', 1, 'application/pdf', 'k41', '${U}')`,
+      `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details) VALUES ('${U}', '${T}', 'document.version_replaced', 'document', 'd-1', '{"queue_item_id":"q-reissue","previous_version":1,"new_version":2}')`,
       // A stored approval-time Critical failure. The migration must NOT hold it.
       `INSERT INTO document_spec_checks (id, tenant_id, document_id, version_number, test_name_raw, value_raw, verdict, source, limit_id, limit_snapshot, judgement_origin, result_key)
        VALUES ('c-1', '${T}', 'd-1', 1, 'Coliform', '40', 'out_of_spec', 'limit', 'lim-1', '{"criticality":"high"}', 'approval', 'ai_fields::t0r0')`,
@@ -78,6 +93,35 @@ describe('0139 on a populated database', () => {
   it('changes no existing row, and puts nothing on hold', async () => {
     expect(await snapshot()).toBe(before);
     expect(await all('SELECT id FROM document_holds')).toEqual([]);
+  });
+
+  it('says which queue item wrote each version, where that is provable, and invents nothing', async () => {
+    const rows = await all(`SELECT id, source_queue_id FROM document_versions WHERE id LIKE 'v-%' ORDER BY id`);
+    expect(rows).toEqual([
+      // Version 1: the document's origin. Version 2: the "Replace existing" audit row.
+      { id: 'v-1-1', source_queue_id: 'q-first' },
+      { id: 'v-1-2', source_queue_id: 'q-reissue' },
+      // No origin column: the queue id inside external_ref.
+      { id: 'v-2-1', source_queue_id: 'qold' },
+      // Uploaded by hand, both versions: no queue item wrote them.
+      { id: 'v-3-1', source_queue_id: null },
+      { id: 'v-3-2', source_queue_id: null },
+      { id: 'v-4-1', source_queue_id: 'qwhole' },
+    ]);
+    expect((await all("SELECT name FROM sqlite_master WHERE name = 'idx_document_versions_source_queue'"))).toHaveLength(1);
+  });
+
+  it('adds the table for a hold that should have been placed and was not', async () => {
+    const cols = (await all("SELECT name FROM pragma_table_info('document_hold_failures')")).map((c) => c.name);
+    expect(cols).toEqual([
+      'id', 'tenant_id', 'document_id', 'document_version', 'proposals', 'error', 'queue_item_id',
+      'approved_by', 'created_at', 'qa_notified_at', 'resolved_at', 'resolved_by', 'resolution',
+    ]);
+    expect(cols).not.toContain('supplier_id');
+    await expect(run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-bad', '${T}', 'd-1', 1, 'not json')`)).rejects.toThrow();
+    await run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-1', '${T}', 'd-1', 1, '[]')`);
+    expect((await all(`SELECT resolved_at FROM document_hold_failures WHERE id = 'f-1'`))[0].resolved_at).toBeNull();
+    await run(`DELETE FROM document_hold_failures WHERE id = 'f-1'`);
   });
 
   it('adds one table, its indexes and its trigger, and nothing else', async () => {
@@ -174,9 +218,15 @@ describe('0139 on a populated database', () => {
     expect((await all('SELECT count(*) AS n FROM document_holds'))[0].n).toBeGreaterThan(0);
   });
 
-  it('running the file again changes nothing', async () => {
+  it('every CREATE is IF NOT EXISTS, so the amended file runs over its own first cut', async () => {
+    // The file as a whole is not re-runnable (the ALTER). What `bin/migrate
+    // --reapply` relies on is that everything the FIRST cut created is skipped.
+    const creates = splitStatements(m0139).filter((s) => /^CREATE /i.test(s.trim()));
+    expect(creates.length).toBeGreaterThan(8);
     const holdsBefore = JSON.stringify(await all('SELECT * FROM document_holds ORDER BY id'));
-    await db.batch(splitStatements(m0139).map((s) => db.prepare(s)));
+    await db.batch(creates.map((s) => db.prepare(s)));
     expect(JSON.stringify(await all('SELECT * FROM document_holds ORDER BY id'))).toBe(holdsBefore);
+    await expect(db.batch(splitStatements(m0139).map((s) => db.prepare(s)))).rejects.toThrow(/duplicate column/);
   });
+
 });

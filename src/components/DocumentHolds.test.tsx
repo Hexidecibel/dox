@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../lib/api', () => {
-  const m = { forDocument: vi.fn(), place: vi.fn(), release: vi.fn() };
+  const m = { forDocument: vi.fn(), place: vi.fn(), release: vi.fn(), retryFailure: vi.fn() };
   return { api: { holds: m }, __mocks: m };
 });
 
@@ -20,7 +20,7 @@ import { DocumentHolds } from './DocumentHolds';
 import { HOLDS_CHANGED } from '../lib/holds';
 import type { ApiDocumentHold, DocumentHoldsResponse } from '../../shared/types';
 
-const mocks = (apiModule as unknown as { __mocks: Record<'forDocument' | 'place' | 'release', ReturnType<typeof vi.fn>> }).__mocks;
+const mocks = (apiModule as unknown as { __mocks: Record<'forDocument' | 'place' | 'release' | 'retryFailure', ReturnType<typeof vi.fn>> }).__mocks;
 
 function hold(over: Partial<ApiDocumentHold> = {}): ApiDocumentHold {
   return {
@@ -54,6 +54,7 @@ function response(over: Partial<DocumentHoldsResponse> = {}): DocumentHoldsRespo
     active: [],
     history: [],
     also_held_by: [],
+    failures: [],
     lots: [
       { lot_id: 'l1', lot_number: '5501', sub_lot_code: '03', lot_label: '5501 / 03', hold: null },
       { lot_id: 'l2', lot_number: '5502', sub_lot_code: null, lot_label: '5502', hold: null },
@@ -204,11 +205,11 @@ describe('DocumentHolds', () => {
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 
-  it('a file that prints a held lot of the same certificate says so, and where to release it', async () => {
+  it('a file that prints a held lot of the same certificate says so, and names the certificate the hold is on', async () => {
     mocks.forDocument.mockResolvedValue(
       response({
         can_place: false,
-        also_held_by: [{ id: 'h9', document_id: 'd2', lot_id: 'l9', lot_label: '5503', reason: 'Critical result out of spec: Coliform 40 CFU/g.', source: 'spec_critical', placed_at: '2026-10-08 10:00:00' }],
+        also_held_by: [{ id: 'h9', document_id: 'd2', document_title: 'Cream COA lot 5503', lot_id: 'l9', lot_label: '5503', reason: 'Critical result out of spec: Coliform 40 CFU/g.', source: 'spec_critical', placed_at: '2026-10-08 10:00:00' }],
       }),
     );
     render(
@@ -216,13 +217,78 @@ describe('DocumentHolds', () => {
         <DocumentHolds documentId="d1" />
       </MemoryRouter>,
     );
-    expect(await screen.findByTestId('hold-carried-banner')).toHaveTextContent('it also prints a lot that is on hold');
+    expect(await screen.findByTestId('hold-carried-banner')).toHaveTextContent('a hold placed on another certificate covers it');
     const row = screen.getByTestId('hold-carried-row');
     expect(row).toHaveTextContent('Lot 5503: Critical result out of spec: Coliform 40 CFU/g.');
-    expect(within(row).getByRole('link')).toHaveAttribute('href', '/documents/d2');
-    // Not "Not on hold", and nothing to release here: the hold is on the other certificate.
+    // Lot 5503 is not one of this certificate's lots: the file prints it.
+    expect(row).toHaveTextContent("This file also prints that lot's results. Held from Cream COA lot 5503");
+    expect(within(row).getByRole('link', { name: 'Cream COA lot 5503' })).toHaveAttribute('href', '/documents/d2');
     expect(screen.queryByTestId('hold-none')).toBeNull();
-    expect(screen.queryByTestId('hold-release')).toBeNull();
+    // Somebody who cannot release is offered no button.
+    expect(screen.queryByTestId('hold-carried-release')).toBeNull();
+  });
+
+  it('a hold on a LOT this certificate carries, placed from another certificate, is shown and released from here (C-086)', async () => {
+    mocks.forDocument.mockResolvedValue(
+      response({
+        can_release: true,
+        also_held_by: [{ id: 'h7', document_id: 'd5', document_title: 'First scan of lot 5501', lot_id: 'l1', lot_label: '5501 / 03', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' }],
+        lots: [
+          { lot_id: 'l1', lot_number: '5501', sub_lot_code: '03', lot_label: '5501 / 03', hold: { id: 'h7', document_id: 'd5', document_title: 'First scan of lot 5501', lot_id: 'l1', lot_label: '5501 / 03', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' } },
+        ],
+      }),
+    );
+    const onChanged = vi.fn();
+    render(
+      <MemoryRouter>
+        <DocumentHolds documentId="d1" onChanged={onChanged} />
+      </MemoryRouter>,
+    );
+    const row = await screen.findByTestId('hold-carried-row');
+    expect(row).toHaveTextContent('This lot is on hold. Held from First scan of lot 5501');
+    expect(screen.getByTestId('hold-lot-chip')).toHaveAttribute('title', 'Held from First scan of lot 5501');
+    // Releasing is one act on the hold, from whichever certificate it is seen on.
+    await userEvent.click(screen.getByTestId('hold-carried-release'));
+    await userEvent.type(screen.getByTestId('hold-reason'), 'Retest clean');
+    await userEvent.click(screen.getByTestId('hold-confirm'));
+    await waitFor(() => expect(mocks.release).toHaveBeenCalledWith('h7', 'Retest clean'));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it('a hold that should have been placed and was not says so, says the certificate is NOT held, and retries (C-087)', async () => {
+    mocks.forDocument.mockResolvedValue(
+      response({
+        failures: [{ id: 'f1', document_id: 'd1', document_title: 'Cream COA', document_version: 1, created_at: '2026-10-08 10:00:00', error: 'D1_ERROR', holds: [{ source: 'spec_critical', reason: 'Critical result out of spec: Coliform 40 CFU/g (limit <=10 CFU/g).' }] }],
+      }),
+    );
+    mocks.retryFailure.mockResolvedValue({ placed: 1, already_held: 0 });
+    const onChanged = vi.fn();
+    render(<DocumentHolds documentId="d1" onChanged={onChanged} />);
+    const box = await screen.findByTestId('hold-failure');
+    expect(box).toHaveTextContent('A hold should have been placed on this certificate and was not.');
+    expect(box).toHaveTextContent('It is NOT on hold and can be sent until somebody retries.');
+    expect(box).toHaveTextContent('Critical result out of spec: Coliform 40 CFU/g');
+    await userEvent.click(screen.getByTestId('hold-failure-retry'));
+    await waitFor(() => expect(mocks.retryFailure).toHaveBeenCalledWith('f1'));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it('a retry that fails again says so and leaves the notice up; a read-only account gets no button', async () => {
+    const failing = response({
+      failures: [{ id: 'f1', document_id: 'd1', document_title: 'Cream COA', document_version: 1, created_at: '2026-10-08 10:00:00', error: null, holds: [{ source: 'spec_critical', reason: 'Critical result out of spec.' }] }],
+    });
+    mocks.forDocument.mockResolvedValue(failing);
+    mocks.retryFailure.mockRejectedValue(new Error('The hold could not be placed. Nothing changed; try again, or place a hold by hand.'));
+    const first = render(<DocumentHolds documentId="d1" />);
+    await userEvent.click(await screen.findByTestId('hold-failure-retry'));
+    expect(await screen.findByTestId('hold-failure-error')).toHaveTextContent('could not be placed');
+    expect(screen.getByTestId('hold-failure')).toBeInTheDocument();
+    first.unmount();
+
+    mocks.forDocument.mockResolvedValue({ ...failing, can_place: false });
+    render(<DocumentHolds documentId="d1" />);
+    expect(await screen.findByTestId('hold-failure')).toBeInTheDocument();
+    expect(screen.queryByTestId('hold-failure-retry')).toBeNull();
   });
 
   it('keeps the history: who released each hold, when and why', async () => {

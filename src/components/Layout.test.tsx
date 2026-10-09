@@ -96,14 +96,14 @@ beforeEach(() => {
   pendingMock.mockResolvedValue({ can_release: false, count: 0 });
   holdsCountMock.mockReset();
   holdsListMock.mockReset();
-  holdsCountMock.mockResolvedValue({ count: 0 });
+  holdsCountMock.mockResolvedValue({ count: 0, failures: 0 });
 });
 
 describe('Layout: Holds in the rail', () => {
   it('is drawn for every role, a read-only account included, with the number on hold', async () => {
     for (const role of ['reader', 'user', 'org_admin'] as Role[]) {
       currentUser = user(role);
-      holdsCountMock.mockResolvedValue({ count: 4 });
+      holdsCountMock.mockResolvedValue({ count: 4, failures: 0 });
       const view = renderRail();
       expect(await screen.findByText('Holds')).toBeInTheDocument();
       expect(await screen.findByTestId('nav-holds-count')).toHaveTextContent('4');
@@ -113,8 +113,14 @@ describe('Layout: Holds in the rail', () => {
     expect(holdsListMock).not.toHaveBeenCalled();
   });
 
+  it('counts a hold that should have been placed and was not: it needs somebody too (C-087)', async () => {
+    holdsCountMock.mockResolvedValue({ count: 2, failures: 1 });
+    renderRail();
+    expect(await screen.findByTestId('nav-holds-count')).toHaveTextContent('3');
+  });
+
   it('shows no number when nothing is on hold, or when the question fails', async () => {
-    holdsCountMock.mockResolvedValue({ count: 0 });
+    holdsCountMock.mockResolvedValue({ count: 0, failures: 0 });
     const first = renderRail();
     expect(await screen.findByText('Holds')).toBeInTheDocument();
     await waitFor(() => expect(holdsCountMock).toHaveBeenCalled());
@@ -128,7 +134,7 @@ describe('Layout: Holds in the rail', () => {
   });
 
   it('asks once on mount and again when a screen says a hold was placed or released, not on every navigation', async () => {
-    holdsCountMock.mockResolvedValue({ count: 2 });
+    holdsCountMock.mockResolvedValue({ count: 2, failures: 0 });
     const view = renderRail();
     expect(await screen.findByTestId('nav-holds-count')).toHaveTextContent('2');
     expect(holdsCountMock).toHaveBeenCalledTimes(1);
@@ -136,7 +142,7 @@ describe('Layout: Holds in the rail', () => {
     await screen.findByText('Holds');
     expect(holdsCountMock).toHaveBeenCalledTimes(1);
 
-    holdsCountMock.mockResolvedValue({ count: 1 });
+    holdsCountMock.mockResolvedValue({ count: 1, failures: 0 });
     window.dispatchEvent(new Event('dox:holds-changed'));
     await waitFor(() => expect(screen.getByTestId('nav-holds-count')).toHaveTextContent('1'));
     expect(holdsCountMock).toHaveBeenCalledTimes(2);

@@ -49,6 +49,9 @@ import { onRequestPost as resendOrder } from '../../functions/api/orders/[id]/se
 import { onRequestPost as searchQuery } from '../../functions/api/search/query';
 import { produceCoaRecords } from '../../functions/lib/kinds/coa';
 import { attachActiveHolds } from '../../functions/lib/hold-state';
+import { judgeSharedFiles } from '../../functions/lib/sharing-rule';
+import { noticeCertificatesForHeldLots } from '../../functions/lib/holds';
+import * as holdRetryRoute from '../../functions/api/holds/failures/[id]/retry';
 import { registerAndNotifyForApproval } from '../../functions/lib/spec-register';
 import { loadSpecConfig, specResultsWithConfig } from '../../functions/lib/spec-warnings';
 import { HOLD_OUTWARD_TEXT } from '../../shared/holds';
@@ -589,7 +592,7 @@ describe('reading holds', () => {
     // The count is the number of ACTIVE holds, and is one cheap answer.
     const count = (await listHolds('user', '?count=1')).body;
     const n = await db.prepare('SELECT COUNT(*) AS n FROM document_holds WHERE tenant_id = ? AND released_at IS NULL').bind(seed.tenantId).first<{ n: number }>();
-    expect(count).toEqual({ count: n!.n });
+    expect(count).toEqual({ count: n!.n, failures: 0 });
 
     // Another organization sees none of it.
     const theirs = (await listHolds('other_tenant', '?state=all')).body;
@@ -994,7 +997,12 @@ async function pdfWithPages(n: number): Promise<ArrayBuffer> {
  * has three pages, one lot on each; `pages` says which page each lot is on
  * (`[1, 1, 2]` = the first two lots share a page).
  */
-async function approveMultiLot(lot: string, pages: number[] = [1, 2, 3]): Promise<{ queueId: string; original: ArrayBuffer; docIds: string[] }> {
+async function approveMultiLot(
+  lot: string,
+  pages: number[] = [1, 2, 3],
+  /** "Replace existing" for every lot: the documents each record replaces, by record index. */
+  replaces?: string[],
+): Promise<{ queueId: string; original: ArrayBuffer; docIds: string[] }> {
   const id = generateTestId();
   const r2Key = `pending/${id}.pdf`;
   const original = await pdfWithPages(Math.max(...pages));
@@ -1038,7 +1046,10 @@ async function approveMultiLot(lot: string, pages: number[] = [1, 2, 3]): Promis
     created_by: seed.userId,
     tenant_slug: 'test-corp',
   } as unknown as QueueItem;
-  const result = await produceCoaRecords(db, files, item, { payload, userId: seed.userId });
+  const replaceTargets = replaces
+    ? Object.fromEntries(replaces.map((documentId, i) => [i, { documentId, changeNote: 'Reissued by the supplier' }]))
+    : undefined;
+  const result = await produceCoaRecords(db, files, item, { payload, userId: seed.userId, replaceTargets });
   return { queueId: id, original, docIds: result.documents.map((d) => d.documentId) };
 }
 
@@ -1667,3 +1678,742 @@ describe('replacing a held certificate does not lift the hold', () => {
     }
   });
 });
+
+// ===========================================================================
+// After the independent review (C-085..C-090)
+// ===========================================================================
+
+const keyDownload = (doc: string) =>
+  downloadDocument(as('api_key', `http://localhost/api/documents/${doc}/download`, { params: { id: doc } }));
+
+describe('a certificate REISSUED through "Replace existing": the file is the current version (C-085)', () => {
+  it('every version says which queue item wrote it', async () => {
+    const first = await approveMultiLot('7730000');
+    const second = await approveMultiLot('7730000', [1, 2, 3], first.docIds);
+    expect(second.docIds).toEqual(first.docIds);
+    const rows = await db
+      .prepare(`SELECT version_number, source_queue_id FROM document_versions WHERE document_id = ? ORDER BY version_number`)
+      .bind(first.docIds[0])
+      .all<{ version_number: number; source_queue_id: string | null }>();
+    expect(rows.results).toEqual([
+      { version_number: 1, source_queue_id: first.queueId },
+      { version_number: 2, source_queue_id: second.queueId },
+    ]);
+    // The origin never moves: that was the blind spot.
+    const origin = await db.prepare('SELECT origin_queue_id, external_ref, current_version FROM documents WHERE id = ?').bind(first.docIds[0]).first<Record<string, unknown>>();
+    expect(origin!.current_version).toBe(2);
+    expect(String(origin!.external_ref)).toContain(first.queueId);
+  });
+
+  it('the reissued WHOLE ORIGINAL does not go while a lot on it is held, though the held document was born from the first issue', async () => {
+    const first = await approveMultiLot('7731000');
+    const [a, b] = first.docIds;
+    const id = await hold(a, 'Lot 01 failed, reissue requested', await lotOf(a));
+    // The supplier reissues; every lot is replaced. The hold stays on A (C-076).
+    const second = await approveMultiLot('7731000', [1, 2, 3], first.docIds);
+    expect((await holdsOf('qa', a)).body.active.map((h) => h.id)).toEqual([id]);
+
+    // An order carrying ONLY lot 02, sent by a plain user.
+    const order = await newOrder();
+    await pick(order, [b]);
+    const plan = await preview(order, 'user');
+    expect(plan.files).toHaveLength(1);
+    expect(plan.files[0].source).toBe('document');
+    expect(plan.files[0].notes.join(' ')).toMatch(/also covers lot 7731000 \/ 01, which is on hold, so only this lot's page is sent/);
+    const mails = stubMail();
+    const sent = await send(order, 'user', { fingerprint: plan.fingerprint });
+    expect(sent.body.send.status).toBe('sent');
+    const sizes = mails.flatMap((m) => m.attachments ?? []).map((x) => atob(x.content).length);
+    expect(sizes).toHaveLength(1);
+    // Not the reissued three-page original, which prints lot 01.
+    expect(sizes[0]).not.toBe(second.original.byteLength);
+    vi.unstubAllGlobals();
+
+    // Released: the reissued original goes whole.
+    await lift(id);
+    const order2 = await newOrder();
+    await pick(order2, [b]);
+    const after = await preview(order2, 'user');
+    expect(after.files[0].source).toBe('original');
+    expect(after.files[0].bytes).toBe(second.original.byteLength);
+  });
+
+  it('a reissued whole original already stored on a failed send is re-checked on resend', async () => {
+    const first = await approveMultiLot('7732000');
+    const [a, b, c] = first.docIds;
+    await approveMultiLot('7732000', [1, 2, 3], first.docIds);
+    const order = await newOrder();
+    await pick(order, [b, c]);
+    const plan = await preview(order, 'org_admin');
+    expect(plan.files[0].source).toBe('original');
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin', { fingerprint: plan.fingerprint });
+    expect(failed.body.send.status).toBe('failed');
+    vi.unstubAllGlobals();
+
+    // Lot 01 is not on the order. It is held after the send was reviewed.
+    await hold(a, 'Held after the reissue was sent', await lotOf(a));
+    const mails = stubMail();
+    const retry = await resend(order, failed.body.send.id, 'org_admin');
+    expect(mails).toHaveLength(0);
+    expect(retry.body.send.status).toBe('failed');
+    expect(JSON.stringify(retry.body.send.parts)).toContain('On hold');
+    expect(await orderStatus(order)).not.toBe('delivered');
+  });
+
+  it('THE SHARING RULE the same: a locked lot on the reissued original keeps the whole original in', async () => {
+    const first = await approveMultiLot('7733000');
+    const [a, b] = first.docIds;
+    const second = await approveMultiLot('7733000', [1, 2, 3], first.docIds);
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(a).run();
+    const order = await newOrder();
+    await pick(order, [b]);
+    const plan = await preview(order, 'org_admin');
+    expect(plan.files).toHaveLength(1);
+    expect(plan.files[0].source).toBe('document');
+    expect(plan.files[0].notes.join(' ')).toMatch(/also covers a document that is locked/);
+    const mails = stubMail();
+    await send(order, 'org_admin', { fingerprint: plan.fingerprint });
+    const sizes = mails.flatMap((m) => m.attachments ?? []).map((x) => atob(x.content).length);
+    expect(sizes).toHaveLength(1);
+    expect(sizes[0]).not.toBe(second.original.byteLength);
+  });
+
+  it('two lots on one page of the REISSUE: the neighbour\'s file is held through the version, not the origin', async () => {
+    const first = await approveMultiLot('7734000');
+    const [a, b, c] = first.docIds;
+    // First issue: one lot per page. The reissue puts lots 01 and 02 on page 1.
+    await approveMultiLot('7734000', [1, 1, 2], first.docIds);
+    const id = await hold(a, 'Held on the reissue', await lotOf(a));
+    const refused = await keyDownload(b);
+    expect(refused.status).toBe(403);
+    expect(await readJson(refused)).toMatchObject({ reason: 'held' });
+    const ok = await keyDownload(c);
+    expect(ok.status).toBe(200);
+    await ok.arrayBuffer();
+    await lift(id);
+  });
+});
+
+describe('a file takes the strictest SHARING RULE of every lot it prints (C-088)', () => {
+  const zip = (who: Who, ids: string[]) =>
+    exportZip(as(who, 'http://localhost/api/document-exports/zip', { method: 'POST', body: JSON.stringify({ document_ids: ids }) }));
+
+  it('a LOCKED lot does not leave on the free neighbour that shares its page; a lot on another page is untouched', async () => {
+    const cert = await approveMultiLot('7740000', [1, 1, 2]);
+    const [d1, d2, d3] = cert.docIds;
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(d1).run();
+
+    const res = await zip('org_admin', [d2, d3]);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Export-Refused-Ids')).toBe(`${d2}:locked`);
+    await res.arrayBuffer();
+    const only = await zip('org_admin', [d2]);
+    expect(only.status).toBe(403);
+    const refusal = ((await readJson(only)) as SharingRuleRefusedResponse).refused[0];
+    expect(refusal).toMatchObject({ reason: 'locked', rule: 'locked', via_document_id: d1 });
+    expect(refusal.message).toMatch(/^Locked: this document does not leave the portal\. This file also prints another lot of the same certificate/);
+
+    const key = await keyDownload(d2);
+    expect(key.status).toBe(403);
+    expect(await readJson(key)).toMatchObject({ code: 'sharing_rule_refused', reason: 'locked' });
+    const other = await keyDownload(d3);
+    expect(other.status).toBe(200);
+    await other.arrayBuffer();
+    // A signed-in person still opens it, and its OWN rule is unchanged on its page.
+    const person = await downloadDocument(as('reader', `http://localhost/api/documents/${d2}/download`, { params: { id: d2 } }));
+    expect(person.status).toBe(200);
+    await person.arrayBuffer();
+    const own = await call<{ document: { sharing: { rule: string } } }>(getDocument, as('user', `http://localhost/api/documents/${d2}`, { params: { id: d2 } }));
+    expect(own.body.document.sharing.rule).toBe('free');
+
+    // On an order: lot 02's line is refused by the rule, lot 03's own page goes.
+    const order = await newOrder();
+    await pick(order, [d2, d3]);
+    const plan = await preview(order, 'org_admin');
+    expect(plan.lines_not_sent.map((l) => [l.document_id, l.sharing_refusal])).toEqual([[d2, 'locked']]);
+    expect(plan.files.map((f) => f.document_ids)).toEqual([[d3]]);
+
+    // Unlocked again: it goes.
+    await db.prepare(`UPDATE documents SET sharing_rule_override = NULL WHERE id = ?`).bind(d1).run();
+    const after = await zip('user', [d2]);
+    expect(after.status).toBe(200);
+    await after.arrayBuffer();
+  });
+
+  it('a lot that NEEDS QA makes its page-neighbour need QA: a plain user is refused, a QA releaser sends it and it is recorded', async () => {
+    const cert = await approveMultiLot('7741000', [1, 1, 2]);
+    const [d1, d2] = cert.docIds;
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'qa' WHERE id = ?`).bind(d1).run();
+    const plain = await zip('user', [d2]);
+    expect(plain.status).toBe(403);
+    expect(((await readJson(plain)) as SharingRuleRefusedResponse).refused[0]).toMatchObject({ reason: 'needs_qa', via_document_id: d1 });
+    const key = await keyDownload(d2);
+    expect(key.status).toBe(403);
+    const qa = await zip('qa', [d2]);
+    expect(qa.status).toBe(200);
+    await qa.arrayBuffer();
+    const released = (await audits('document.qa_release_approved')).filter((r) => (r.details.document_ids as string[]).includes(d2));
+    expect(released).toHaveLength(1);
+  });
+
+  it('a file that could not be cut takes the strictest rule of EVERY lot of the certificate', async () => {
+    const cert = await approveMultiLot('7742000');
+    const [d1, , d3] = cert.docIds;
+    await db.prepare(`UPDATE documents SET extended_metadata = json_remove(extended_metadata, '$.page_scoped', '$.scoped_pages') WHERE id = ?`).bind(d3).run();
+    const before = await keyDownload(d3);
+    expect(before.status).toBe(200);
+    await before.arrayBuffer();
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(d1).run();
+    expect((await keyDownload(d3)).status).toBe(403);
+  });
+});
+
+describe('a LOT hold is on the lot row, on every certificate that carries it (C-086)', () => {
+  /** A second certificate for the same `lots` row: a re-scan, a "Keep both" duplicate. */
+  async function secondCertificateFor(lotId: string, title: string): Promise<MadeDoc> {
+    const doc = await makeDocument(types.coa, title);
+    await db.prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)').bind(generateTestId(), doc.id, lotId).run();
+    return doc;
+  }
+
+  it('the same lot does not leave on a second certificate, and one release frees both', async () => {
+    const a = await makeDocument(types.coa, 'First scan', { lots: 1 });
+    const b = await secondCertificateFor(a.lotIds[0], 'Second scan');
+    const lotNumber = (await db.prepare('SELECT lot_number FROM lots WHERE id = ?').bind(a.lotIds[0]).first<{ lot_number: string }>())!.lot_number;
+    const id = await hold(a.id, 'Lot under investigation', a.lotIds[0]);
+
+    const refused = await keyDownload(b.id);
+    expect(refused.status).toBe(403);
+    expect(await readJson(refused)).toMatchObject({ reason: 'held', error: `On hold (lot ${lotNumber}): Lot under investigation` });
+
+    const order = await newOrder();
+    await pick(order, [b.id]);
+    const plan = await preview(order, 'org_admin');
+    expect(plan.files).toEqual([]);
+    expect(plan.lines_not_sent.map((l) => [l.document_id, l.sharing_refusal])).toEqual([[b.id, 'held']]);
+    expect((await readOrder(order)).items[0].coa_hold).toMatchObject({ id, document_id: a.id, document_title: 'First scan' });
+
+    // The sibling's page says it is held, and from which certificate.
+    const page = (await holdsOf('qa', b.id)).body;
+    expect(page.active).toEqual([]);
+    expect(page.also_held_by).toHaveLength(1);
+    expect(page.also_held_by[0]).toMatchObject({ id, document_id: a.id, document_title: 'First scan', lot_id: a.lotIds[0] });
+    expect(page.lots[0].hold).toMatchObject({ id, document_id: a.id });
+    const state = await call<{ document: { holds: DocumentHoldState } }>(getDocument, as('user', `http://localhost/api/documents/${b.id}`, { params: { id: b.id } }));
+    expect(state.body.document.holds.active.map((h) => h.id)).toEqual([id]);
+
+    // The lot is held ONCE: a second person's hold from the sibling is refused, naming the first.
+    const again = await place('org_admin', b.id, { reason: 'Me too', lot_id: a.lotIds[0] });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toContain('from First scan');
+
+    // Releasing is one act on the hold.
+    await lift(id);
+    const ok = await keyDownload(b.id);
+    expect(ok.status).toBe(200);
+    await ok.arrayBuffer();
+    expect((await preview(order, 'org_admin')).lines_not_sent).toEqual([]);
+  });
+
+  it('a WHOLE-CERTIFICATE hold stays on its one document; a different sublot row is a different lot', async () => {
+    const a = await makeDocument(types.coa, 'Whole held', { lots: 1 });
+    const b = await secondCertificateFor(a.lotIds[0], 'Sibling of whole held');
+    const whole = await hold(a.id, 'This scan is unreadable');
+    const ok = await keyDownload(b.id);
+    expect(ok.status).toBe(200);
+    await ok.arrayBuffer();
+    await lift(whole);
+
+    // The same lot number under another sublot is another `lots` row.
+    const lot = await db.prepare('SELECT lot_number FROM lots WHERE id = ?').bind(a.lotIds[0]).first<{ lot_number: string }>();
+    const c = await makeDocument(types.coa, 'Other sublot');
+    const sub = generateTestId();
+    await db
+      .prepare(`INSERT INTO lots (id, tenant_id, supplier_id, lot_number, lot_key, sub_lot_code) VALUES (?, ?, ?, ?, ?, '02')`)
+      .bind(sub, seed.tenantId, supplierId, lot!.lot_number, `${lot!.lot_number}-${sub.slice(0, 4)}`)
+      .run();
+    await db.prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)').bind(generateTestId(), c.id, sub).run();
+    const id = await hold(a.id, 'Parent row held', a.lotIds[0]);
+    const other = await keyDownload(c.id);
+    expect(other.status).toBe(200);
+    await other.arrayBuffer();
+    expect((await keyDownload(b.id)).status).toBe(403);
+    await lift(id);
+  });
+
+  it('an AUTOMATIC hold follows the lot too', async () => {
+    const a = await makeDocument(types.coa, 'Auto held', { lots: 1 });
+    const b = await secondCertificateFor(a.lotIds[0], 'Duplicate of auto held');
+    stubMail();
+    await approveWith(a, [verdict()]);
+    expect((await holdRows(a.id))[0]).toMatchObject({ source: 'spec_critical', lot_id: a.lotIds[0] });
+    expect((await keyDownload(b.id)).status).toBe(403);
+    expect(await holdRows(b.id)).toEqual([]);
+  });
+
+  it('a certificate that ARRIVES for a held lot is held from the moment it is linked, and QA is told once', async () => {
+    const a = await makeDocument(types.coa, 'Held original', { lots: 1 });
+    const id = await hold(a.id, 'Waiting for the corrected certificate', a.lotIds[0]);
+    const b = await secondCertificateFor(a.lotIds[0], 'Corrected certificate');
+    // Held with nothing written for it.
+    expect((await keyDownload(b.id)).status).toBe(403);
+
+    const mails = stubMail();
+    const ctx = { tenantId: seed.tenantId, actorUserId: seed.userId, appUrl: 'http://localhost' };
+    expect(await noticeCertificatesForHeldLots(db, 'test-resend-key', ctx, [b.id, a.id])).toEqual({ notified: 1 });
+    expect(mails).toHaveLength(1);
+    expect(mails[0].to).toEqual([qaEmail]);
+    expect(mails[0].subject).toContain('Corrected certificate arrived for a lot that is on hold');
+    expect(mails[0].html).toContain('held from Held original');
+    expect(mails[0].html).toContain('Waiting for the corrected certificate');
+    const row = (await audits('document.held_lot_certificate_arrived', b.id))[0];
+    expect(row.details.hold_ids).toEqual([id]);
+    // Once.
+    expect(await noticeCertificatesForHeldLots(db, 'test-resend-key', ctx, [b.id])).toEqual({ notified: 0 });
+    expect(mails).toHaveLength(1);
+    // The certificate the hold was placed from is not "an arrival".
+    expect(await audits('document.held_lot_certificate_arrived', a.id)).toEqual([]);
+  });
+
+  it('end to end: a second approval for a held lot, through the Review Queue route, is held and QA hears', async () => {
+    const admin = person('org_admin');
+    const queued = async (name: string) => {
+      const queueId = generateTestId();
+      const key = `pending/test/${queueId}/${name}.pdf`;
+      await files.put(key, new TextEncoder().encode(`%PDF-1.4 ${queueId}`));
+      await db
+        .prepare(
+          `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type,
+             status, processing_status, supplier_id, ai_fields, extracted_text, source, created_by)
+           VALUES (?, ?, ?, ?, ?, 20, 'application/pdf', 'pending', 'ready', ?, '{}', 'text', 'import', ?)`,
+        )
+        .bind(queueId, seed.tenantId, types.coa, key, `${name}.pdf`, supplierId, seed.orgAdminId)
+        .run();
+      return queueId;
+    };
+    const approve = async (queueId: string, title: string) => {
+      const res = (await queuePut(queueId, { status: 'approved', fields: { title, lot_number: 'ARRIVAL-LOT-1' }, supplier_id: supplierId }, admin)) as { status: number; body: any };
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      return res.body.document.id as string;
+    };
+    stubMail();
+    const first = await approve(await queued('arrival-one'), 'Arrival one');
+    const lot = await db.prepare('SELECT lot_id FROM document_lots WHERE document_id = ?').bind(first).first<{ lot_id: string }>();
+    expect(lot, 'the approve did not link a lot row').toBeTruthy();
+    const id = await hold(first, 'Held before the second arrives', lot!.lot_id);
+    vi.unstubAllGlobals();
+
+    const mails = stubMail();
+    const second = await approve(await queued('arrival-two'), 'Arrival two');
+    const lot2 = await db.prepare('SELECT lot_id FROM document_lots WHERE document_id = ?').bind(second).first<{ lot_id: string }>();
+    // The same lot number from the same supplier is the same lot row.
+    expect(lot2?.lot_id).toBe(lot!.lot_id);
+    expect((await keyDownload(second)).status).toBe(403);
+    const told = mails.filter((m) => /arrived for a lot that is on hold/.test(m.subject));
+    expect(told).toHaveLength(1);
+    expect((await audits('document.held_lot_certificate_arrived', second))[0].details.hold_ids).toEqual([id]);
+  });
+});
+
+describe('one flat extraction approved as SEVERAL product documents (C-089)', () => {
+  let testId = '';
+  const failing = [{ name: 'Micro', headers: ['Test', 'Result'], rows: [['Splitable Coliform', '40 CFU/g']] }];
+  const clean = [{ name: 'Micro', headers: ['Test', 'Result'], rows: [['Splitable Coliform', '2 CFU/g']] }];
+
+  async function queued(tables: unknown): Promise<string> {
+    if (!testId) {
+      testId = generateTestId();
+      await db.prepare(`INSERT INTO spec_tests (id, tenant_id, name, aliases, default_unit) VALUES (?, ?, 'Splitable Coliform', '[]', 'CFU/g')`).bind(testId, seed.tenantId).run();
+      await db
+        .prepare(
+          `INSERT INTO spec_limits (id, tenant_id, spec_test_id, operator, value_max, unit, severity, criticality, active)
+           VALUES (?, ?, ?, '<=', 10, 'CFU/g', 'alert', ?, 1)`,
+        )
+        .bind(generateTestId(), seed.tenantId, testId, HOLDING_SPEC_CRITICALITY)
+        .run();
+    }
+    const queueId = generateTestId();
+    const key = `pending/test/${queueId}/multi.pdf`;
+    await files.put(key, new TextEncoder().encode(`%PDF-1.4 ${queueId}`));
+    await db
+      .prepare(
+        `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type,
+           status, processing_status, supplier_id, ai_fields, tables, extracted_text, source, created_by)
+         VALUES (?, ?, ?, ?, 'multi.pdf', 20, 'application/pdf', 'pending', 'ready', ?, '{}', ?, 'text', 'import', ?)`,
+      )
+      .bind(queueId, seed.tenantId, types.coa, key, supplierId, tables ? JSON.stringify(tables) : null, seed.orgAdminId)
+      .run();
+    return queueId;
+  }
+
+  async function approveSplit(queueId: string, products: unknown[]): Promise<string[]> {
+    const res = (await queuePut(queueId, { status: 'approved', shared_fields: { title: 'Split' }, products, supplier_id: supplierId }, person('org_admin'))) as { status: number; body: any };
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return (res.body.documents as { id: string }[]).map((d) => d.id);
+  }
+
+  const checks = async (documentId: string) =>
+    (await db.prepare('SELECT verdict, test_name_raw, result_location, judgement_origin FROM document_spec_checks WHERE document_id = ? ORDER BY rowid').bind(documentId).all<Record<string, any>>()).results ?? [];
+
+  it('a result is registered, and held, on the product document the reviewer assigned its table to', async () => {
+    const queueId = await queued(failing);
+    const mails = stubMail();
+    const [p1, p2] = await approveSplit(queueId, [
+      { product_name: 'Split Cream', fields: { lot_number: 'SPLIT-A-1' }, tables: failing },
+      { product_name: 'Split Butter', fields: { lot_number: 'SPLIT-A-2' }, tables: clean },
+    ]);
+    // It used to write NOTHING for either document.
+    expect((await checks(p1)).map((c) => c.verdict)).toEqual(['out_of_spec']);
+    expect((await checks(p2)).map((c) => c.verdict)).toEqual(['in_spec']);
+    expect((await checks(p1))[0].result_location).not.toContain('not attributed');
+    const held = await holdRows(p1);
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ source: 'spec_critical' });
+    expect(await holdRows(p2)).toEqual([]);
+    expect(holdMails(mails)).toHaveLength(1);
+    // Both product documents are the SAME FILE, so the hold stops both (C-084).
+    expect((await keyDownload(p1)).status).toBe(403);
+    expect((await keyDownload(p2)).status).toBe(403);
+  });
+
+  it('a result nobody assigned is registered on EVERY document, says so, and holds each', async () => {
+    const queueId = await queued(failing);
+    stubMail();
+    const docs = await approveSplit(queueId, [
+      { product_name: 'Unassigned Cream', fields: { lot_number: 'SPLIT-B-1' } },
+      { product_name: 'Unassigned Butter', fields: { lot_number: 'SPLIT-B-2' } },
+    ]);
+    expect(docs).toHaveLength(2);
+    for (const d of docs) {
+      const rows = await checks(d);
+      expect(rows.map((c) => [c.verdict, c.judgement_origin])).toEqual([['out_of_spec', 'approval']]);
+      expect(rows[0].result_location).toContain('(not attributed to one document: registered on all 2 documents approved from this file)');
+      const held = await holdRows(d);
+      expect(held).toHaveLength(1);
+      expect(held[0].source).toBe('spec_critical');
+      expect(JSON.parse(held[0].detail).location).toContain('not attributed to one document');
+    }
+  });
+
+  it('a product with no tables of its own is judged on the stored extraction, unattributed; the others on their own', async () => {
+    const queueId = await queued(failing);
+    stubMail();
+    const [own, none] = await approveSplit(queueId, [
+      { product_name: 'Own Tables', fields: { lot_number: 'SPLIT-C-1' }, tables: clean },
+      { product_name: 'No Tables', fields: { lot_number: 'SPLIT-C-2' } },
+    ]);
+    expect((await checks(own)).map((c) => c.verdict)).toEqual(['in_spec']);
+    const rows = await checks(none);
+    expect(rows.map((c) => c.verdict)).toEqual(['out_of_spec']);
+    expect(rows[0].result_location).toContain('not attributed to one document');
+    expect(await holdRows(own)).toEqual([]);
+    expect(await holdRows(none)).toHaveLength(1);
+  });
+
+  it('with no limit failing, splitting places nothing', async () => {
+    const queueId = await queued(clean);
+    const mails = stubMail();
+    const docs = await approveSplit(queueId, [
+      { product_name: 'Clean A', fields: { lot_number: 'SPLIT-D-1' } },
+      { product_name: 'Clean B', fields: { lot_number: 'SPLIT-D-2' } },
+    ]);
+    for (const d of docs) {
+      expect((await checks(d)).map((c) => c.verdict)).toEqual(['in_spec']);
+      expect(await holdRows(d)).toEqual([]);
+    }
+    expect(holdMails(mails)).toEqual([]);
+  });
+
+  it('a result outside any record, on a certificate approved as several record documents, is registered on each', async () => {
+    const a = await makeDocument(types.coa, 'Record doc A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Record doc B', { lots: 1 });
+    stubMail();
+    await registerAndNotifyForApproval(
+      db,
+      'test-resend-key',
+      { tenantId: seed.tenantId, tenantName: 'Test Corp', queueItemId: 'q-shared', supplierId, supplierName: 'Northfield Creamery', documentTypeId: null, approvedBy: seed.userId },
+      [verdict({ scope: 'page_metadata' }), verdict({ scope: 'record[1]', target: { kind: 'table', table_index: 0, row_index: 3, table_name: 'micro' }, criticality: 'medium' })],
+      [LIMIT],
+      [
+        { documentId: a.id, title: a.title, recordIndex: 0, versionNumber: 1 },
+        { documentId: b.id, title: b.title, recordIndex: 1, versionNumber: 1 },
+      ],
+    );
+    expect((await checks(a.id)).map((c) => c.result_location)).toEqual([expect.stringContaining('not attributed to one document')]);
+    // B has its own record's result AND the shared one; only the shared one says unattributed.
+    const bRows = await checks(b.id);
+    expect(bRows).toHaveLength(2);
+    expect(bRows.filter((c) => String(c.result_location).includes('not attributed'))).toHaveLength(2 - 1);
+    expect(await holdRows(a.id)).toHaveLength(1);
+    expect(await holdRows(b.id)).toHaveLength(1);
+  });
+});
+
+describe('`delivered` means every line TRAVELLED, not that it could travel now (C-090)', () => {
+  async function failedSendWithOneLineLeftOut(leaveOut: (doc: MadeDoc) => Promise<() => Promise<void>>) {
+    const x = await makeDocument(types.coa, 'Left out COA', { lots: 1 });
+    const y = await makeDocument(types.coa, 'Sent COA', { lots: 1 });
+    const order = await newOrder();
+    await pick(order, [x.id, y.id]);
+    const undo = await leaveOut(x);
+    const plan = await preview(order, 'org_admin');
+    expect(plan.files.flatMap((f) => f.document_ids)).toEqual([y.id]);
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin', { fingerprint: plan.fingerprint });
+    expect(failed.body.send.status).toBe('failed');
+    vi.unstubAllGlobals();
+    return { x, y, order, sendId: failed.body.send.id, undo };
+  }
+
+  it('a line that was ON HOLD at the send, released since, is still owed after the old send is resent', async () => {
+    const { x, y, order, sendId, undo } = await failedSendWithOneLineLeftOut(async (doc) => {
+      const id = await hold(doc.id, 'Held at the time of the send', doc.lotIds[0]);
+      return () => lift(id);
+    });
+    await undo();
+    const mails = stubMail();
+    const retry = await resend(order, sendId, 'org_admin');
+    expect(retry.body.send.status).toBe('sent');
+    expect(attachedBodies(mails)).toEqual([y.body]);
+    // X has never been in any email. The order is not delivered.
+    expect(await orderStatus(order)).not.toBe('delivered');
+    expect(retry.body.order_status).not.toBe('delivered');
+
+    // Sending the order again carries X, and now it is.
+    const plan = await preview(order, 'org_admin');
+    expect(plan.files.flatMap((f) => f.document_ids).sort()).toEqual([x.id, y.id].sort());
+    const again = await send(order, 'org_admin', { fingerprint: plan.fingerprint });
+    expect(again.body.send.status).toBe('sent');
+    expect(attachedBodies(mails)).toContain(x.body);
+    expect(await orderStatus(order)).toBe('delivered');
+  });
+
+  it('the SHARING RULE the same: a line locked at the send and unlocked since is still owed', async () => {
+    const { x, y, order, sendId, undo } = await failedSendWithOneLineLeftOut(async (doc) => {
+      await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(doc.id).run();
+      return async () => {
+        await db.prepare(`UPDATE documents SET sharing_rule_override = NULL WHERE id = ?`).bind(doc.id).run();
+      };
+    });
+    await undo();
+    const mails = stubMail();
+    const retry = await resend(order, sendId, 'org_admin');
+    expect(retry.body.send.status).toBe('sent');
+    expect(attachedBodies(mails)).toEqual([y.body]);
+    expect(await orderStatus(order)).not.toBe('delivered');
+    void x;
+  });
+
+  it('a line that DID go stays delivered when its certificate is put on hold afterwards', async () => {
+    const a = await makeDocument(types.coa, 'Went then held', { lots: 1 });
+    const order = await newOrder();
+    await pick(order, [a.id]);
+    const plan = await preview(order, 'user');
+    stubMail();
+    await send(order, 'user', { fingerprint: plan.fingerprint });
+    expect(await orderStatus(order)).toBe('delivered');
+    await hold(a.id, 'Held after it was delivered');
+    expect(await orderStatus(order)).toBe('delivered');
+  });
+});
+
+describe('a hold that could NOT be placed is not quiet (C-087)', () => {
+  const breakHolds = () =>
+    db.prepare(`CREATE TRIGGER test_break_auto_holds BEFORE INSERT ON document_holds WHEN NEW.source != 'person' BEGIN SELECT RAISE(ABORT, 'simulated hold write failure'); END`).run();
+  const mendHolds = () => db.prepare('DROP TRIGGER IF EXISTS test_break_auto_holds').run();
+  const failuresOf = async (documentId: string) =>
+    (await db.prepare('SELECT * FROM document_hold_failures WHERE document_id = ? ORDER BY rowid').bind(documentId).all<Record<string, any>>()).results ?? [];
+  const retry = (who: Who, failureId: string) =>
+    call<{ placed: number; already_held: number }>(holdRetryRoute.onRequestPost, as(who, `http://localhost/api/holds/failures/${failureId}/retry`, { method: 'POST', params: { id: failureId } }));
+
+  async function approveTwo(a: MadeDoc, b: MadeDoc) {
+    await registerAndNotifyForApproval(
+      db,
+      'test-resend-key',
+      { tenantId: seed.tenantId, tenantName: 'Test Corp', queueItemId: 'q-fail', supplierId, supplierName: 'Northfield Creamery', documentTypeId: null, approvedBy: seed.userId, appUrl: 'http://localhost' },
+      [verdict({ scope: 'record[0]' }), verdict({ scope: 'record[1]' })],
+      [LIMIT],
+      [
+        { documentId: a.id, title: a.title, recordIndex: 0, versionNumber: 1 },
+        { documentId: b.id, title: b.title, recordIndex: 1, versionNumber: 1 },
+      ],
+    );
+  }
+
+  it('each document of the approval gets its own record, its own mail and its own retry; none is skipped', async () => {
+    const a = await makeDocument(types.coa, 'Failed hold A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Failed hold B', { lots: 1 });
+    await breakHolds();
+    const mails = stubMail();
+    try {
+      await approveTwo(a, b);
+    } finally {
+      await mendHolds();
+    }
+    // The approval stood, nothing is held -- and it is NOT quiet.
+    expect(await holdRows(a.id)).toEqual([]);
+    expect(await holdRows(b.id)).toEqual([]);
+    const fa = await failuresOf(a.id);
+    const fb = await failuresOf(b.id);
+    expect(fa).toHaveLength(1);
+    expect(fb).toHaveLength(1);
+    expect(fa[0]).toMatchObject({ document_version: 1, resolved_at: null, approved_by: seed.userId });
+    expect(fa[0].error).toContain('simulated hold write failure');
+    expect(JSON.parse(fa[0].proposals)[0]).toMatchObject({ source: 'spec_critical', source_key: 'v1:limit:record[0]::t0r0' });
+    expect(fa[0].qa_notified_at).toBeTruthy();
+    const told = mails.filter((m) => /a hold should have been placed on .* and was NOT/.test(m.subject));
+    expect(told.map((m) => m.to)).toEqual([[qaEmail], [qaEmail]]);
+    expect(told[0].html).toContain('THE CERTIFICATE IS NOT ON HOLD');
+    expect(told[0].html).toContain('bin/propose-spec-holds');
+    expect((await audits('document.hold_place_failed', a.id))[0].details).toMatchObject({ failure_id: fa[0].id });
+    // Really not held.
+    const open = await keyDownload(a.id);
+    expect(open.status).toBe(200);
+    await open.arrayBuffer();
+
+    // Shown on the document page and the Holds page, and counted in the rail.
+    const page = (await holdsOf('user', a.id)).body;
+    expect(page.failures.map((f) => f.id)).toEqual([fa[0].id]);
+    expect(page.failures[0].holds[0].reason).toContain('Critical result out of spec');
+    const list = (await listHolds('reader')).body;
+    expect(list.failures.map((f) => f.id)).toEqual(expect.arrayContaining([fa[0].id, fb[0].id]));
+    expect(list.can_place).toBe(false);
+    expect((await listHolds('user', '?count=1')).body.failures).toBeGreaterThanOrEqual(2);
+
+    // Retry: not a read-only account, not another organization.
+    expect((await retry('reader', fa[0].id)).status).toBe(403);
+    expect((await retry('other_tenant', fa[0].id)).status).toBe(404);
+    expect((await retry('user', 'no-such-failure')).status).toBe(404);
+    vi.unstubAllGlobals();
+    const mails2 = stubMail();
+    const done = await retry('user', fa[0].id);
+    expect(done.status).toBe(200);
+    expect(done.body).toEqual({ placed: 1, already_held: 0 });
+    const held = await holdRows(a.id);
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ source: 'spec_critical', source_key: 'v1:limit:record[0]::t0r0', lot_id: a.lotIds[0] });
+    expect((await keyDownload(a.id)).status).toBe(403);
+    expect(holdMails(mails2)).toHaveLength(1);
+    expect((await failuresOf(a.id))[0]).toMatchObject({ resolved_by: seed.userId, resolution: 'placed' });
+    expect((await holdsOf('user', a.id)).body.failures).toEqual([]);
+    // Once.
+    expect((await retry('user', fa[0].id)).status).toBe(409);
+    expect(await holdRows(a.id)).toHaveLength(1);
+  });
+
+  it('a retry is idempotent: a hold placed in the meantime is not placed twice', async () => {
+    const a = await makeDocument(types.coa, 'Failed then held A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Failed then held B', { lots: 1 });
+    await breakHolds();
+    stubMail();
+    try {
+      await approveTwo(a, b);
+    } finally {
+      await mendHolds();
+    }
+    // The same result is judged again and this time the hold is written.
+    await approveTwo(a, b);
+    expect(await holdRows(a.id)).toHaveLength(1);
+    const [failure] = await failuresOf(a.id);
+    const done = await retry('org_admin', failure.id);
+    expect(done.body).toEqual({ placed: 0, already_held: 1 });
+    expect(await holdRows(a.id)).toHaveLength(1);
+    expect((await failuresOf(a.id))[0].resolution).toBe('already_held');
+  });
+
+  it('a retry that fails again leaves the failure open', async () => {
+    const a = await makeDocument(types.coa, 'Fails twice A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Fails twice B', { lots: 1 });
+    await breakHolds();
+    stubMail();
+    try {
+      await approveTwo(a, b);
+      const [failure] = await failuresOf(a.id);
+      const again = await retry('user', failure.id);
+      expect(again.status).toBe(500);
+      expect(again.body.error).toContain('could not be placed');
+      expect((await failuresOf(a.id))[0].resolved_at).toBeNull();
+    } finally {
+      await mendHolds();
+    }
+  });
+
+  it('a register write that fails for one document does not skip the next, and both are still held', async () => {
+    const a = await makeDocument(types.coa, 'Register fails A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Register fails B', { lots: 1 });
+    await db
+      .prepare(`CREATE TRIGGER test_break_register BEFORE INSERT ON document_spec_checks WHEN NEW.document_id = '${a.id}' BEGIN SELECT RAISE(ABORT, 'simulated register failure'); END`)
+      .run();
+    const mails = stubMail();
+    try {
+      await approveTwo(a, b);
+    } finally {
+      await db.prepare('DROP TRIGGER IF EXISTS test_break_register').run();
+    }
+    const count = async (id: string) => (await db.prepare('SELECT COUNT(*) AS n FROM document_spec_checks WHERE document_id = ?').bind(id).first<{ n: number }>())!.n;
+    expect(await count(a.id)).toBe(0);
+    expect(await count(b.id)).toBe(1);
+    // The hold is decided from the verdicts, so A is held even with no register row.
+    expect(await holdRows(a.id)).toHaveLength(1);
+    expect(await holdRows(b.id)).toHaveLength(1);
+    expect(holdMails(mails)).toHaveLength(2);
+  });
+
+  it('with nobody on the QA route the failure goes to the administrators, and is audited as a gap', async () => {
+    const theirs = await makeDocument(null, 'Unrouted failed hold', { tenantId: seed.tenantId2 });
+    await breakHolds();
+    const mails = stubMail();
+    try {
+      await approveWith(theirs, [verdict()], { tenantId: seed.tenantId2, supplier: null });
+    } finally {
+      await mendHolds();
+    }
+    const told = mails.filter((m) => /was NOT/.test(m.subject));
+    expect(told).toHaveLength(1);
+    expect(told[0].subject).toContain('Nobody on the QA route was alerted');
+    expect(await audits('document.hold_place_failed.routing_gap', theirs.id)).toHaveLength(1);
+    expect((await failuresOf(theirs.id))[0].qa_notified_at).toBeTruthy();
+  });
+});
+
+describe('judging a send\'s files: one read for the part, not one per file', () => {
+  it('ten files cost the same number of statements as one', async () => {
+    const docs: MadeDoc[] = [];
+    for (let i = 0; i < 10; i++) docs.push(await makeDocument(types.coa, `Batch COA ${i}`, { lots: 1 }));
+    const counting = (): { db: D1Database; n: () => number } => {
+      let n = 0;
+      const proxy = new Proxy(db, {
+        get(target, prop) {
+          if (prop === 'prepare') {
+            return (sql: string) => {
+              n++;
+              return target.prepare(sql);
+            };
+          }
+          const v = Reflect.get(target, prop);
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
+      return { db: proxy as D1Database, n: () => n };
+    };
+    const actor = { method: 'jwt' as const, canReleaseQa: false };
+    const one = counting();
+    const single = await judgeSharedFiles(one.db, seed.tenantId, [{ key: 'f0', documentIds: [docs[0].id] }], 'order_send', actor);
+    const ten = counting();
+    const many = await judgeSharedFiles(ten.db, seed.tenantId, docs.map((d, i) => ({ key: `f${i}`, documentIds: [d.id] })), 'order_send', actor);
+    expect(single.get('f0')!.verdict).toBe('allow');
+    expect([...many.values()].every((j) => j.verdict === 'allow')).toBe(true);
+    expect(ten.n()).toBe(one.n());
+    // And it is a handful, not eight or nine per file.
+    expect(ten.n()).toBeLessThanOrEqual(6);
+
+    // The batch judges each file on its own documents: a hold on one stops that one only.
+    const id = await hold(docs[3].id, 'One of ten');
+    const after = await judgeSharedFiles(db, seed.tenantId, docs.map((d, i) => ({ key: `f${i}`, documentIds: [d.id] })), 'order_send', actor);
+    expect([...after.entries()].filter(([, j]) => j.verdict !== 'allow').map(([k]) => k)).toEqual(['f3']);
+    expect(after.get('f3')!.hold?.id).toBe(id);
+    await lift(id);
+  });
+});
+

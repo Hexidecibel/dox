@@ -35,7 +35,7 @@ import { api } from '../lib/api';
 import { announceHoldsChanged } from '../lib/holds';
 import { formatDateTime } from '../utils/format';
 import { HOLD_REASON_MAX, HOLD_SOURCE_HELP, HOLD_SOURCE_LABELS } from '../../shared/holds';
-import type { ApiDocumentHold, DocumentHoldsResponse } from '../../shared/types';
+import type { DocumentHoldBrief, DocumentHoldsResponse } from '../../shared/types';
 
 /** The Select's value for "the whole certificate". */
 const WHOLE = 'whole';
@@ -123,10 +123,11 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
   const [data, setData] = useState<DocumentHoldsResponse | null>(null);
   const [placing, setPlacing] = useState(false);
   const [lotChoice, setLotChoice] = useState<string>(WHOLE);
-  const [releasing, setReleasing] = useState<ApiDocumentHold | null>(null);
+  const [releasing, setReleasing] = useState<DocumentHoldBrief | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [showHistory, setShowHistory] = useState(false);
+  const [retryError, setRetryError] = useState('');
 
   const load = useCallback(() => {
     api.holds
@@ -143,9 +144,26 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
 
   if (!data) return null;
   const { active, history, lots } = data;
-  // Holds on other lots of the same certificate whose page this file prints.
+  // Holds placed on ANOTHER certificate that stop this one too: a hold on a lot
+  // this certificate carries (a lot hold covers every certificate of the lot),
+  // or on a neighbour lot whose page this file prints.
   const carried = data.also_held_by ?? [];
-  if (active.length === 0 && carried.length === 0 && history.length === 0 && !data.can_place) return null;
+  const ownLots = new Set(lots.map((l) => l.lot_id));
+  const failures = data.failures ?? [];
+  if (active.length === 0 && carried.length === 0 && history.length === 0 && failures.length === 0 && !data.can_place) return null;
+
+  const retry = async (failureId: string) => {
+    setBusy(true);
+    setRetryError('');
+    try {
+      await api.holds.retryFailure(failureId);
+      done();
+    } catch (err) {
+      setRetryError(err instanceof Error ? err.message : 'The hold could not be placed.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const done = () => {
     load();
@@ -186,26 +204,87 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
 
   return (
     <Box sx={{ mb: 2 }} data-testid="document-holds">
+      {failures.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 1 }} data-testid="hold-failure">
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            A hold should have been placed on this certificate and was not.
+          </Typography>
+          <Typography variant="caption" component="div" sx={{ mb: 0.5 }}>
+            It was approved with a result that places a hold, and the hold could not be written. It is NOT on hold and
+            can be sent until somebody retries.
+          </Typography>
+          {failures.map((f) => (
+            <Box key={f.id} sx={{ mt: 0.5 }} data-testid="hold-failure-row">
+              {f.holds.map((h, i) => (
+                <Typography key={i} variant="body2">
+                  {h.reason}
+                </Typography>
+              ))}
+              {data.can_place && (
+                <Button
+                  size="small"
+                  color="inherit"
+                  variant="outlined"
+                  sx={{ mt: 0.5, textTransform: 'none' }}
+                  disabled={busy}
+                  onClick={() => retry(f.id)}
+                  data-testid="hold-failure-retry"
+                >
+                  Retry: place the hold
+                </Button>
+              )}
+            </Box>
+          ))}
+          {retryError && (
+            <Typography variant="caption" color="error" component="div" data-testid="hold-failure-error">
+              {retryError}
+            </Typography>
+          )}
+        </Alert>
+      )}
       {active.length === 0 && carried.length > 0 && (
         <Alert severity="error" sx={{ mb: 1 }} data-testid="hold-carried-banner">
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-            This file cannot be sent: it also prints a lot that is on hold.
+            On hold. This certificate cannot be sent: a hold placed on another certificate covers it.
           </Typography>
           <Typography variant="caption" component="div">
-            Two lots of one certificate share a page, so this file shows the held lot's results too. It goes once that
-            hold is released.
+            A hold on a lot covers every certificate of that lot, and every file that prints it. It goes once that hold
+            is released.
           </Typography>
         </Alert>
       )}
       {carried.length > 0 && (
         <Box sx={{ mb: 1 }} data-testid="hold-carried">
           {carried.map((h) => (
-            <Typography key={h.id} variant="body2" data-testid="hold-carried-row">
-              <strong>{holdWhere(h)}:</strong> {h.reason}{' '}
-              <Link component={RouterLink} to={`/documents/${h.document_id}`} underline="hover">
-                Open that lot's certificate
-              </Link>
-            </Typography>
+            <Box key={h.id} sx={{ mb: 0.5 }} data-testid="hold-carried-row">
+              <Typography variant="body2">
+                <strong>{holdWhere(h)}:</strong> {h.reason}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" component="div">
+                {h.lot_id && ownLots.has(h.lot_id)
+                  ? 'This lot is on hold. Held from '
+                  : "This file also prints that lot's results. Held from "}
+                <Link component={RouterLink} to={`/documents/${h.document_id}`} underline="hover">
+                  {h.document_title || 'another certificate'}
+                </Link>
+                .
+              </Typography>
+              {data.can_release && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="inherit"
+                  sx={{ mt: 0.5, textTransform: 'none' }}
+                  onClick={() => {
+                    setError('');
+                    setReleasing(h);
+                  }}
+                  data-testid="hold-carried-release"
+                >
+                  Release hold
+                </Button>
+              )}
+            </Box>
           ))}
         </Box>
       )}
@@ -263,7 +342,14 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
           </Typography>
         )}
         {heldLots.map((l) => (
-          <Chip key={l.lot_id} size="small" color="error" label={`Lot ${l.lot_label} on hold`} data-testid="hold-lot-chip" />
+          <Chip
+            key={l.lot_id}
+            size="small"
+            color="error"
+            label={`Lot ${l.lot_label} on hold`}
+            title={l.hold && l.hold.document_id !== documentId ? `Held from ${l.hold.document_title || 'another certificate'}` : undefined}
+            data-testid="hold-lot-chip"
+          />
         ))}
         {active.some((h) => !h.lot_id) && <Chip size="small" color="error" label="Whole certificate on hold" data-testid="hold-whole-chip" />}
         {data.can_place && (

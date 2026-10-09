@@ -1705,6 +1705,11 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ reason }),
       }),
+    /** POST /api/holds/failures/:id/retry — place the holds a failed approval should have placed. */
+    retryFailure: (failureId: string) =>
+      fetchApi<{ placed: number; already_held: number }>(`/holds/failures/${encodeURIComponent(failureId)}/retry`, {
+        method: 'POST',
+      }),
     /** GET /api/holds — the organization's holds. */
     list: (params?: { tenant_id?: string; state?: 'active' | 'released' | 'all'; source?: HoldSource; supplier_id?: string; product_id?: string }) => {
       const qs = new URLSearchParams();

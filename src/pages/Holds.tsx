@@ -92,6 +92,26 @@ export function Holds() {
   };
 
   const holds = data?.holds ?? [];
+  const failures = data?.failures ?? [];
+
+  const retry = async (failureId: string, title: string | null) => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api.holds.retryFailure(failureId);
+      setNotice(
+        r.placed > 0
+          ? `${title || 'The certificate'} is now on hold.`
+          : `${title || 'The certificate'} was already on hold for that result. Nothing more was needed.`,
+      );
+      announceHoldsChanged();
+      load(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'The hold could not be placed.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Box>
@@ -154,6 +174,43 @@ export function Holds() {
       {notice && (
         <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice('')} data-testid="holds-notice">
           {notice}
+        </Alert>
+      )}
+
+      {failures.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }} data-testid="holds-failures">
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            {failures.length === 1 ? 'A hold should have been placed and was not.' : `${failures.length} holds should have been placed and were not.`}
+          </Typography>
+          <Typography variant="caption" component="div" sx={{ mb: 0.5 }}>
+            Each certificate below was approved with a result that places a hold, and the hold could not be written. It
+            is NOT on hold and can be sent until somebody retries.
+          </Typography>
+          {failures.map((f) => (
+            <Box key={f.id} sx={{ mt: 1 }} data-testid="holds-failure-row">
+              <Link component={RouterLink} to={`/documents/${f.document_id}`} underline="hover" sx={{ fontWeight: 600 }}>
+                {f.document_title || 'Untitled document'}
+              </Link>
+              {f.holds.map((h, i) => (
+                <Typography key={i} variant="body2">
+                  {h.reason}
+                </Typography>
+              ))}
+              {data?.can_place && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="inherit"
+                  sx={{ mt: 0.5, textTransform: 'none' }}
+                  disabled={busy}
+                  onClick={() => retry(f.id, f.document_title)}
+                  data-testid="holds-failure-retry"
+                >
+                  Retry: place the hold
+                </Button>
+              )}
+            </Box>
+          ))}
         </Alert>
       )}
 
