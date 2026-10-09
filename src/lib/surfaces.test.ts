@@ -70,6 +70,8 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/import',
   '/review',
   '/orders',
+  // Added with migration 0138: QA's worklist for document orders.
+  '/orders/waiting-for-qa',
   '/orders/:id',
   '/lots',
   '/requests',
@@ -163,7 +165,7 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(69);
+    expect(ROUTE_SNAPSHOT.length).toBe(70);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });
@@ -240,6 +242,9 @@ describe('SURFACES — the path-set snapshot', () => {
       '/documents/sent',
       '/expirations',
       '/import',
+      // Releasing a document that needs QA approval is never a read-only
+      // account's act (migration 0138), so the worklist is not theirs either.
+      '/orders/waiting-for-qa',
       '/reports',
       '/review',
       '/spec-alerts',
@@ -458,6 +463,7 @@ describe('SURFACES — the tenant module gate', () => {
     // admin looking at it happens to see.
     expect(navLabelsForModule('fulfillment')).toEqual([
       'Orders',
+      'Waiting for QA',
       'Lots',
       'Customers',
       'COA Fulfillment',

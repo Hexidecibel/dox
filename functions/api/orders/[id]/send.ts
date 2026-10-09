@@ -193,6 +193,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       send,
       sent: send.status === 'sent',
       order_status: result.orderStatus,
+      ...(result.documents ? { documents: result.documents } : {}),
     };
     if (send.status === 'failed') {
       return json(

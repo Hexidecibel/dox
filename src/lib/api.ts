@@ -382,6 +382,13 @@ import type {
   OrderSendPreview,
   OrderSendRequest,
   OrderSendResponse,
+  ApiOrderDocument,
+  OrderDocumentsAddRequest,
+  OrderDocumentsAddResponse,
+  OrderDocumentsReleaseResponse,
+  OrderDocumentReleaseTarget,
+  PendingOrderDocumentsCount,
+  PendingOrderDocumentsResponse,
 } from '../../shared/types';
 import type { LotSchemeSpec } from '../../shared/lotScheme';
 import type {
@@ -1676,6 +1683,19 @@ export const api = {
    * producer and the private-label flag. Any role; changing an approval is
    * `supplierProducts.update`.
    */
+  orderDocuments: {
+    /** GET /api/order-documents/pending — every document waiting for QA, for a person who can release. */
+    pending(params?: { tenant_id?: string }) {
+      const qs = params?.tenant_id ? `?tenant_id=${encodeURIComponent(params.tenant_id)}` : '';
+      return fetchApi<PendingOrderDocumentsResponse>(`/order-documents/pending${qs}`);
+    },
+    /** GET /api/order-documents/pending?count=1 — one cheap count, for the rail. */
+    pendingCount(params?: { tenant_id?: string }) {
+      const qs = params?.tenant_id ? `&tenant_id=${encodeURIComponent(params.tenant_id)}` : '';
+      return fetchApi<PendingOrderDocumentsCount>(`/order-documents/pending?count=1${qs}`);
+    },
+  },
+
   approvedItems: {
     list: (params?: {
       supplier_id?: string;
@@ -3491,6 +3511,46 @@ export const api = {
     /** POST /api/orders/:id/sends/:sendId/resend — only the emails that did not go. */
     resendFailed(id: string, sendId: string) {
       return fetchApi<OrderSendResponse>(`/orders/${id}/sends/${sendId}/resend`, { method: 'POST', body: '{}' });
+    },
+    /**
+     * POST /api/orders/:id/documents — document lines (migration 0138): one per
+     * (item, supplier, type), resolved to the supplier's current approved
+     * document. `dry_run` answers what would resolve and writes nothing.
+     */
+    addDocuments(id: string, body: OrderDocumentsAddRequest) {
+      return fetchApi<OrderDocumentsAddResponse>(`/orders/${id}/documents`, { method: 'POST', body: JSON.stringify(body) });
+    },
+    removeDocument(id: string, lineId: string) {
+      return fetchApi<{ success: true }>(`/orders/${id}/documents/${lineId}`, { method: 'DELETE' });
+    },
+    /** POST /api/orders/:id/documents/:lineId/refresh — resolve the line again. */
+    refreshDocument(id: string, lineId: string) {
+      return fetchApi<{ changed: boolean; document: ApiOrderDocument | null }>(
+        `/orders/${id}/documents/${lineId}/refresh`,
+        { method: 'POST', body: '{}' },
+      );
+    },
+    /**
+     * POST /api/orders/:id/documents/release — QA releases held documents; one
+     * mail per act. Each line goes WITH WHAT QA SAW (document, version, asking
+     * send); a line that changed since is not released.
+     */
+    releaseDocuments(id: string, lines: OrderDocumentReleaseTarget[]) {
+      return fetchApi<OrderDocumentsReleaseResponse>(`/orders/${id}/documents/release`, {
+        method: 'POST',
+        body: JSON.stringify({ lines }),
+      });
+    },
+    /** POST /api/orders/:id/documents/:lineId/refuse — a note is required, and what QA saw. */
+    refuseDocument(id: string, lineId: string, note: string, seen: { document_id: string; pending_send_id: string }) {
+      return fetchApi<{ success: true }>(`/orders/${id}/documents/${lineId}/refuse`, {
+        method: 'POST',
+        body: JSON.stringify({ note, ...seen }),
+      });
+    },
+    /** POST /api/orders/:id/documents/:lineId/give-back — a release that did not finish goes back to waiting. */
+    giveBackDocument(id: string, lineId: string) {
+      return fetchApi<{ success: true }>(`/orders/${id}/documents/${lineId}/give-back`, { method: 'POST', body: '{}' });
     },
     update(id: string, data: Record<string, unknown>) {
       return fetchApi(`/orders/${id}`, { method: 'PUT', body: JSON.stringify(data) });

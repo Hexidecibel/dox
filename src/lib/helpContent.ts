@@ -382,7 +382,8 @@ const orders: ModuleHelpExpanded = {
     well:
       "Everything dox knows about this order: its lines, customer, PO and ship date, the certificate on each line, and what has already been sent. " +
       "Add COAs puts approved certificates on the order, one line per lot each certifies; every line shows its product, lot and production date so a wrong pick is visible before it goes. " +
-      "Review and send shows exactly what the customer will receive before anything leaves.",
+      "Review and send shows exactly what the customer will receive before anything leaves. " +
+      "Add documents for items puts a supplier's spec sheet, hazard plan or certificate on the order: choose items from the approved list and the portal finds each supplier's current document.",
   },
   help: {
     sections: [
@@ -413,7 +414,60 @@ const orders: ModuleHelpExpanded = {
           "A certificate that covers several lots is sent whole, once, even when several lines came from it. If the whole certificate is not on file the screen says so and the page for that lot is sent instead. " +
           "When the files do not fit in one email they go as numbered emails, 1 of 3 and so on, and the screen shows the split before you send. A single file too large to attach goes as a link in the first email; that link does not expire and can be revoked from Sent documents. An order that would need more than ten emails is refused with the number, so send it in two goes. " +
           "Lines with no certificate, or whose certificate has since been archived, are listed as not sent. " +
-          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot build or send an order.",
+          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot pick certificates or send an order.",
+      },
+      {
+        heading: 'Document orders',
+        body:
+          "An order is internal: documents already on file, for a customer. A request is the ask to a supplier and is a separate thing; a document order never writes to a supplier. " +
+          "Anyone with a login can open an order and build it, a read-only account included. Sending it needs an account that can send. " +
+          "Add documents for items lists the approved items, one row for each item and supplier. An item with two approved suppliers is two rows and nothing chooses between them: tick the ones you want and take off any line you do not. Then choose the document types. Before anything is added the portal shows what it found for each. " +
+          "The current document is the item's own document of that type when there is one, otherwise the supplier's, and the newest of those. If the newest has expired the line says expired; an older copy is not used in its place. A line keeps the document it was added with. When a newer one arrives the line says so and Refresh takes it. " +
+          "Every document has a sharing rule, set on its document type and changeable on the document. Send freely goes straight away, on one link that works for 30 days. Needs QA approval is held: QA is told, reviews it, and releasing it mails the link to the addresses the order was sent to. Locked never leaves. Certificates of analysis are attached, as on any order. " +
+          "Review and send shows the three groups before you send: what goes now, what waits for QA, and what will not go and why. If you can release QA documents yourself, sending one is the approval and is recorded as yours. " +
+          "If you order a document that is missing or has expired, QA is told once, with the item, supplier and document type. Nothing is drafted or sent to the supplier. " +
+          "On a private label item, a co-packer's document says who makes the product. The order shows a note naming the producer so you know before you share it. It is a note only and blocks nothing. " +
+          "Waiting for QA, beside Orders, lists every held document for the people who can release it. Refusing needs a note, which the person who ordered reads on the order.",
+      },
+      {
+        heading: 'Document orders: building from approved items',
+        body:
+          "Open an order with New Order, then choose Add documents for items. Search the approved list by item, supplier, SKU or plant. Each row is one item from one supplier, so tick every supplier whose documents you want. Tick the document types, then See what is on file. " +
+          "The preview shows, for each one, whether a document was found, is missing or has expired, the sharing rule it leaves under, and anything that was not added and why. An item that is waiting for approval or not approved cannot be ordered. " +
+          "Nothing is added until you press Add. A missing or expired document can still be added so that QA hears about it when the order is sent.",
+      },
+      {
+        heading: 'Document orders: the three outcomes at send',
+        body:
+          "Review and send sorts every document into one of three groups, and the send does exactly what the screen shows. " +
+          "Goes now: send freely documents, on one link that works for 30 days, and certificates of analysis, attached. If you can release QA documents, the ones that need approval go now too, and sending is your approval. " +
+          "Waits for QA: a document that needs approval you cannot give. It is in no email and on no link. QA is told once. A line already waiting says since when and for which addresses; sending the order again does not ask again and does not change who it goes to. " +
+          "Will not go: locked, missing, expired, archived, or refused by QA, each with the reason. " +
+          "If nothing can go yet but QA has something new to hear, the button reads Ask QA and no email reaches the customer. If there is nothing to send and nothing new to ask, there is nothing to send. " +
+          "When QA releases or refuses what you asked for, you get an email saying which documents, who they went to, or QA's note.",
+      },
+      {
+        heading: 'Document orders: Waiting for QA and releasing',
+        body:
+          "Waiting for QA shows in the menu only for people who can release, with the number waiting. Each line shows the document, its version and when it was approved, the item and supplier, who asked and when, and the exact addresses it will go to. If QA refused the same thing earlier on that order, the earlier note is shown beside it. " +
+          "Release does not send straight away. It opens a last look at exactly what you are approving. Confirming sends the customer a link that works for 30 days, in your name. Documents of one order released together go in one email. One release covers at most 50 documents. " +
+          "You release what was on your screen. If the document, its version or the addresses changed after you opened the list, that line is not released, the screen says it changed, and the list reloads. A document that was locked, archived or has expired while it waited cannot be released. " +
+          "Refuse needs a note. A refused document stays on the order, marked, and does not go on any later send of that order.",
+      },
+      {
+        heading: 'Document orders: put back and release again',
+        body:
+          "A release is only shown as released once the email has gone and been recorded. If something stops it half way, the document shows Release did not finish. It is never shown as sent. " +
+          "After a few minutes QA has two choices. Release again withdraws the link from the unfinished attempt and sends a new one. Put back withdraws that link and returns the document to the waiting list without sending anything. " +
+          "While a document is in the middle of a release nobody can remove or refresh its line. " +
+          "If you resend an old send that failed, each document is checked against the order as it is now. One that has since been refused, removed, replaced by another document, or has expired is left out, and the send says which and why. A send where nothing was left reads Withdrawn, nothing sent.",
+      },
+      {
+        heading: 'Document orders: what a read-only account can do',
+        body:
+          "A read-only account can open an order, add documents for items, and remove or refresh a line nothing has happened to. It can open up to 20 orders an hour. " +
+          "It cannot send, cannot add certificates of analysis as lines, and cannot change the order's customer, PO or status. " +
+          "It cannot remove or refresh a line that is waiting for QA, that QA has released, or that QA has refused. Somebody with a sending account can.",
       },
       {
         heading: 'Filtering and search',

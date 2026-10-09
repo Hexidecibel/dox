@@ -143,9 +143,10 @@ describe('Modules screen', () => {
     // Concrete, not "are you sure?": the count AND the names, straight from
     // the surface table, so a surface added tomorrow is counted with no edit.
     expect(await screen.findByText('Switch off Order Fulfillment?')).toBeInTheDocument();
-    expect(screen.getByText(/4 sidebar items/)).toBeInTheDocument();
+    // Five since migration 0138 added "Waiting for QA" beside Orders.
+    expect(screen.getByText(/5 sidebar items/)).toBeInTheDocument();
     expect(
-      screen.getByText(/Orders, Lots, Customers, COA Fulfillment/)
+      screen.getByText(/Orders, Waiting for QA, Lots, Customers, COA Fulfillment/)
     ).toBeInTheDocument();
     // Nothing has been written yet — the dialog is the decision point.
     expect(updateModule).not.toHaveBeenCalled();

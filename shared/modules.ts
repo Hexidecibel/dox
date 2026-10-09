@@ -159,7 +159,7 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       'For the people shipping product — the orders, the lots that filled them, and the certificates a customer asks for after delivery.',
     defaultEnabled: true,
     uiPrefixes: ['/orders', '/lots', '/reports', '/admin/customers'],
-    apiPrefixes: ['/api/orders', '/api/lots', '/api/customers', '/api/reports', '/api/lot-matches', '/api/order-products'],
+    apiPrefixes: ['/api/orders', '/api/lots', '/api/customers', '/api/reports', '/api/lot-matches', '/api/order-products', '/api/order-documents'],
   },
   records: {
     key: 'records',

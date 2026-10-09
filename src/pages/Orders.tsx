@@ -36,7 +36,6 @@ import { InfoTooltip } from '../components/InfoTooltip';
 import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
 import { NewOrderDialog } from '../components/orders/NewOrderDialog';
-import { useAuth } from '../contexts/AuthContext';
 
 
 const ITEMS_PER_PAGE = 50;
@@ -87,9 +86,8 @@ export function Orders() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Create dialog. A read-only account cannot build an order, so it is not
-  // offered the button the API would refuse.
-  const { isReader } = useAuth();
+  // Create dialog. Offered to every login since migration 0138: a read-only
+  // account opens an order to build a document order on it.
   const [createOpen, setCreateOpen] = useState(false);
 
   const loadOrders = useCallback(async () => {
@@ -160,16 +158,16 @@ export function Orders() {
             </Typography>
           )}
         </Box>
-        {!isReader && (
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={() => setCreateOpen(true)}
-            data-testid="orders-new"
-          >
-            New Order
-          </Button>
-        )}
+        {/* Any login opens an order (migration 0138): a read-only account
+            builds a document order, and somebody else sends it. */}
+        <Button
+          variant="contained"
+          startIcon={<AddIcon />}
+          onClick={() => setCreateOpen(true)}
+          data-testid="orders-new"
+        >
+          New Order
+        </Button>
       </Box>
 
       <HelpWell id="orders.list" title={helpContent.orders.list?.headline ?? 'Orders'}>

@@ -4,9 +4,20 @@ import {
   requireTenantAccess,
   BadRequestError,
   ConflictError,
+  ForbiddenError,
   errorToResponse,
 } from '../../lib/permissions';
 import { parseShipDate, requireTenantCustomer } from '../../lib/order-items';
+import { checkRateLimit, recordAttempt } from '../../lib/ratelimit';
+
+/**
+ * Orders a READ-ONLY account may open in an hour. Opening an order was widened
+ * to every login so sales can build a document order (migration 0138); this is
+ * the bound on that door. A salesperson opens a handful a day; twenty an hour
+ * is generous for a person and a wall for a script.
+ */
+export const READER_ORDER_CREATE_LIMIT_PER_HOUR = 20;
+const READER_ORDER_CREATE_WINDOW_SECONDS = 60 * 60;
 import { sanitizeString } from '../../lib/validation';
 import { buildMatchExpr } from '../../lib/search-fts';
 import type { Env, User } from '../../lib/types';
@@ -144,7 +155,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
-    requireRole(user, 'super_admin', 'org_admin', 'user');
+    // ANY LOGIN MAY OPEN AN ORDER (migration 0138). AJ: "any user with a
+    // portal login can build the order" -- a salesperson on a read-only
+    // account places a document order. What a read-only account still may not
+    // do is put COA lines on it (below, and POST ./:id/items), edit or delete
+    // the order, or send anything.
+    requireRole(user, 'super_admin', 'org_admin', 'user', 'reader');
 
     const body = (await context.request.json()) as {
       order_number?: string;
@@ -165,6 +181,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!body.order_number?.trim()) {
       throw new BadRequestError('order_number is required');
+    }
+    if (user.role === 'reader' && Array.isArray(body.items) && body.items.length > 0) {
+      throw new ForbiddenError(
+        'A read-only account can open an order and add documents for items to it. It cannot add COA lines.',
+      );
     }
 
     let tenantId = body.tenant_id || null;
@@ -203,6 +224,28 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new ConflictError(
         `Order ${orderNumber} already exists. Open it, or use a different order number.`
       );
+    }
+
+    if (user.role === 'reader') {
+      const rlKey = `order_create:${user.id}`;
+      const rl = await checkRateLimit(
+        context.env.DB,
+        rlKey,
+        READER_ORDER_CREATE_LIMIT_PER_HOUR,
+        READER_ORDER_CREATE_WINDOW_SECONDS,
+      );
+      if (!rl.allowed) {
+        return new Response(
+          JSON.stringify({
+            error:
+              `That is ${READER_ORDER_CREATE_LIMIT_PER_HOUR} orders opened in an hour, which is the limit for a read-only account. ` +
+              'Try again a little later, or ask somebody with a sending account to open it.',
+            code: 'rate_limited',
+          }),
+          { status: 429, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      await recordAttempt(context.env.DB, rlKey, READER_ORDER_CREATE_WINDOW_SECONDS);
     }
 
     await context.env.DB.prepare(

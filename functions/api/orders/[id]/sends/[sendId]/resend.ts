@@ -47,8 +47,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       await loadOrderSends(context.env.DB, user, { tenantId: order.tenant_id, orderId: order.id })
     ).find((s) => s.id === sendId);
     if (!before) throw new NotFoundError('Send not found');
+    if (before.kind === 'qa_release') {
+      // A release that failed gave its documents back to the waiting list.
+      // The retry is a release, with the rule asked again, not a resend.
+      throw new ConflictError(
+        'This was a QA release, and it is not resent from here. The documents are waiting for QA again: release them from there.',
+      );
+    }
     if (before.status === 'sent') {
       throw new ConflictError('Every email of this send already went. There is nothing to resend.');
+    }
+    if (before.outcome === 'withdrawn' || before.outcome === 'sent_rest_withdrawn') {
+      throw new ConflictError(
+        'Nothing is left to resend. What did not go was withdrawn: the documents were refused, removed or changed since this send was reviewed.',
+      );
     }
     if (!before.can_resend) {
       throw new ForbiddenError('Only the person who sent this, or an administrator, can resend it.');
@@ -118,6 +130,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       send: after,
       sent: after.status === 'sent',
       order_status: result.orderStatus ?? order.status,
+      // Files left out because the document line they came from no longer
+      // asks for them (refused, removed, re-pointed, expired). Said, per file.
+      ...(result.notResent.length > 0 ? { not_resent: result.notResent } : {}),
     };
     return json(response);
   } catch (err) {

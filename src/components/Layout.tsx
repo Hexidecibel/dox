@@ -41,6 +41,8 @@ import { useModuleAccess } from '../contexts/ModuleAccessContext';
 import { NotificationsBell } from './NotificationsBell';
 import { SetupBanner } from './SetupPrompt';
 import { navGroupsForRole, pinnedNavSurfaces } from '../lib/surfaces';
+import { api } from '../lib/api';
+import { QA_WAITING_CHANGED, QA_WAITING_POLL_MS } from '../lib/qaWaiting';
 import type { Surface } from '../lib/surfaces';
 
 const DRAWER_WIDTH = 260;
@@ -105,14 +107,78 @@ export function Layout() {
       const [pathname, query] = path.split('?');
       return location.pathname === pathname && location.search.includes(query);
     }
-    return location.pathname === path || location.pathname.startsWith(path + '/');
+    if (location.pathname === path) return true;
+    if (!location.pathname.startsWith(path + '/')) return false;
+    // A rail entry nested under another (Orders > Waiting for QA) claims its
+    // own pages: the parent is not also lit while the child is.
+    return !navGroups.some((g) =>
+      g.items.some(
+        (s) =>
+          s.path !== path &&
+          s.path.startsWith(path + '/') &&
+          (location.pathname === s.path || location.pathname.startsWith(s.path + '/')),
+      ),
+    );
   };
 
   // One computation per role or visibility change, shared by both blocks of
   // the rail. Pinned surfaces belong to no module, so they need no set.
-  const navGroups = useMemo(
+  const roleGroups = useMemo(
     () => navGroupsForRole(user?.role, visibleModules),
     [user?.role, visibleModules]
+  );
+
+  // "Waiting for QA" (migration 0138) is drawn only for a person who can
+  // release, with the number waiting. Who that is cannot be read off the role
+  // (a QA releaser is an ordinary user named on a route), so the server is
+  // asked -- and only when the role's rail has such an entry at all.
+  //
+  // ONE CHEAP COUNT, ON A TIMER. `?count=1` is a single COUNT; the list's live
+  // judgement of every waiting line is for the page, not the rail. Asked on
+  // mount and every three minutes, the notification bell's own cadence -- NOT
+  // on every navigation. The waiting page and the order page announce a
+  // release or a refusal (`QA_WAITING_CHANGED`) so the number moves at once.
+  // A failure leaves the entry hidden: the page is still reachable by URL.
+  const wantsQaWaiting = useMemo(
+    () => roleGroups.some((g) => g.items.some((s) => s.nav?.requires === 'qa_release')),
+    [roleGroups]
+  );
+  const [qaWaiting, setQaWaiting] = useState<{ canRelease: boolean; count: number }>({ canRelease: false, count: 0 });
+  useEffect(() => {
+    if (!wantsQaWaiting) {
+      setQaWaiting({ canRelease: false, count: 0 });
+      return;
+    }
+    let cancelled = false;
+    const ask = () => {
+      api.orderDocuments
+        .pendingCount({ tenant_id: selectedTenantId || undefined })
+        .then((r) => {
+          if (!cancelled) setQaWaiting({ canRelease: r.can_release, count: r.count });
+        })
+        .catch(() => {
+          if (!cancelled) setQaWaiting({ canRelease: false, count: 0 });
+        });
+    };
+    ask();
+    const timer = window.setInterval(ask, QA_WAITING_POLL_MS);
+    window.addEventListener(QA_WAITING_CHANGED, ask);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener(QA_WAITING_CHANGED, ask);
+    };
+  }, [wantsQaWaiting, selectedTenantId]);
+
+  const navGroups = useMemo(
+    () =>
+      roleGroups
+        .map((g) => ({
+          ...g,
+          items: g.items.filter((s) => s.nav?.requires !== 'qa_release' || qaWaiting.canRelease),
+        }))
+        .filter((g) => g.items.length > 0),
+    [roleGroups, qaWaiting.canRelease]
   );
   const pinned = useMemo(() => pinnedNavSurfaces(user?.role), [user?.role]);
 
@@ -134,6 +200,9 @@ export function Layout() {
             primary={surface.nav!.label}
             primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: active ? 600 : 400 }}
           />
+          {surface.nav!.requires === 'qa_release' && qaWaiting.count > 0 && (
+            <Chip size="small" color="warning" label={qaWaiting.count} data-testid="nav-waiting-for-qa-count" />
+          )}
         </ListItemButton>
       </ListItem>
     );

@@ -165,6 +165,22 @@ describe('the middleware gate', () => {
     ]) {
       expect((await callChain(req(path), { user: regularUser() })).status, path).toBe(403);
     }
+    // Document orders (migration 0138) live under the same toggle: the lines
+    // sit under /api/orders, and QA's waiting list has its own prefix because
+    // "/api/order-documents" is not under "/api/orders".
+    for (const path of [
+      '/api/orders/xyz/documents',
+      '/api/orders/xyz/documents/abc',
+      '/api/orders/xyz/documents/abc/refresh',
+      '/api/orders/xyz/documents/abc/release',
+      '/api/orders/xyz/documents/abc/refuse',
+      '/api/orders/xyz/documents/abc/give-back',
+      '/api/orders/xyz/documents/release',
+      '/api/order-documents/pending',
+      '/api/order-documents/pending?count=1',
+    ]) {
+      expect((await callChain(req(path), { user: regularUser() })).status, path).toBe(403);
+    }
   });
 
   it('gates the approved item list, facilities and the customer sub-resources (0135) with the data they read', async () => {

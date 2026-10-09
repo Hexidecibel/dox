@@ -1975,8 +1975,11 @@ setting. It never overwrites a stored rule.
 On the basic tier nothing feeds orders in, so a person records what the matcher
 would otherwise be told and puts the approved certificate on each line. It is
 the same order record a connector writes -- there is no second "manual order"
-object. All of it is module-gated under `fulfillment`, and every write needs
-`user` or above (a read-only account builds and sends nothing).
+object. All of it is module-gated under `fulfillment`, and every write here
+needs `user` or above -- except opening an order, which any login may do since
+migration 0138 so that a read-only account can build a document order (see
+"Document orders" below). A read-only account still puts no COA line on an
+order (`items` in the create body is a 403 for it) and sends nothing.
 
 **`POST /api/orders`** — body `{ order_number, po_number?, customer_id?,
 customer_name?, customer_number?, ship_date?, items? }`. `ship_date` is
@@ -2117,6 +2120,182 @@ row. Revoking also cannot recall a file already downloaded, and the UI says so
 rather than implying otherwise.
 
 ---
+
+### Document orders: documents for items, on the same order (migration 0138)
+
+An **order** is internal: documents already on file, for a customer. A
+**request** stays what it is, the external ask to a supplier. A document order
+is not a second kind of order -- it is document LINES on the `orders` record
+above, beside its COA lines -- and nothing in it drafts or sends anything to a
+supplier. Module-gated under `fulfillment` (`/api/orders`, `/api/order-documents`).
+
+**Who.** Any login builds: `POST /api/orders` and the three line routes below
+are open to every role, a read-only account included (a reader still may not
+send, put COA lines on an order, or edit its header). Two limits on a
+read-only account: it may not remove or refresh a line that is waiting for QA,
+released or refused (403), and it opens at most 20 orders an hour (429).
+Nobody, whatever their role, removes or refreshes a line in the middle of a
+release (409): it is released again or put back first. Sending keeps its bar,
+`user` and above. Releasing is a QA releaser's act and never an API key's.
+
+**`POST /api/orders/:id/documents`** -- body `{ items: [{ product_id,
+supplier_id }], document_type_ids: [...], dry_run? }`. One line per (item,
+supplier, type). `items` are pairs from `GET /api/approved-items`; **only an
+approved pair is added**, and a pending / not approved / unknown pair is listed
+in `refused` with the reason while the rest land. A product with several
+approved suppliers is one line for each pair you send -- nothing picks a
+supplier. Each line is resolved to the supplier's **current** document of the
+type:
+
+1. A candidate is an active document of that supplier and type with a file. A
+   document linked to the item (`document_products`) is the item's own; one
+   linked to no item is the supplier's and stands for all its items; **one
+   linked only to other items is never offered**.
+2. The item's own document ranks ahead of a supplier-level one, whatever the dates.
+3. Newest wins (`COALESCE(approved_at, created_at)`).
+4. If the newest has expired the line is `expired` -- an older document still
+   in date is **not** used in its place; `resolution_note` says one exists.
+   "Expired" is the document's own due date (`resolveRenewalExpiry`), never
+   the product's shelf life.
+5. A tie (same tier, same timestamp) takes the later-created document, then the
+   higher id, and `resolution_note` says there was a tie.
+6. Nothing eligible is `missing`.
+
+A type that is another supplier's own (`document_types.supplier_id`) does not
+apply to the pair and is in `refused`. A type of the same name that is the
+organization's or the pair's own supplier's counts as the same type.
+`dry_run: true` writes nothing and returns the same `lines[]` with `outcome:
+"would_add"`. 201 when a line was added, 200 for a dry run or when every line
+was already on the order, 400 when everything was refused. At most 200 lines a
+request. Audited `order_document.added`.
+
+**`DELETE /api/orders/:id/documents/:lineId`**, **`POST
+/api/orders/:id/documents/:lineId/refresh`** -- remove a line; resolve it
+again. A line keeps the document it was added with: when a newer one arrives
+`GET /api/orders/:id` reports `stale: true` with a note, and Refresh takes it.
+Refreshing to a different document clears what was decided about the old one.
+
+**`GET /api/orders/:id`** now also returns `documents[]` and `can_release_qa`.
+Each document line carries `sharing_rule` (the rule **now**) beside
+`rule_at_resolve` (the rule when it was added -- shown for comparison, read by
+no decision), `resolution` as it stands now, `release_status` (`none` /
+`pending_qa` / `released` / `refused`), `facility` (the pair's plant as
+recorded now; never stored on the line), `advisory`, and what a send by the
+caller would do: `disposition` (`goes_now` / `waits_for_qa` / `will_not_go`),
+`disposition_reason` and `disposition_text`.
+
+**Sending.** `GET /api/orders/:id/send-preview` gains `documents`
+(`goes_now[]`, `waits_for_qa[]`, `will_not_go[]`, `link_days`, `only_asks_qa`)
+and `POST /api/orders/:id/send` executes exactly that:
+
+- **Send freely** leaves now, on **one link that works for 30 days**, in the
+  first email beside any attached certificates (`files[].delivery: "link"`,
+  `link_days: 30`). A **certificate of analysis** on a document line is
+  **attached**, whole original and all, like a COA pick.
+- **Needs QA approval**: when the sender can release QA documents, it goes now,
+  the line is `released` in their name and `document.qa_release_approved` is
+  written. Otherwise the line becomes `pending_qa`: it is in **no file, no link
+  and no email** of the send, and QA is told.
+- **Locked**, **missing**, **expired**, an archived document, a line QA
+  refused: listed in `will_not_go` and in `lines_not_sent` (with
+  `order_document_id`), each with its reason.
+- QA is mailed **once per line per cause** (`pending_qa` / `missing` /
+  `expired`) through the `QA` owner route, with the item, supplier, plant,
+  type, order, who asked and a link to the order. With no QA route the
+  administrators and master user are told instead and
+  `order.documents_qa_notice.routing_gap` is audited. Nothing is drafted to a
+  supplier.
+- A send where nothing can go yet but QA has something to hear is allowed:
+  `only_asks_qa`, `part_count: 0`, and the record has `kind: "qa_request"`.
+  With nothing to go and nothing new for QA the answer is 400
+  `nothing_to_send`.
+- The `fingerprint` covers the document lines (which line, which document,
+  which group), so a rule that moves between review and send is a 409.
+- The order is `delivered` only when no document line was left behind either.
+- A line already waiting for QA is never re-pointed: its asking send and its
+  recipients are fixed until it is released, refused, removed or refreshed. A
+  send with nothing to send and nothing NEW for QA is the 400 `nothing_to_send`,
+  and the preview says "Already waiting for QA since <date>, for <recipients>".
+- A resend re-asks the rule for linked documents exactly as for attachments,
+  **and asks each document line**: a file whose line was refused, removed or
+  now holds a different document, or whose document has expired, is no longer
+  active or has a new version, is left out of the retried email. The response
+  lists it in `not_resent[]` (`file_name`, `reason`), the file record carries
+  `not_sent_reason`, and the rest of the email still goes. An email with
+  nothing left sends nothing, is recorded `withdrawn: true` (not `ok`), and
+  never marks the order delivered. Every send carries **`outcome`**: `sent` /
+  `partial` / `failed` as `status`, plus `withdrawn` (nothing left at all;
+  stored `failed`) and `sent_rest_withdrawn` (some emails went, the rest were
+  withdrawn; stored `partial`). Neither can be resent (409).
+
+The response carries `documents: { sent, pending_qa, not_sent, qa_notice }`.
+
+**`POST /api/orders/:id/documents/release`** `{ lines: [{ id, document_id,
+version_number, pending_send_id }] }` (and `POST .../documents/:lineId/release`
+with `{ document_id, version_number, pending_send_id }` for one) -- QA releases
+held documents. **Each line goes with what QA saw**, exactly as
+`GET /api/order-documents/pending` returned it: if the line now holds a
+different document, the document has a new version, or the asking send is not
+the same, that line is not released and is in `refused` with `code: "changed"`.
+A line id alone is a 400. At most **50** lines, what one link carries; more is
+a 400 with both numbers and releases nothing. A
+QA releaser signed in (`canReleaseQa`: the `QA` owner route, else the master
+user, or an administrator); **403 for an API key**, a read-only account or
+anybody else. The document released is the one on the line; the **live** rule
+is asked of the releaser, so a document locked, archived or expired while it
+waited is refused with the reason and stays waiting. Each line is claimed
+under `release_status = 'pending_qa'` and those three values, so two presses
+mail once. A claimed line is `releasing`, and becomes `released` only after
+the mail went and the record was written: a release that does not finish
+leaves the line `releasing` (shown as "release did not finish", never as sent)
+and its `order_sends` record at `partial` with "outcome not recorded". After
+five minutes it can be released again, or put back with
+**`POST /api/orders/:id/documents/:lineId/give-back`**; both first revoke the
+link the unfinished attempt minted. `refused[].code` is `changed`,
+`in_progress`, `unfinished` or `undone` where one applies. **A release is
+recorded as sent only if it is still that release when its mail returns**: if
+somebody put it back meanwhile, the line is refused with `code: "undone"`, the
+record's part carries `code: "undone"` and `undone_by_name`, and nothing is
+listed as released. The release waits at most 60 seconds for the mail
+provider; a timeout is "outcome not recorded" (`unfinished`), and a call that
+never completed says "the mail may not have been sent; the link was
+withdrawn". The person who pressed the asking send is told by one internal
+email (`requester_notice` in the response); a refusal tells them too. Lines bound
+for the same recipients leave on **one 30-day link in one email**, minted in
+the **releaser's** name (a link serves a `qa` document only while its minter
+may release, C-045), addressed to the recipients **of the send that asked**
+(stored on that send; a later edit to the customer does not redirect it), with
+replies going to the person who sent the order. Written to `order_sends` as
+`kind: "qa_release"` and shown in the order's history and on Sent documents.
+If the mail fails the link is revoked and the lines wait again. 200 with
+`released[]` and `refused[]` when at least one went, 409 when none did, 404 for
+an id that is not a line of that order. Audited `order.documents_released` and
+`document.qa_release_approved`.
+
+**`POST /api/orders/:id/documents/:lineId/refuse`** `{ note, document_id,
+pending_send_id }` -- QA says no. The note is required (400) and shown on the
+order; the document and asking send are what QA saw, and a line that changed
+since is not refused (409). The line stays, marked
+`refused`, and does not go on any later send of the order. Audited
+`order.document_release_refused`.
+
+**`GET /api/order-documents/pending`** -- every line waiting for QA in the
+organization, oldest first: order, customer, item, supplier, plant, type,
+document, the rule now, who asked and when, the `recipients` a release would
+mail, the advisory, `releasable` / `blocked_reason`, and what a release is
+pinned to: `version_number`, `document_approved_at`, `pending_send_id`. A line
+whose release did not finish is listed too (`release_status: "releasing"`,
+`stuck`). A person who cannot release gets `{ can_release: false, count: 0,
+lines: [] }`. Each line carries `earlier_refusals[]` (who, when, the note)
+when QA refused the same item, supplier and type on that order before the line
+was taken off and asked for again. **`?count=1`** answers `{ can_release, count }` from one COUNT
+and no lines; it is what the navigation polls.
+
+**The private-label advisory.** A line whose item has a brand owner and a
+different producer recorded carries `private_label: true` and `advisory`
+("This document is the producer's own and names <producer>..."). It is on the
+order, in the add preview, in the send preview and on QA's list. It blocks
+nothing and is never in the customer's email.
 
 ## Error Handling
 
