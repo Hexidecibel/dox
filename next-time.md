@@ -6,11 +6,13 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ## START HERE (written 2026-10-08)
 
-**State.** Prod = **v2.30.0** (deploy `69bbec2d`, "What may leave, and who says so"), master + tag pushed, staging current, migrations through **0137** applied + stamped on prod. Bookmark before 0137: `000017ba-0000027e-000050fe-a0a108c7f7b803a69902409f25bd990f` (`~/drops/dox-backups/doc-upload-db-20261008T210416Z.timetravel.json`). No worker restart needed.
+**State.** Prod = **v2.31.0** (deploy `887bf4c0`, "Order the documents, not only the certificates"), master + tags pushed, staging current, migrations through **0138** applied + stamped on prod. Bookmarks: before 0137 `~/drops/dox-backups/doc-upload-db-20261008T210416Z.timetravel.json`, before 0138 `...20261009T002042Z...`. No worker restart needed. No worktrees or agent branches remain.
 
-**v2.30.0 = Release A of the approved plan** (`~/.claude/plans/gentle-humming-mccarthy.md`): the sharing rule (C-003, C-038..C-046) on every exit. Built by one agent, broken by an adversarial reviewer (re-typing a document unlocked it; foreign-tenant type; API key on the queue file route), fixed, re-reviewed, then shipped. Prod type backfill APPLIED: 107 types now store a rule (24 free / 77 qa / 6 locked). **77 are `qa` mostly because the name is not in the C-003 table** (Non-GMO Certificate, Nutritional Information, Product Label ...) - AJ changes any of them on Document Types. 5 active prod documents have no type and now read locked (Cush Co 3, Medosweet 2). Follow-ups in `backlog.md` (top). Nobody has clicked through the new screens in a browser.
+**Shipped 2026-10-08, both halves of the approved plan** (`~/.claude/plans/gentle-humming-mccarthy.md`), each built by one agent, broken by an adversarial reviewer, fixed, re-reviewed, then shipped:
+- **v2.30.0 - the sharing rule on every exit** (C-003, C-038..C-046, migration 0137). Prod type backfill APPLIED: 107 types store a rule (24 free / 77 qa / 6 locked). **77 are `qa` mostly because the name is not in the C-003 table** (Non-GMO Certificate, Nutritional Information, Product Label ...) - an admin changes any of them on Document Types. 5 active prod documents have no type and read locked (Cush Co 3, Medosweet 2). Only an admin moves a document off locked.
+- **v2.31.0 - document orders** (C-043, C-044, C-047..C-070, migration 0138): `order_documents` lines on the one order record, Waiting for QA with a pinned release, truthful send outcomes. Prod has 19 orders and 0 document lines.
 
-**IN PROGRESS: Release B, document orders (migration 0138)** - same plan file, section "Release B". If no agent branch exists, it has not started. The Release A worktree `.claude/worktrees/agent-ab1d6b739c35832a9` is merged and can be removed once its lock is gone.
+**Not done, say so if asked:** nobody has clicked through ANY of the v2.29-v2.31 screens in a browser. No QA owner route exists on any prod tenant that I checked - without one, releases fall to the master user then admins and missing / expired notices are recorded as unrouted (verify before a demo). AJ has NOT been told about v2.30 / v2.31 (no routine status posts); the 77 `qa` types are the thing he may want to change. Follow-ups in `backlog.md` (top: exit-register blind spot, `?token=` bearer URL, archived documents on public links).
 
 **How we work now** (both in memory, both from Chris on 2026-10-06/07):
 - **No live customers.** Ship when the gates are green; change tenant data without a separate go-ahead; a tenant can be cleared or recreated. Do not post routine status to AJ.
@@ -24,7 +26,7 @@ Notes and thoughts for the next session. Claude reads this on startup.
 - Agent worktrees start a couple of commits behind: fast-forward to master, symlink `node_modules`, copy `wrangler.toml` + `.dev.vars`.
 
 **Next batch, in AJ's finish-line order** (his plan + our reply: `~/drops/aj-2026-10-06/`):
-1. **Document orders + the sharing rule** (C-003): rule per document type with a per-document override, enforced on EVERY exit (download by link, ZIP, emailed link, bundles, order sends, API keys); QA approval step; missing / expired lines notify QA; private-label advisory. Reads `GET /api/approved-items`.
+1. ~~**Document orders + the sharing rule** (C-003)~~ **DONE, v2.30.0 + v2.31.0.** Was: rule per document type with a per-document override, enforced on EVERY exit (download by link, ZIP, emailed link, bundles, order sends, API keys); QA approval step; missing / expired lines notify QA; private-label advisory. Reads `GET /api/approved-items`.
 2. **Holds** (C-005): portal-only status on a lot's certificate that stops it leaving on an order; QA or admin releases with a reason.
 3. **Tenant brand record** (logo, colours, display name, support line) on the external pages and mail - before complaint intake.
 4. **Portability**: whole-tenant export, pack versions that roll forward, slug rules (a document-type rename must not re-slug), leak tests for the Records public surfaces, wizard coverage.
