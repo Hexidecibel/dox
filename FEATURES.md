@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.32.0](releases/v2.32.0.md) — 2026-10-08 — On hold means it does not leave
 - [v2.31.0](releases/v2.31.0.md) — 2026-10-08 — Order the documents, not only the certificates
 - [v2.30.0](releases/v2.30.0.md) — 2026-10-08 — What may leave, and who says so
 - [v2.29.1](releases/v2.29.1.md) — 2026-10-07 — The prompts name no one
