@@ -58,7 +58,7 @@ import type {
   RecordColumnDropdownConfig,
 } from '../../../shared/types';
 import { BrandHeader, BrandSupport } from '../brand/BrandHeader';
-import { pageBrand, parseBrandColor } from '../../../shared/tenantBrand';
+import { formAccentOrNull, pageBrand } from '../../../shared/tenantBrand';
 
 interface Props {
   view: PublicFormView;
@@ -189,7 +189,7 @@ export function PublicFormRenderer({ view, onSubmit, preview = false, slug }: Pr
 
   // The form's own accent when it is a real colour; otherwise the
   // organisation's brand (0140); otherwise the navy. Never an unchecked string.
-  const accent = parseBrandColor(view.form.accent_color) ?? pageBrand(view.brand, null).accent;
+  const accent = formAccentOrNull(view.form.accent_color) ?? pageBrand(view.brand, null).accent;
   const fields = view.fields;
   // Attachments policy controls whether we insert an attachment step
   // between the last field and the review screen. Preview mode hides the
