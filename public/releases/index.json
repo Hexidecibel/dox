@@ -1,6 +1,11 @@
 {
-  "current": "2.30.0",
+  "current": "2.31.0",
   "versions": [
+    {
+      "version": "2.31.0",
+      "date": "2026-10-08",
+      "title": "Order the documents, not only the certificates"
+    },
     {
       "version": "2.30.0",
       "date": "2026-10-08",
