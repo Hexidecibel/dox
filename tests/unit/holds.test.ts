@@ -41,6 +41,7 @@ import { judgeOrderDocumentLine, type OrderDocumentLineFacts } from '../../share
 import { compareToLimit, parseMeasuredValue } from '../../shared/specCheck';
 import { specResultsWithConfig } from '../../functions/lib/spec-warnings';
 import { holdResultFromVerdict } from '../../functions/lib/holds';
+import { fileCarriesLot, filePagesOf, holdForLot } from '../../functions/lib/hold-state';
 
 const result = (over: Partial<HoldJudgedResult> = {}): HoldJudgedResult => ({
   verdict: 'out_of_spec',
@@ -358,5 +359,62 @@ describe('a document line of an order whose document is on hold', () => {
   it('with no hold the line is judged exactly as before', () => {
     expect(judgeOrderDocumentLine(facts(), { method: 'jwt', canReleaseQa: false }).disposition).toBe('goes_now');
     expect(judgeOrderDocumentLine(facts({ hold: null }), { method: 'jwt', canReleaseQa: false }).disposition).toBe('goes_now');
+  });
+});
+
+describe('which files a hold stops: a file is what leaves (C-084)', () => {
+  const page = (queue: string | null, pages: number[] | null, scoped = true) => ({ queue_id: queue, page_scoped: scoped, pages });
+
+  it('lots of one certificate on SEPARATE pages: each file is its own', () => {
+    expect(fileCarriesLot(page('q1', [2]), page('q1', [1]))).toBe(false);
+    expect(fileCarriesLot(page('q1', [2, 3]), page('q1', [1, 4]))).toBe(false);
+  });
+
+  it('two lots on the SAME page: sending one sends the other', () => {
+    expect(fileCarriesLot(page('q1', [1]), page('q1', [1]))).toBe(true);
+    expect(fileCarriesLot(page('q1', [1, 2]), page('q1', [2, 3]))).toBe(true);
+  });
+
+  it('a file that could not be cut holds the whole certificate, so it carries every lot', () => {
+    expect(fileCarriesLot(page('q1', null, false), page('q1', [3]))).toBe(true);
+    expect(fileCarriesLot(page('q1', [9], false), page('q1', [3]))).toBe(true);
+  });
+
+  it('cannot tell tightens: pages not recorded on either side is "yes"', () => {
+    expect(fileCarriesLot(page('q1', null), page('q1', [1]))).toBe(true);
+    expect(fileCarriesLot(page('q1', [1]), page('q1', null))).toBe(true);
+  });
+
+  it('a different certificate, or a document not cut from a queue item, carries nothing', () => {
+    expect(fileCarriesLot(page('q1', [1]), page('q2', [1]))).toBe(false);
+    expect(fileCarriesLot(page(null, [1]), page('q1', [1]))).toBe(false);
+    expect(fileCarriesLot(page('q1', [1]), page(null, [1]))).toBe(false);
+    expect(fileCarriesLot(page(null, null, false), page(null, null, false))).toBe(false);
+  });
+
+  it('reads what a document row records about its file', () => {
+    expect(filePagesOf({ origin_queue_id: 'q1', external_ref: 'queue-zzz-1', page_scoped: 1, scoped_pages: '[2,3]', source_pages: '[9]' })).toEqual({
+      queue_id: 'q1',
+      page_scoped: true,
+      pages: [2, 3],
+    });
+    // No origin column: the queue id inside external_ref. No scoped pages: the source pages.
+    expect(filePagesOf({ origin_queue_id: null, external_ref: 'queue-abc123-5501', page_scoped: null, source_pages: '[1]' })).toEqual({
+      queue_id: 'abc123',
+      page_scoped: false,
+      pages: [1],
+    });
+    expect(filePagesOf({ external_ref: 'manual-upload', scoped_pages: 'not json' })).toEqual({ queue_id: null, page_scoped: false, pages: null });
+    expect(filePagesOf({ origin_queue_id: 'q1', scoped_pages: '[]', source_pages: '["x", 0, -1]' }).pages).toBeNull();
+  });
+
+  it('a line names the hold on its own lot when there is one, else the first that stops the file', () => {
+    const a = { id: 'a', document_id: 'd1', lot_id: 'l1', lot_label: '1', reason: 'r', source: 'person' as const, placed_at: '1' };
+    const b = { id: 'b', document_id: 'd1', lot_id: 'l2', lot_label: '2', reason: 'r', source: 'person' as const, placed_at: '2' };
+    expect(holdForLot([a, b], 'l2')).toBe(b);
+    expect(holdForLot([a, b], 'l9')).toBe(a);
+    expect(holdForLot([a, b], null)).toBe(a);
+    expect(holdForLot([], 'l1')).toBeNull();
+    expect(holdForLot(undefined, 'l1')).toBeNull();
   });
 });

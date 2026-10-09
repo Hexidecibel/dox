@@ -74,7 +74,7 @@ describe('ResultCardDocument', () => {
         <ResultCardDocument
           doc={{
             ...BASE,
-            active_hold: { id: 'h1', lot_id: 'l1', lot_label: '5501', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' },
+            active_hold: { id: 'h1', document_id: 'd_1', lot_id: 'l1', lot_label: '5501', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' },
           }}
         />,
       ),

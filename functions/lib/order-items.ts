@@ -37,7 +37,7 @@ import { sanitizeString } from './validation';
 import { findOrCreateLot, normalizeLotNumber } from './entities/lots';
 import { linkOrderToCoas, parseDistributorCode } from './entities/matching';
 import { orderSideSchemeResolver } from './lot-schemes';
-import { holdForLot, loadActiveHolds } from './hold-state';
+import { holdForLot, loadEffectiveHolds } from './hold-state';
 import { resolveWholeOriginals } from './coa-original';
 import { describeLotDate } from '../../shared/orderSend';
 import type { User } from './types';
@@ -182,7 +182,7 @@ export async function loadOrderLines(
   // Holds (0139), read live: the line shows that its certificate is on hold
   // and why. The hold on the line's own lot row is named when there is one;
   // a hold on another lot of the same file stops the file just the same.
-  const holds = await loadActiveHolds(db, tenantId, docIds);
+  const holds = await loadEffectiveHolds(db, tenantId, docIds);
 
   return rows.map((r) => {
     const date = describeLotDate(r.lot_id ? r : null);

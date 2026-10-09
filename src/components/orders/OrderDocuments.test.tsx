@@ -230,7 +230,7 @@ describe('OrderDocumentLines', () => {
               disposition: 'will_not_go',
               disposition_reason: 'held',
               disposition_text: 'On hold: Supplier withdrew this statement. It can go once QA or an administrator releases the hold.',
-              hold: { id: 'h1', lot_id: null, lot_label: null, reason: 'Supplier withdrew this statement', source: 'person', placed_at: '2026-10-08 10:00:00' },
+              hold: { id: 'h1', document_id: 'd1', lot_id: null, lot_label: null, reason: 'Supplier withdrew this statement', source: 'person', placed_at: '2026-10-08 10:00:00' },
             }),
           ]}
         />,
@@ -618,7 +618,7 @@ describe('SendOrderDialog with document lines', () => {
           {
             order_item_id: 'y', product_name: 'Heavy Cream', lot_number: '5501', document_id: 'd9',
             reason: 'On hold (lot 5501): Critical result out of spec: Coliform 40 CFU/g.', sharing_refusal: 'held',
-            hold: { id: 'h1', lot_id: 'l1', lot_label: '5501', reason: 'Critical result out of spec: Coliform 40 CFU/g.', source: 'spec_critical', placed_at: '2026-10-08 10:00:00' },
+            hold: { id: 'h1', document_id: 'd9', lot_id: 'l1', lot_label: '5501', reason: 'Critical result out of spec: Coliform 40 CFU/g.', source: 'spec_critical', placed_at: '2026-10-08 10:00:00' },
           },
           {
             order_item_id: '', order_document_id: 'dl5', product_name: 'Cream Cheese 3 lb', lot_number: null, document_type_name: 'Allergen Statement',

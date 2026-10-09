@@ -103,7 +103,7 @@ describe('OrderLines', () => {
           {...props}
           items={[
             line({
-              coa_hold: { id: 'h1', lot_id: 'lot1', lot_label: '10426203 / 03', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' },
+              coa_hold: { id: 'h1', document_id: 'd1', lot_id: 'lot1', lot_label: '10426203 / 03', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' },
             }),
           ]}
         />,

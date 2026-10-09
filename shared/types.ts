@@ -64,6 +64,12 @@ import type { HoldSource } from './holds';
 /** The least a screen needs to say "on hold, and why". */
 export interface DocumentHoldBrief {
   id: string;
+  /**
+   * The certificate the hold is ON. Usually the document being asked about;
+   * a different one when this document's file prints that lot's page too (two
+   * lots of one certificate on the same page), which stops this file as well.
+   */
+  document_id: string;
   /** The lot row the hold is on, or null for the whole certificate. */
   lot_id: string | null;
   /** "1042 / 03", or null for the whole certificate. */
@@ -75,7 +81,6 @@ export interface DocumentHoldBrief {
 
 /** One hold, active or released, as the API returns it. */
 export interface ApiDocumentHold extends DocumentHoldBrief {
-  document_id: string;
   document_title: string | null;
   document_type_name: string | null;
   supplier_id: string | null;
@@ -119,6 +124,12 @@ export interface DocumentHoldsResponse {
   active: ApiDocumentHold[];
   /** Released holds, newest release first. */
   history: ApiDocumentHold[];
+  /**
+   * Holds on OTHER lots of the same certificate whose page this document's
+   * file also prints. They stop this file too, and are released on the
+   * certificate they are on (`document_id`).
+   */
+  also_held_by: DocumentHoldBrief[];
   /** The certificate's lot rows. Empty when it has none. */
   lots: DocumentHoldLot[];
   /** May the caller place a hold (any login but a read-only one; an API key may)? */
@@ -156,7 +167,11 @@ export interface HoldsCountResponse {
 
 /** The hold summary `GET /api/documents/:id` carries. */
 export interface DocumentHoldState {
-  /** Active holds, oldest first. Empty = not on hold. */
+  /**
+   * Every active hold that stops this document's file, oldest of its own
+   * first, then those on other lots of the same certificate page. Empty = not
+   * on hold.
+   */
   active: DocumentHoldBrief[];
   can_place: boolean;
   can_release: boolean;

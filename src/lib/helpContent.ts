@@ -1086,7 +1086,8 @@ const holds: ModuleHelpExpanded = {
         heading: 'What a hold is on',
         body:
           "A hold is on one lot row of a certificate, or on the whole certificate. Choose when you place it. " +
-          "A file is what leaves, so a hold on one lot stops the file that prints it. When a certificate covers several lots and was filed as one page per lot, the other lots' own pages still go; the whole original, which prints every lot, stays in until the hold is released, and the order says so.",
+          "A file is what leaves, so a hold on one lot stops every file that prints that lot. When a certificate covers several lots and was filed as one page per lot, the other lots' own pages still go; the whole original, which prints every lot, stays in until the hold is released, and the order says so. " +
+          "When two lots share a page, such as a one-page certificate with a row for each lot, the other lot's file shows the held lot's results too, so it is stopped as well. Its page says which lot is on hold and links to that certificate, where the hold is released.",
       },
       {
         heading: 'Placing and releasing',

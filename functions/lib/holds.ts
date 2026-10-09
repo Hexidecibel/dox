@@ -26,7 +26,7 @@ import { generateId, logAudit } from './db';
 import { sendEmail, buildHoldPlacedEmail } from './email';
 import { resolveAlertRouting, resolveTenantAdmins } from './alert-routing';
 import { canReleaseQa, QA_RELEASE_OWNER_LABEL } from './sharing-rule';
-import { holdBrief } from './hold-state';
+import { holdBrief, loadEffectiveHolds } from './hold-state';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from './permissions';
 import {
   HOLD_SOURCE_LABELS,
@@ -146,7 +146,6 @@ function parseDetail(raw: string | null): ApiDocumentHold['detail'] {
 function toApi(r: HoldRow): ApiDocumentHold {
   return {
     ...holdBrief(r),
-    document_id: r.document_id,
     document_title: r.document_title,
     document_type_name: r.document_type_name,
     supplier_id: r.supplier_id,
@@ -199,7 +198,7 @@ async function loadDocumentLots(
       sub_lot_code: l.sub_lot_code || null,
       lot_label: holdLotLabel(l) ?? l.lot_number,
       hold: hold
-        ? { id: hold.id, lot_id: hold.lot_id, lot_label: hold.lot_label, reason: hold.reason, source: hold.source, placed_at: hold.placed_at }
+        ? { id: hold.id, document_id: hold.document_id, lot_id: hold.lot_id, lot_label: hold.lot_label, reason: hold.reason, source: hold.source, placed_at: hold.placed_at }
         : null,
     };
   });
@@ -242,9 +241,11 @@ export async function describeDocumentHolds(
   const history = all
     .filter((h) => !h.active)
     .sort((a, b) => (b.released_at ?? '').localeCompare(a.released_at ?? ''));
+  const effective = (await loadEffectiveHolds(db, tenantId, [documentId])).get(documentId) ?? [];
   return {
     active,
     history,
+    also_held_by: effective.filter((h) => h.document_id !== documentId),
     lots: await loadDocumentLots(db, tenantId, documentId, active),
     can_place: canPlaceHold(user, tenantId),
     can_release: await canReleaseHold(db, data, user, tenantId),
@@ -259,18 +260,9 @@ export async function documentHoldState(
   tenantId: string,
   documentId: string,
 ): Promise<DocumentHoldState> {
-  const res = await db
-    .prepare(
-      `SELECT h.id, h.lot_id, h.reason, h.source, h.placed_at, l.lot_number, l.sub_lot_code
-         FROM document_holds h
-         LEFT JOIN lots l ON l.id = h.lot_id
-        WHERE h.document_id = ? AND h.tenant_id = ? AND h.released_at IS NULL
-        ORDER BY h.placed_at ASC, h.rowid ASC`,
-    )
-    .bind(documentId, tenantId)
-    .all<Parameters<typeof holdBrief>[0]>();
+  const effective = (await loadEffectiveHolds(db, tenantId, [documentId])).get(documentId) ?? [];
   return {
-    active: (res.results ?? []).map(holdBrief),
+    active: effective,
     can_place: canPlaceHold(user, tenantId),
     can_release: await canReleaseHold(db, data, user, tenantId),
   };

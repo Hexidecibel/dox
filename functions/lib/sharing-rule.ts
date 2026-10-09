@@ -37,7 +37,7 @@ import type {
   SharingRuleRefusedResponse,
 } from '../../shared/types';
 import { logAudit } from './db';
-import { loadActiveHolds } from './hold-state';
+import { loadEffectiveHolds } from './hold-state';
 import { HOLD_OUTWARD_TEXT } from '../../shared/holds';
 import { normalizeOwnerKey } from './alert-routing';
 import { loadMasterUser } from './renewal-requests';
@@ -59,9 +59,11 @@ export interface DocumentSharingRule {
   rule: SharingRule;
   source: SharingRuleSource;
   /**
-   * The document's ACTIVE HOLDS, oldest first (migration 0139). Empty = not
-   * on hold. Read in the same call as the rule so that no caller can judge a
-   * document's rule and forget to ask whether it is held.
+   * EVERY ACTIVE HOLD THAT STOPS THIS DOCUMENT'S FILE (migration 0139): its
+   * own, then those on other lots of the same certificate that its file
+   * prints (`loadEffectiveHolds`). Empty = not on hold. Read in the same call
+   * as the rule so that no caller can judge a document's rule and forget to
+   * ask whether it is held.
    */
   holds: DocumentHoldBrief[];
 }
@@ -136,7 +138,7 @@ export async function loadSharingRules(
       });
     }
   }
-  const holds = await loadActiveHolds(db, tenantId, [...out.keys()]);
+  const holds = await loadEffectiveHolds(db, tenantId, [...out.keys()]);
   for (const [id, list] of holds) {
     const row = out.get(id);
     if (row) row.holds = list;

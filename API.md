@@ -2025,7 +2025,14 @@ hold.", and a link's recipient is told only a count.
 its lot rows, holds that document's file. A multi-lot certificate filed as one
 page per lot: the whole original prints every lot, so it stays in while ANY of
 its lots is held, including one that is not on the order; each unheld lot's own
-page still goes, and the review screen says why.
+page still goes, and the review screen says why. **Unless that page prints the
+held lot too.** When two lots share a page of the certificate (a one-page
+certificate with a row per lot), or a per-lot file could not be cut and holds
+the whole certificate, sending one lot's file would send the held lot's results
+with it, so that file is refused as `held` as well, naming the lot that is on
+hold. `GET /api/documents/:id/holds` lists those under `also_held_by`, each
+with the `document_id` of the certificate the hold is on, which is where it is
+released.
 
 **Automatic holds.** Placed when a certificate is approved, from the verdicts
 just written, and never from the bulk recheck:

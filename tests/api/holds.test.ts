@@ -989,16 +989,20 @@ async function pdfWithPages(n: number): Promise<ArrayBuffer> {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-/** Approve a real three-page, three-lot certificate through the records path. */
-async function approveMultiLot(lot: string): Promise<{ queueId: string; original: ArrayBuffer; docIds: string[] }> {
+/**
+ * Approve a real three-lot certificate through the records path. By default it
+ * has three pages, one lot on each; `pages` says which page each lot is on
+ * (`[1, 1, 2]` = the first two lots share a page).
+ */
+async function approveMultiLot(lot: string, pages: number[] = [1, 2, 3]): Promise<{ queueId: string; original: ArrayBuffer; docIds: string[] }> {
   const id = generateTestId();
   const r2Key = `pending/${id}.pdf`;
-  const original = await pdfWithPages(3);
+  const original = await pdfWithPages(Math.max(...pages));
   await files.put(r2Key, original, { httpMetadata: { contentType: 'application/pdf' } });
   const record = (idx: number, sub: string) => ({
     record_index: idx,
     fields: { lot_code: lot, sub_lot_code: sub, product_name: 'Sweet Cream Butter' },
-    source_pages: [idx + 1],
+    source_pages: [pages[idx]],
   });
   const payload = {
     record_cardinality: 'multi_lot',
@@ -1110,6 +1114,126 @@ describe('a multi-lot certificate with one lot on hold', () => {
     expect(mails).toHaveLength(0);
     expect(retry.body.send.status).toBe('failed');
     expect(JSON.stringify(retry.body.send.parts)).toContain('On hold');
+  });
+});
+
+describe('two lots of one certificate on the SAME page: a file is what leaves (C-084)', () => {
+  // Three lots; the first two are rows on page 1, the third is on page 2.
+  // Each lot's "own page" is a cut of the page it is on, so lots 1 and 2 are
+  // the same page of paper under two documents.
+  it('a hold on one lot stops every file that prints that lot, and no other', async () => {
+    const cert = await approveMultiLot('7710000', [1, 1, 2]);
+    const [d1, d2, d3] = cert.docIds;
+    const scoped = await db
+      .prepare(`SELECT id, json_extract(extended_metadata, '$.page_scoped') AS scoped, json_extract(extended_metadata, '$.scoped_pages') AS pages FROM documents WHERE id IN (?, ?, ?)`)
+      .bind(d1, d2, d3)
+      .all<{ id: string; scoped: number; pages: string }>();
+    // The fixture really is what the comment says, or the test proves nothing.
+    expect(Object.fromEntries((scoped.results ?? []).map((r) => [r.id, [r.scoped, r.pages]]))).toEqual({
+      [d1]: [1, '[1]'],
+      [d2]: [1, '[1]'],
+      [d3]: [1, '[2]'],
+    });
+
+    const id = await hold(d1, 'First lot failed coliform', await lotOf(d1));
+    const download = (who: Who, doc: string) =>
+      downloadDocument(as(who, `http://localhost/api/documents/${doc}/download`, { params: { id: doc } }));
+
+    // Lot 2's file is page 1, which prints lot 1's failing row: it does not leave.
+    const refused = await download('api_key', d2);
+    expect(refused.status).toBe(403);
+    expect(await readJson(refused)).toMatchObject({ reason: 'held', error: 'On hold (lot 7710000 / 01): First lot failed coliform' });
+    // Lot 3 is on its own page and is untouched.
+    const ok = await download('api_key', d3);
+    expect(ok.status).toBe(200);
+    await ok.arrayBuffer();
+    // A signed-in person still opens either.
+    const person = await download('reader', d2);
+    expect(person.status).toBe(200);
+    await person.arrayBuffer();
+
+    const zip = await exportZip(as('org_admin', 'http://localhost/api/document-exports/zip', { method: 'POST', body: JSON.stringify({ document_ids: [d1, d2, d3] }) }));
+    expect(zip.status).toBe(200);
+    expect((zip.headers.get('X-Export-Refused-Ids') ?? '').split(',').sort()).toEqual([`${d1}:held`, `${d2}:held`].sort());
+    await zip.arrayBuffer();
+
+    // The document page of lot 2 says why, and points at the certificate the hold is on.
+    const page = (await holdsOf('qa', d2)).body;
+    expect(page.active).toEqual([]);
+    expect(page.also_held_by).toHaveLength(1);
+    expect(page.also_held_by[0]).toMatchObject({ id, document_id: d1, lot_label: '7710000 / 01', reason: 'First lot failed coliform' });
+    expect((await holdsOf('qa', d3)).body.also_held_by).toEqual([]);
+    const state = await call<{ document: { holds: DocumentHoldState } }>(getDocument, as('user', `http://localhost/api/documents/${d2}`, { params: { id: d2 } }));
+    expect(state.body.document.holds.active.map((h) => [h.id, h.document_id])).toEqual([[id, d1]]);
+
+    // On an order: lots 2 and 3. Lot 2's line does not go; lot 3's own page does.
+    const order = await newOrder();
+    await pick(order, [d2, d3]);
+    const items = (await readOrder(order)).items;
+    expect(items.find((i) => i.coa_document_id === d2)!.coa_hold).toMatchObject({ id, document_id: d1 });
+    expect(items.find((i) => i.coa_document_id === d3)!.coa_hold).toBeNull();
+    const plan = await preview(order, 'org_admin');
+    expect(plan.lines_not_sent.map((l) => [l.document_id, l.sharing_refusal])).toEqual([[d2, 'held']]);
+    expect(plan.lines_not_sent[0].reason).toBe('On hold (lot 7710000 / 01): First lot failed coliform');
+    expect(plan.files).toHaveLength(1);
+    expect(plan.files[0]).toMatchObject({ source: 'document', document_ids: [d3] });
+    const mails = stubMail();
+    const sent = await send(order, 'org_admin', { fingerprint: plan.fingerprint });
+    expect(sent.body.send.status).toBe('sent');
+    const sizes = mails.flatMap((m) => m.attachments ?? []).map((a) => atob(a.content).length);
+    expect(sizes).toHaveLength(1);
+    expect(sizes[0]).not.toBe(cert.original.byteLength);
+    vi.unstubAllGlobals();
+
+    // Released: everything goes again.
+    await lift(id);
+    const after = await download('api_key', d2);
+    expect(after.status).toBe(200);
+    await after.arrayBuffer();
+    expect((await holdsOf('qa', d2)).body.also_held_by).toEqual([]);
+    expect((await preview(order, 'org_admin')).lines_not_sent).toEqual([]);
+  });
+
+  it('a hold on the WHOLE certificate of one lot still stops the file that shares its page, and names the lot', async () => {
+    const cert = await approveMultiLot('7711000', [1, 1, 2]);
+    const [d1, d2, d3] = cert.docIds;
+    await hold(d2, 'Whole certificate withdrawn');
+    const res = await downloadDocument(as('api_key', `http://localhost/api/documents/${d1}/download`, { params: { id: d1 } }));
+    expect(res.status).toBe(403);
+    expect(await readJson(res)).toMatchObject({ reason: 'held', error: 'On hold (lot 7711000 / 02): Whole certificate withdrawn' });
+    const ok = await downloadDocument(as('api_key', `http://localhost/api/documents/${d3}/download`, { params: { id: d3 } }));
+    expect(ok.status).toBe(200);
+    await ok.arrayBuffer();
+  });
+
+  it('a file that could not be cut holds the whole certificate: a hold on ANY lot of it stops that file', async () => {
+    const cert = await approveMultiLot('7712000');
+    const [d1, , d3] = cert.docIds;
+    // Lot 3's file stands in for a cut that failed: it is the whole binary.
+    await db.prepare(`UPDATE documents SET extended_metadata = json_remove(extended_metadata, '$.page_scoped', '$.scoped_pages') WHERE id = ?`).bind(d3).run();
+    const get = (doc: string) => downloadDocument(as('api_key', `http://localhost/api/documents/${doc}/download`, { params: { id: doc } }));
+    const before = await get(d3);
+    expect(before.status).toBe(200);
+    await before.arrayBuffer();
+    const id = await hold(d1, 'Lot one under review', await lotOf(d1));
+    const refused = await get(d3);
+    expect(refused.status).toBe(403);
+    expect(await readJson(refused)).toMatchObject({ reason: 'held' });
+    await lift(id);
+    const after = await get(d3);
+    expect(after.status).toBe(200);
+    await after.arrayBuffer();
+  });
+
+  it('another certificate entirely is never touched by a hold', async () => {
+    const a = await approveMultiLot('7713000', [1, 1, 2]);
+    const b = await approveMultiLot('7714000', [1, 1, 2]);
+    await hold(a.docIds[0], 'Only this certificate');
+    for (const doc of b.docIds) {
+      const res = await downloadDocument(as('api_key', `http://localhost/api/documents/${doc}/download`, { params: { id: doc } }));
+      expect(res.status).toBe(200);
+      await res.arrayBuffer();
+    }
   });
 });
 

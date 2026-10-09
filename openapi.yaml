@@ -5885,6 +5885,19 @@ paths:
                 properties:
                   active: { type: array, items: { $ref: '#/components/schemas/DocumentHold' }, description: "Oldest first. Any one of them stops the certificate leaving." }
                   history: { type: array, items: { $ref: '#/components/schemas/DocumentHold' }, description: "Released holds, newest release first." }
+                  also_held_by:
+                    type: array
+                    description: "Active holds on OTHER lots of the same certificate whose page this document's file also prints. They stop this file too, and are released on the certificate they are on (`document_id`)."
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        document_id: { type: string }
+                        lot_id: { type: string, nullable: true }
+                        lot_label: { type: string, nullable: true }
+                        reason: { type: string }
+                        source: { type: string }
+                        placed_at: { type: string }
                   lots:
                     type: array
                     items:

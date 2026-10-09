@@ -52,13 +52,13 @@ silent-apply, and eventually full auto-ingest.
 
 **Source:** AJ Conner's rules table assumes holds exist (B1 "Critical: this result stops the
 shipment", E2 "zero-tolerance ... holds until a person resolves it") and nothing held anything.
-Decision C-005 and C-071..C-083 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
+Decision C-005 and C-071..C-084 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
 under "Holds (migration 0139)".
 
 - `migrations/0139_document_holds.sql`: `document_holds`, append-only, two unique indexes (one active per lot and source; an automatic hold once per judged result ever), an immutability trigger. Additive; holds nothing by itself.
 - `shared/holds.ts` (pure): the three sources, `holdSourceForResult` / `automaticHoldsForResults`, the refusal wording. `shared/sharingRule.ts`: `judgeExit` gains a fourth verdict, `held`, asked first.
 - `functions/lib/hold-state.ts` (`loadActiveHolds`, read by `loadSharingRules` so every exit sees it) and `functions/lib/holds.ts` (place, release, list, count, automatic placement, the QA notice).
-- Every exit refuses a held certificate through the sharing rule's own checks: ZIP, emailed link, public link reads, bundle, order send and resend, document order lines, the QA release, API-key file reads. A signed-in open or download is unchanged. A whole multi-lot original is held by any lot on it; unheld lots' own pages still go.
+- Every exit refuses a held certificate through the sharing rule's own checks: ZIP, emailed link, public link reads, bundle, order send and resend, document order lines, the QA release, API-key file reads. A signed-in open or download is unchanged. A whole multi-lot original is held by any lot on it; unheld lots' own pages still go, unless that page prints the held lot too (two lots on one page: `loadEffectiveHolds`, C-084).
 - Automatic holds at approval only (`registerAndNotifyForApproval`): Critical out of spec, and a zero-tolerance sample-size mismatch. Once per judged result; a new version is a new result.
 - Routes: `GET / POST /api/documents/:id/holds`, `POST /api/holds/:id/release`, `GET /api/holds` (+ `?count=1`).
 - Screens: banner, lot chips, Place and Release on the document page; `/holds` beside the Review Queue with a count in the rail; an "On hold" group in Review and send; chips on order lines, the waiting list and search rows; Help.

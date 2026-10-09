@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../lib/api', () => {
   const m = { forDocument: vi.fn(), place: vi.fn(), release: vi.fn() };
@@ -52,6 +53,7 @@ function response(over: Partial<DocumentHoldsResponse> = {}): DocumentHoldsRespo
   return {
     active: [],
     history: [],
+    also_held_by: [],
     lots: [
       { lot_id: 'l1', lot_number: '5501', sub_lot_code: '03', lot_label: '5501 / 03', hold: null },
       { lot_id: 'l2', lot_number: '5502', sub_lot_code: null, lot_label: '5502', hold: null },
@@ -67,7 +69,7 @@ const held = (over: Partial<DocumentHoldsResponse> = {}) => {
   return response({
     active: [h],
     lots: [
-      { lot_id: 'l1', lot_number: '5501', sub_lot_code: '03', lot_label: '5501 / 03', hold: { id: h.id, lot_id: 'l1', lot_label: h.lot_label, reason: h.reason, source: 'person', placed_at: h.placed_at } },
+      { lot_id: 'l1', lot_number: '5501', sub_lot_code: '03', lot_label: '5501 / 03', hold: { id: h.id, document_id: 'd1', lot_id: 'l1', lot_label: h.lot_label, reason: h.reason, source: 'person', placed_at: h.placed_at } },
       { lot_id: 'l2', lot_number: '5502', sub_lot_code: null, lot_label: '5502', hold: null },
     ],
     ...over,
@@ -200,6 +202,27 @@ describe('DocumentHolds', () => {
     await userEvent.click(screen.getByTestId('hold-confirm'));
     await waitFor(() => expect(mocks.release).toHaveBeenCalledWith('h1', 'Complaint closed, lot unaffected'));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it('a file that prints a held lot of the same certificate says so, and where to release it', async () => {
+    mocks.forDocument.mockResolvedValue(
+      response({
+        can_place: false,
+        also_held_by: [{ id: 'h9', document_id: 'd2', lot_id: 'l9', lot_label: '5503', reason: 'Critical result out of spec: Coliform 40 CFU/g.', source: 'spec_critical', placed_at: '2026-10-08 10:00:00' }],
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <DocumentHolds documentId="d1" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('hold-carried-banner')).toHaveTextContent('it also prints a lot that is on hold');
+    const row = screen.getByTestId('hold-carried-row');
+    expect(row).toHaveTextContent('Lot 5503: Critical result out of spec: Coliform 40 CFU/g.');
+    expect(within(row).getByRole('link')).toHaveAttribute('href', '/documents/d2');
+    // Not "Not on hold", and nothing to release here: the hold is on the other certificate.
+    expect(screen.queryByTestId('hold-none')).toBeNull();
+    expect(screen.queryByTestId('hold-release')).toBeNull();
   });
 
   it('keeps the history: who released each hold, when and why', async () => {

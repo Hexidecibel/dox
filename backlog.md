@@ -2,6 +2,12 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## KNOWN GAP found while building holds (2026-10-08): the sharing rule and two lots on one page
+
+Unlike the list below, this IS a path by which a restricted lot's results can leave.
+
+- **Sharing rule: two lots on the same page.** C-042 takes the strictest sharing rule for the WHOLE original of a multi-lot certificate, but not for a per-lot file that prints a neighbour lot's row (a one-page certificate with a row per lot; a cut that failed). So a `locked` or `qa` lot's results can leave on a `free` neighbour's file. Holds closed this for themselves in 0139 (`fileCarriesLot` / `loadEffectiveHolds` in `functions/lib/hold-state.ts`, C-084); the same page test would close it for the rule in `loadSharingRules`. Low exposure today: lots of one certificate share a document type, so they share a rule unless one has an override.
+
 ## KNOWN GAPS left by the sharing-rule re-review (2026-10-08)
 
 Found by the second adversarial review of 0137, none a path by which a locked file leaves today.

@@ -13,6 +13,7 @@
  * system.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -24,6 +25,7 @@ import {
   DialogTitle,
   FormControl,
   InputLabel,
+  Link,
   MenuItem,
   Select,
   TextField,
@@ -141,7 +143,9 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
 
   if (!data) return null;
   const { active, history, lots } = data;
-  if (active.length === 0 && history.length === 0 && !data.can_place) return null;
+  // Holds on other lots of the same certificate whose page this file prints.
+  const carried = data.also_held_by ?? [];
+  if (active.length === 0 && carried.length === 0 && history.length === 0 && !data.can_place) return null;
 
   const done = () => {
     load();
@@ -182,6 +186,29 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
 
   return (
     <Box sx={{ mb: 2 }} data-testid="document-holds">
+      {active.length === 0 && carried.length > 0 && (
+        <Alert severity="error" sx={{ mb: 1 }} data-testid="hold-carried-banner">
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            This file cannot be sent: it also prints a lot that is on hold.
+          </Typography>
+          <Typography variant="caption" component="div">
+            Two lots of one certificate share a page, so this file shows the held lot's results too. It goes once that
+            hold is released.
+          </Typography>
+        </Alert>
+      )}
+      {carried.length > 0 && (
+        <Box sx={{ mb: 1 }} data-testid="hold-carried">
+          {carried.map((h) => (
+            <Typography key={h.id} variant="body2" data-testid="hold-carried-row">
+              <strong>{holdWhere(h)}:</strong> {h.reason}{' '}
+              <Link component={RouterLink} to={`/documents/${h.document_id}`} underline="hover">
+                Open that lot's certificate
+              </Link>
+            </Typography>
+          ))}
+        </Box>
+      )}
       {active.length > 0 && (
         <Alert severity="error" sx={{ mb: 1 }} data-testid="hold-banner">
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
@@ -230,7 +257,7 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
         Holds
       </Typography>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-        {active.length === 0 && (
+        {active.length === 0 && carried.length === 0 && (
           <Typography variant="body2" color="text.secondary" data-testid="hold-none">
             Not on hold.
           </Typography>
