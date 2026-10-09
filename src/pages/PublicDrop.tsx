@@ -38,10 +38,15 @@ import {
   CheckCircle as CheckIcon,
   ErrorOutline as ErrorIcon,
 } from '@mui/icons-material';
+import { BrandHeader, BrandSupport } from '../components/brand/BrandHeader';
+import { pageBrand } from '../../shared/tenantBrand';
+import type { PublicBrand } from '../../shared/types';
 
 interface PublicConnectorInfo {
   connector: { name: string; slug: string | null };
   tenant: { name: string | null };
+  /** The organisation's brand (0140); null / absent = none set. */
+  brand?: PublicBrand | null;
   accepted_extensions: readonly string[];
   max_size_bytes: { text: number; binary: number };
   expires_at: number | null;
@@ -213,6 +218,7 @@ export function PublicDrop() {
         {/* Active states (idle / uploading / success / error) all share the header */}
         {info && status !== 'loading' && status !== 'not-active' && (
           <>
+            <BrandHeader brand={info.brand} />
             <Box sx={{ textAlign: 'center', mb: 3 }}>
               <Typography variant="overline" color="text.secondary">
                 Upload to
@@ -220,9 +226,9 @@ export function PublicDrop() {
               <Typography variant="h4" fontWeight={700} sx={{ mt: 0.5 }}>
                 {info.connector.name}
               </Typography>
-              {info.tenant.name && (
+              {pageBrand(info.brand, info.tenant.name).name && (
                 <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-                  {info.tenant.name}
+                  {pageBrand(info.brand, info.tenant.name).name}
                 </Typography>
               )}
             </Box>
@@ -319,6 +325,7 @@ export function PublicDrop() {
                 </Button>
               </Stack>
             )}
+            <BrandSupport brand={info.brand} sx={{ textAlign: 'center' }} />
           </>
         )}
       </Paper>

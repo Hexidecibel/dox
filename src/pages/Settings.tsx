@@ -28,6 +28,7 @@ import {
   FactCheck as SupplierRequirementsIcon,
   AlternateEmail as OwnerRoutesIcon,
   ViewModule as ModulesIcon,
+  Palette as BrandIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useModuleAccess } from '../contexts/ModuleAccessContext';
@@ -52,6 +53,7 @@ import { IngestHistory } from './IngestHistory';
 import { ProcessingStatus } from './admin/ProcessingStatus';
 import LearningDashboard from './admin/LearningDashboard';
 import TenantExtractionContextBox from './TenantExtractionContextBox';
+import { BrandSettings } from './admin/BrandSettings';
 
 interface SettingsItem {
   // URL-friendly key used as /settings/:section
@@ -123,6 +125,16 @@ const SECTIONS: SettingsSection[] = [
       { key: 'owner-routes', label: 'Owner Routing', icon: <OwnerRoutesIcon />, roles: ALL_ADMIN, component: OwnerRoutes },
       { key: 'api-keys', label: 'API Keys', icon: <ApiKeyIcon />, roles: ALL_ADMIN, component: ApiKeys },
       { key: 'tenants', label: 'Tenants', icon: <TenantsIcon />, roles: ['super_admin'], component: Tenants },
+    ],
+  },
+  {
+    // What people OUTSIDE the organisation see of it (migration 0140): the
+    // name, logo, colours and support line on every public page and every
+    // mail that leaves. Ungated by module on purpose: every module has an
+    // outside face.
+    title: 'Organization',
+    items: [
+      { key: 'brand', label: 'Brand', icon: <BrandIcon />, roles: ALL_ADMIN, component: BrandSettings },
     ],
   },
   {

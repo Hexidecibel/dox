@@ -57,6 +57,8 @@ import type {
   RecordRowData,
   RecordColumnDropdownConfig,
 } from '../../../shared/types';
+import { BrandHeader, BrandSupport } from '../brand/BrandHeader';
+import { pageBrand, parseBrandColor } from '../../../shared/tenantBrand';
 
 interface Props {
   view: PublicFormView;
@@ -185,7 +187,9 @@ export function PublicFormRenderer({ view, onSubmit, preview = false, slug }: Pr
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
-  const accent = view.form.accent_color || '#1A365D';
+  // The form's own accent when it is a real colour; otherwise the
+  // organisation's brand (0140); otherwise the navy. Never an unchecked string.
+  const accent = parseBrandColor(view.form.accent_color) ?? pageBrand(view.brand, null).accent;
   const fields = view.fields;
   // Attachments policy controls whether we insert an attachment step
   // between the last field and the review screen. Preview mode hides the
@@ -481,6 +485,9 @@ export function PublicFormRenderer({ view, onSubmit, preview = false, slug }: Pr
           }}
         />
       </Box>
+
+      <BrandHeader brand={view.brand} sx={{ borderRadius: 0, mb: 0 }} />
+      <BrandSupport brand={view.brand} sx={{ mt: 1, px: { xs: 3, md: 6 } }} />
 
       {/* Header (form name + back button on non-first step) */}
       <Box

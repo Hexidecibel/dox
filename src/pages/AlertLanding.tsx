@@ -28,8 +28,9 @@ import {
   alpha,
 } from '@mui/material';
 import type { AlertLandingView } from '../../shared/types';
+import { BrandHeader, BrandSupport } from '../components/brand/BrandHeader';
+import { pageBrand } from '../../shared/tenantBrand';
 
-const ACCENT = '#1A365D';
 const DANGER = '#8B1A1A';
 
 async function fetchAlert(token: string): Promise<AlertLandingView> {
@@ -134,11 +135,16 @@ export function AlertLanding() {
     );
   }
 
+  // The organisation's brand (0140). With none, `accent` is the navy the page
+  // always used and no band or support line is drawn.
+  const brand = pageBrand(view.brand, view.tenant_name);
+  const accent = brand.accent;
   const isSpec = view.kind === 'spec_alert';
-  const headerColor = isSpec ? DANGER : ACCENT;
+  // An out-of-spec result stays red whatever the organisation's colours are.
+  const headerColor = isSpec ? DANGER : accent;
 
   return (
-    <Box sx={{ minHeight: '100vh', bgcolor: alpha(ACCENT, 0.03), py: { xs: 4, md: 8 }, px: 2 }}>
+    <Box sx={{ minHeight: '100vh', bgcolor: alpha(accent, 0.03), py: { xs: 4, md: 8 }, px: 2 }}>
       <Box
         sx={{
           maxWidth: 720,
@@ -149,6 +155,7 @@ export function AlertLanding() {
           overflow: 'hidden',
         }}
       >
+        <BrandHeader brand={view.brand} sx={{ borderRadius: 0, mb: 0 }} />
         <Box sx={{ p: { xs: 3, md: 4 }, bgcolor: headerColor, color: 'white' }}>
           <Typography variant="caption" sx={{ opacity: 0.85, fontWeight: 600, letterSpacing: 0.5 }}>
             {isSpec ? 'OUT-OF-SPEC RESULT' : 'RENEWAL ATTENTION NEEDED'}
@@ -159,7 +166,7 @@ export function AlertLanding() {
               : `${view.renewals.length} document${view.renewals.length === 1 ? '' : 's'} need${view.renewals.length === 1 ? 's' : ''} attention`}
           </Typography>
           <Typography variant="body2" sx={{ opacity: 0.85, mt: 1 }}>
-            {view.tenant_name}
+            {brand.name}
           </Typography>
         </Box>
 
@@ -292,6 +299,7 @@ export function AlertLanding() {
             You are seeing this because you were emailed about it. This link is read-only and stops
             working on {formatDate(view.expires_at)}.
           </Typography>
+          <BrandSupport brand={view.brand} sx={{ mt: 1 }} />
         </Box>
       </Box>
     </Box>
