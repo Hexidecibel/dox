@@ -127,6 +127,9 @@ describe('report-lot-key-scheme --apply', () => {
       `INSERT INTO document_lots (id, document_id, lot_id) VALUES ('lkdl2', 'lk-d2', 'lk-bad')`,
       `INSERT INTO document_lots (id, document_id, lot_id) VALUES ('lkdl3', 'lk-d2', 'lk-good')`,
       `INSERT INTO order_items (id, order_id, product_name, lot_id) VALUES ('lk-oi', 'rp-o1', 'Milk', 'lk-bad')`,
+      // A hold on the mis-keyed lot row (migration 0139). It must follow the
+      // lot, or the lot row could not be removed (or worse, the hold lost).
+      `INSERT INTO document_holds (id, tenant_id, document_id, lot_id, reason, source, placed_by) VALUES ('lk-hold', '${T}', 'lk-d1', 'lk-bad', 'Retest pending', 'person', '${U}')`,
     ]);
     const report = {
       rows: [
@@ -152,6 +155,10 @@ describe('report-lot-key-scheme --apply', () => {
       { document_id: 'lk-d2', lot_id: 'lk-good' },
     ]);
     expect((await all(`SELECT lot_id FROM order_items WHERE id = 'lk-oi'`))[0].lot_id).toBe('lk-good');
+    // The hold followed its lot, still active, nothing else about it touched.
+    expect(await all(`SELECT lot_id, reason, released_at FROM document_holds WHERE id = 'lk-hold'`)).toEqual([
+      { lot_id: 'lk-good', reason: 'Retest pending', released_at: null },
+    ]);
     const merged = await all(`SELECT details FROM audit_log WHERE action = 'lot.merged_on_identity_repair' AND resource_id = 'lk-bad'`);
     expect(JSON.parse(String(merged[0].details)).removed_row.lot_key).toBe('1032610210326102');
 

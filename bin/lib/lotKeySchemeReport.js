@@ -195,13 +195,18 @@ function repairToSql(tenantId, rep, q, runAt) {
   s.push(`DELETE FROM document_lots WHERE lot_id = ${q(src.id)} AND ${exists} AND document_id IN (SELECT document_id FROM document_lots WHERE lot_id = ${q(dst.id)});`);
   s.push(`UPDATE order_items SET lot_id = ${q(dst.id)} WHERE lot_id = ${q(src.id)} AND ${exists};`);
   s.push(`UPDATE lot_match_suggestions SET lot_id = ${q(dst.id)} WHERE lot_id = ${q(src.id)} AND ${exists};`);
+  // Holds (migration 0139) follow the lot they are on. OR IGNORE: if the same
+  // certificate already has an active hold on the surviving lot, the pointer
+  // stays where it is, and the DELETE below then leaves the old lot row alone
+  // rather than take a hold with it.
+  s.push(`UPDATE OR IGNORE document_holds SET lot_id = ${q(dst.id)} WHERE lot_id = ${q(src.id)} AND ${exists};`);
   if (!dst.production_date && src.production_date) {
     s.push(
       `UPDATE lots SET production_date = ${q(src.production_date)}, production_date_raw = ${q(src.production_date_raw)}, production_date_source = ${q(src.production_date_source)}, production_date_status = ${q(src.production_date_status)}, production_date_document_id = ${q(src.production_date_document_id)}, production_date_scheme_id = ${q(src.production_date_scheme_id)}, updated_at = datetime('now') WHERE id = ${q(dst.id)} AND production_date IS NULL AND ${exists};`,
     );
   }
   s.push(
-    `DELETE FROM lots WHERE ${guard} AND NOT EXISTS (SELECT 1 FROM document_lots WHERE lot_id = ${q(src.id)}) AND NOT EXISTS (SELECT 1 FROM order_items WHERE lot_id = ${q(src.id)}) AND NOT EXISTS (SELECT 1 FROM lot_match_suggestions WHERE lot_id = ${q(src.id)});`,
+    `DELETE FROM lots WHERE ${guard} AND NOT EXISTS (SELECT 1 FROM document_lots WHERE lot_id = ${q(src.id)}) AND NOT EXISTS (SELECT 1 FROM order_items WHERE lot_id = ${q(src.id)}) AND NOT EXISTS (SELECT 1 FROM lot_match_suggestions WHERE lot_id = ${q(src.id)}) AND NOT EXISTS (SELECT 1 FROM document_holds WHERE lot_id = ${q(src.id)});`,
   );
   return s;
 }
