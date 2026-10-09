@@ -59,6 +59,13 @@ export type SpecCriticality = (typeof SPEC_CRITICALITY_VALUES)[number];
  */
 export const DEFAULT_SPEC_CRITICALITY: SpecCriticality = 'medium';
 
+/**
+ * THE TIER THAT HOLDS (rules table B1, migration 0139): a result out of spec
+ * against a limit of this tier places a hold on the lot's certificate at
+ * approval. Named here so no other file writes the stored word.
+ */
+export const HOLDING_SPEC_CRITICALITY: SpecCriticality = SPEC_CRITICALITY_VALUES[0];
+
 export function isSpecCriticality(value: unknown): value is SpecCriticality {
   return (
     typeof value === 'string' &&
@@ -126,16 +133,17 @@ export const SPEC_CRITICALITY_FORMER_LABELS: Record<SpecCriticality, readonly st
  * DRAFT COPY — B1's wording was drafted by AI and is held for AJ's approval.
  * Edit it HERE; every surface reads this map.
  *
- * ONE DELIBERATE DEPARTURE from B1's draft: B1 says a critical result "can't
- * ship until QA resolves it". dox has no hold — nothing stops a shipment yet —
- * so the shipped sentence says that too. A tooltip that promises a hold the
- * product does not enforce is the most dangerous kind of wrong, because the
- * reader stops watching.
+ * THE CRITICAL SENTENCE IS NOW TRUE (migration 0139). It used to carry
+ * "(Holds are not enforced yet ...)" because nothing stopped a shipment. Since
+ * 0139 a result out of spec against a Critical limit places a hold on that
+ * lot's certificate when it is approved, and the certificate does not leave on
+ * any order, ZIP, link, bundle or API key until QA releases it (shared/holds.ts).
+ * The hold is in the portal only: nothing reaches a warehouse system.
  */
 export const SPEC_CRITICALITY_HELP: Record<SpecCriticality, string> = {
   high:
     "This result stops the shipment. It can't ship until QA resolves it. " +
-    '(Holds are not enforced yet — today this flags and alerts.)',
+    "An out-of-spec result puts the lot's certificate on hold: it cannot be sent until QA releases the hold.",
   medium:
     "This result missed target and is being tracked. On its own it doesn't stop anything, " +
     'but repeated misses can move the supplier onto watch.',

@@ -20,6 +20,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // shared/sharingRule.ts
 var sharingRule_exports = {};
 __export(sharingRule_exports, {
+  HELD_LABEL: () => HELD_LABEL,
   REFUSAL_NAMES_SHOWN: () => REFUSAL_NAMES_SHOWN,
   SHARING_EXITS: () => SHARING_EXITS,
   SHARING_RULES: () => SHARING_RULES,
@@ -49,6 +50,18 @@ function looksLikeCoaType(name) {
   const n = name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (!n) return false;
   return /\bcoas?\b/.test(n) || /\bc\s*of\s*a\b/.test(n) || /\bcertificates?\s+of\s+analysis\b/.test(n) || /\banalysis\s+certificates?\b/.test(n);
+}
+
+// shared/specCriticality.ts
+var SPEC_CRITICALITY_VALUES = ["high", "medium", "low"];
+var HOLDING_SPEC_CRITICALITY = SPEC_CRITICALITY_VALUES[0];
+
+// shared/holds.ts
+function holdRefusalText(hold) {
+  const reason = (hold?.reason ?? "").trim();
+  const lot = (hold?.lot_label ?? "").trim();
+  const head = lot ? `On hold (lot ${lot})` : "On hold";
+  return reason ? `${head}: ${reason}` : `${head}.`;
 }
 
 // shared/sharingRule.ts
@@ -124,7 +137,8 @@ function strictest(rules) {
   return out;
 }
 var SHARING_EXITS = ["portal_file", "zip", "send", "public_link", "bundle", "order_send"];
-function judgeExit(rule, exit, actor) {
+function judgeExit(rule, exit, actor, held = false) {
+  if (held && !(exit === "portal_file" && actor.method === "jwt")) return "held";
   if (actor.method === "api_key") {
     return rule === "free" ? "allow" : rule === "qa" ? "needs_qa" : "locked";
   }
@@ -142,9 +156,11 @@ function judgeExit(rule, exit, actor) {
   return actor.canReleaseQa ? "allow" : "needs_qa";
 }
 function sharingRefusalMessage(reason, opts = {}) {
+  if (reason === "held") return holdRefusalText(opts.hold);
   if (reason === "locked") return "Locked: this document does not leave the portal.";
   return opts.apiKey ? 'Needs QA approval: an API key can read only documents marked "Send freely".' : "Needs QA approval: only QA or an administrator can send this document.";
 }
+var HELD_LABEL = "On hold";
 var REFUSAL_NAMES_SHOWN = 6;
 function nameList(titles) {
   const shown = titles.slice(0, REFUSAL_NAMES_SHOWN).map((t) => t.trim() || "Untitled document");
@@ -153,12 +169,14 @@ function nameList(titles) {
 }
 function describeRefusals(refused) {
   if (refused.length === 0) return "";
+  const held = refused.filter((r) => r.reason === "held").map((r) => r.title ?? "");
   const locked = refused.filter((r) => r.reason === "locked").map((r) => r.title ?? "");
   const qa = refused.filter((r) => r.reason === "needs_qa").map((r) => r.title ?? "");
   const n = refused.length;
   const parts = [`${n} document${n === 1 ? " was" : "s were"} not included.`];
   if (locked.length > 0) parts.push(`${SHARING_RULE_LABELS.locked}: ${nameList(locked)}.`);
   if (qa.length > 0) parts.push(`${SHARING_RULE_LABELS.qa}: ${nameList(qa)}.`);
+  if (held.length > 0) parts.push(`${HELD_LABEL}: ${nameList(held)}.`);
   return parts.join(" ");
 }
 function parseRefusedHeader(value) {
@@ -169,7 +187,7 @@ function parseRefusedHeader(value) {
     if (at <= 0) continue;
     const id = part.slice(0, at).trim();
     const reason = part.slice(at + 1).trim();
-    if (id && (reason === "locked" || reason === "needs_qa")) out.push({ document_id: id, reason });
+    if (id && (reason === "locked" || reason === "needs_qa" || reason === "held")) out.push({ document_id: id, reason });
   }
   return out;
 }
@@ -178,6 +196,7 @@ function loosens(before, after) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  HELD_LABEL,
   REFUSAL_NAMES_SHOWN,
   SHARING_EXITS,
   SHARING_RULES,

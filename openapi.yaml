@@ -108,6 +108,65 @@ components:
         and optionally have an expiration date.
 
   schemas:
+    HoldFailure:
+      type: object
+      description: "A hold that should have been placed at approval and was not (migration 0139). The certificate is NOT held until somebody retries."
+      properties:
+        id: { type: string }
+        document_id: { type: string }
+        document_title: { type: string, nullable: true }
+        document_version: { type: integer }
+        created_at: { type: string }
+        error: { type: string, nullable: true }
+        holds:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string, enum: [spec_critical, zero_tolerance] }
+              reason: { type: string }
+
+    DocumentHold:
+      type: object
+      description: |
+        One hold on a certificate (migration 0139), active or released.
+        Append-only: a hold is placed and later released, never edited.
+      properties:
+        id: { type: string }
+        document_id: { type: string, description: "The certificate the hold was PLACED from. A lot hold also covers every other certificate of that lot." }
+        document_title: { type: string, nullable: true }
+        document_type_name: { type: string, nullable: true }
+        supplier_id: { type: string, nullable: true }
+        supplier_name: { type: string, nullable: true }
+        product_names: { type: array, items: { type: string } }
+        lot_id: { type: string, nullable: true, description: "The lot row the hold is on; null = the whole certificate." }
+        lot_label: { type: string, nullable: true }
+        reason: { type: string }
+        source:
+          type: string
+          enum: [person, spec_critical, zero_tolerance]
+          description: "person = somebody placed it; spec_critical = a result out of spec against a Critical limit, at approval; zero_tolerance = a presence test on a zero-tolerance analyte run on a smaller sample than the limit requires, at approval."
+        document_version: { type: integer, nullable: true, description: "The version current when the hold was placed. Display only: the hold is on the document." }
+        detail:
+          type: object
+          nullable: true
+          description: "For an automatic hold, the judged result that placed it, frozen."
+          properties:
+            test: { type: string }
+            value: { type: string, nullable: true }
+            unit: { type: string, nullable: true }
+            limit: { type: string, nullable: true }
+            location: { type: string, nullable: true }
+            why: { type: string, nullable: true }
+        placed_by: { type: string, nullable: true, description: "Null for an automatic hold." }
+        placed_by_name: { type: string, nullable: true }
+        placed_at: { type: string }
+        active: { type: boolean }
+        released_by: { type: string, nullable: true }
+        released_by_name: { type: string, nullable: true }
+        released_at: { type: string, nullable: true }
+        release_reason: { type: string, nullable: true }
+
     OrderDocumentLine:
       type: object
       description: One document line of an order (migration 0138), judged for the caller.
@@ -766,8 +825,8 @@ components:
         rule: { $ref: '#/components/schemas/SharingRule' }
         reason:
           type: string
-          enum: [locked, needs_qa]
-          description: "`locked` = never leaves; `needs_qa` = the caller may not release it."
+          enum: [locked, needs_qa, held]
+          description: "`locked` = never leaves; `needs_qa` = the caller may not release it; `held` = the certificate has an active hold (migration 0139) and nobody sends it until the hold is released."
         message: { type: string, description: One sentence a screen can print as it stands. }
 
     SharingRuleRefused:
@@ -5406,7 +5465,7 @@ paths:
                         reason: { type: string }
                         sharing_refusal:
                           type: string
-                          enum: [locked, needs_qa]
+                          enum: [locked, needs_qa, held]
                           description: Set when the sharing rule is why the line is not sent (migration 0137).
                         document_id: { type: string }
                         order_document_id:
@@ -5821,6 +5880,200 @@ paths:
         '403': { description: "Not a QA releaser, a read-only account, or an API key" }
         '404': { description: No such order or line in this organization }
         '409': { description: "The line is not in the middle of a release, or the release is still in progress" }
+
+  /api/documents/{id}/holds:
+    get:
+      tags: [Documents]
+      summary: The holds on one certificate
+      description: |
+        Holds (decision C-005, migration 0139). A hold stops the certificate
+        leaving by EVERY exit (ZIP, emailed link, public link, bundle, order
+        send and resend, document-order line, QA release, API-key read) until
+        it is released. A signed-in person opening the file is unaffected.
+        Readable by anybody who can see the document.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Active holds, released holds, the certificate's lot rows, and what the caller may do
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active: { type: array, items: { $ref: '#/components/schemas/DocumentHold' }, description: "Oldest first. Any one of them stops the certificate leaving." }
+                  history: { type: array, items: { $ref: '#/components/schemas/DocumentHold' }, description: "Released holds, newest release first." }
+                  also_held_by:
+                    type: array
+                    description: "Active holds placed on ANOTHER certificate that stop this one too: a hold on a lot row this certificate carries (a lot hold covers every certificate of the lot), or on a neighbour lot whose page this file prints. Each names the certificate it was placed from (`document_id`, `document_title`)."
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        document_id: { type: string }
+                        document_title: { type: string, nullable: true }
+                        lot_id: { type: string, nullable: true }
+                        lot_label: { type: string, nullable: true }
+                        reason: { type: string }
+                        source: { type: string }
+                        placed_at: { type: string }
+                  lots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        lot_id: { type: string }
+                        lot_number: { type: string }
+                        sub_lot_code: { type: string, nullable: true }
+                        lot_label: { type: string }
+                        hold: { type: object, nullable: true, description: "The active hold on this lot row, if any." }
+                  failures: { type: array, items: { $ref: '#/components/schemas/HoldFailure' }, description: "Holds that should have been placed on this certificate and were not." }
+                  can_place: { type: boolean, description: "Any login but a read-only one. An API key may place." }
+                  can_release: { type: boolean, description: "A QA releaser or an administrator, signed in. Never an API key." }
+        '404': { description: "No such document in the caller's organization" }
+    post:
+      tags: [Documents]
+      summary: Place a hold on a certificate, or on one lot row of it
+      description: |
+        Any login but a read-only one, and an API key (a hold only tightens).
+        A reason is required. One lot row carries at most one active hold
+        placed by a person; so does the whole certificate. QA is told by email
+        unless the person placing it is QA. There is no PUT and no DELETE: a
+        hold is released, never edited or removed.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, maxLength: 500 }
+                lot_id: { type: string, nullable: true, description: "A lot row of THIS certificate. Omit or null for the whole certificate." }
+      responses:
+        '201':
+          description: The hold
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hold: { $ref: '#/components/schemas/DocumentHold' }
+        '400': { description: "No reason, or a lot that is not a lot row of this certificate" }
+        '403': { description: A read-only account }
+        '404': { description: "No such document in the caller's organization" }
+        '409': { description: "That lot row (or the whole certificate) already has an active hold placed by a person" }
+
+  /api/holds:
+    get:
+      tags: [Documents]
+      summary: The organization's holds
+      description: |
+        What is on hold, why, and since when (migration 0139). Readable by any
+        login of the organization, a read-only account included. Belongs to no
+        module. At most 200 rows; `truncated` says when there are more.
+      parameters:
+        - { name: tenant_id, in: query, required: false, schema: { type: string }, description: super_admin only }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [active, released, all], default: active } }
+        - { name: source, in: query, required: false, schema: { type: string, enum: [person, spec_critical, zero_tolerance] } }
+        - { name: supplier_id, in: query, required: false, schema: { type: string }, description: "The certificate's supplier" }
+        - { name: product_id, in: query, required: false, schema: { type: string }, description: "A product linked to the certificate, or the held lot row's product" }
+        - { name: count, in: query, required: false, schema: { type: string, enum: ['1'] }, description: "Answer `{ count }` only: one COUNT of active holds. What the navigation polls." }
+      responses:
+        '200':
+          description: The holds, or the count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  holds: { type: array, items: { $ref: '#/components/schemas/DocumentHold' } }
+                  total: { type: integer }
+                  truncated: { type: boolean }
+                  can_release: { type: boolean }
+                  count: { type: integer, description: "Only with ?count=1" }
+                  failures:
+                    description: "With ?count=1, how many holds should have been placed and were not. Otherwise the list of them: each certificate is NOT held until somebody retries."
+                    oneOf:
+                      - { type: integer }
+                      - { type: array, items: { $ref: '#/components/schemas/HoldFailure' } }
+                  can_place: { type: boolean, description: "May the caller retry a failed hold (anybody who may place one)" }
+        '400': { description: "An unknown state or source" }
+
+  /api/holds/failures/{id}/retry:
+    post:
+      tags: [Documents]
+      summary: Place the holds an approval should have placed and could not
+      description: |
+        An automatic hold is written after the approval has happened. When that
+        write fails the approval stands, the certificate is NOT held, and the
+        failure is recorded, mailed to QA and shown on the document page and
+        the Holds page. This places exactly the holds that were computed then,
+        once per judged result: a hold placed in the meantime is not placed
+        twice. Anybody who may place a hold may retry.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Retried
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placed: { type: integer }
+                  already_held: { type: integer, description: "Holds that were already there and still active" }
+                  released:
+                    type: array
+                    description: "Holds that had been placed and were since RELEASED. Nothing was placed for them; the certificate is not on hold for that result."
+                    items:
+                      type: object
+                      properties:
+                        reason: { type: string }
+                        released_by_name: { type: string, nullable: true }
+                        released_at: { type: string }
+                  message: { type: string, description: "What happened, in words a screen prints as they stand" }
+        '403': { description: A read-only account }
+        '404': { description: "No such failure in the caller's organization" }
+        '409': { description: Already retried }
+        '500': { description: "The hold could not be written again. The failure stays open." }
+
+  /api/holds/{id}/release:
+    post:
+      tags: [Documents]
+      summary: Release a hold
+      description: |
+        THE ONLY WAY A HOLD ENDS. A QA releaser (the `QA` owner route, else the
+        organization's master user) or an administrator, signed in, with a
+        written reason. Sending a held certificate does not release it, a QA
+        release of an order line does not release it, and replacing the file
+        does not release it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: The hold, released
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hold: { $ref: '#/components/schemas/DocumentHold' }
+        '400': { description: No reason }
+        '403': { description: "Not a QA releaser or an administrator, a read-only account, or an API key" }
+        '404': { description: "No such hold in the caller's organization" }
+        '409': { description: The hold has already been released }
 
   /api/order-documents/pending:
     get:

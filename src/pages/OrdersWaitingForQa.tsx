@@ -224,6 +224,7 @@ export function OrdersWaitingForQa() {
                       <Typography variant="body2" color="text.secondary">
                         {[line.product_name, line.supplier_name, line.facility_name].filter(Boolean).join(' · ')}
                       </Typography>
+                      {line.hold && <Chip size="small" color="error" label="On hold" data-testid="waiting-hold-chip" />}
                       {line.sharing_rule && (
                         <Chip size="small" variant="outlined" color={sharingRuleColor(line.sharing_rule)} label={SHARING_RULE_LABELS[line.sharing_rule]} />
                       )}

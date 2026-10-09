@@ -47,6 +47,7 @@ import { errorToResponse, BadRequestError } from '../../lib/permissions';
 import { callerHasModule } from '../../lib/module-access';
 import { buildMatchExpr, buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr } from '../../lib/search-fts';
 import { planInstantSearch, runCoverageSearch, unreviewedTextCandidates } from '../../lib/search-coverage';
+import { attachActiveHolds } from '../../lib/hold-state';
 import type { Env, User } from '../../lib/types';
 import type { SearchCoverageFields } from '../../../shared/types';
 
@@ -389,6 +390,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         unreviewed_candidates: await unreviewedTextCandidates(context.env.DB, tenantId, q.trim()),
       } satisfies SearchCoverageFields);
     }
+
+    // A held certificate says so on its row (0139). After the answer is built:
+    // a hold is not a search field and judges nothing.
+    await attachActiveHolds(context.env.DB, tenantId, responseBody.documents.results as { id?: unknown }[]);
 
     return new Response(JSON.stringify(responseBody), {
       headers: { 'Content-Type': 'application/json' },

@@ -22,7 +22,13 @@
  * a METHOD mismatch (MPN against CFU) or a smaller presence/absence SAMPLE than
  * the limit requires. Those two are never judged (D1) but must always reach a
  * person, worded as notify-only. Every other could-not-check stays in the
- * review queue and the register, exactly as before. Nothing here holds a lot.
+ * review queue and the register, exactly as before.
+ *
+ * WHAT HOLDS (migration 0139). After the verdicts are written, the approval
+ * path hands them to `placeAutomaticHolds` (functions/lib/holds.ts): a Critical
+ * result out of spec, or a zero-tolerance sample-size mismatch, puts that
+ * lot's certificate on hold. The hold is a consequence of a written verdict and
+ * never an input to one; the bulk recheck never reaches it.
  *
  * NEVER BLOCKS, NEVER THROWS UPWARD. Registering a result and notifying about it
  * are strictly best-effort: an approval that already succeeded must not fail
@@ -50,12 +56,23 @@ import {
 } from '../../shared/specSnapshot';
 import { compareSpecCriticality } from '../../shared/specCriticality';
 import { SPEC_BAND_LABELS, specBandRank } from '../../shared/specBand';
+import { placeAutomaticHolds } from './holds';
 
 export interface RegisterContext {
   tenantId: string;
   documentId: string;
   versionNumber?: number | null;
   queueItemId?: string | null;
+  /**
+   * Set when these results could NOT be attributed to this one document: one
+   * flat extraction was approved as several documents and nothing says which
+   * of them a result belongs to, so it is registered on every one (C-089).
+   * Appended to the `result_location` of exactly those results
+   * (`unattributedVerdicts`; every result when that is not given), so the
+   * register says so row by row.
+   */
+  unattributedNote?: string | null;
+  unattributedVerdicts?: ReadonlySet<SpecVerdict>;
   /** Set when a reviewer approved a document that already carried a failure. */
   acknowledgedBy?: string | null;
   acknowledgementNote?: string | null;
@@ -155,7 +172,11 @@ export async function registerSpecChecks(
       await db.batch(
         verdicts.map((v, i) => {
           const identity = registerIdentity(v);
-          return stmt.bind(...rowValues[i], identity.result_key, identity.result_location);
+          const location =
+            ctx.unattributedNote && (!ctx.unattributedVerdicts || ctx.unattributedVerdicts.has(v))
+              ? [identity.result_location, ctx.unattributedNote].filter(Boolean).join(' ')
+              : identity.result_location;
+          return stmt.bind(...rowValues[i], identity.result_key, location);
         })
       );
     } catch (err) {
@@ -532,6 +553,13 @@ export async function registerAndNotifyForApproval(
     documentTypeId: string | null;
     approvedBy: string;
     appUrl?: string;
+    /**
+     * True when the caller already knows these results are not attributed to
+     * one document (the whole stored extraction of a file approved as several
+     * product documents). A result outside any record's scope that lands on
+     * more than one document is unattributed whether or not this is set.
+     */
+    unattributed?: boolean;
   },
   verdicts: SpecVerdict[],
   limits: ConfiguredLimit[],
@@ -548,65 +576,148 @@ export async function registerAndNotifyForApproval(
   if (documentsByRecord.length === 0) return;
 
   try {
-    // 'ai_fields' verdicts come from the flat path, which produces exactly one
-    // document; records-mode verdicts carry their record index in the scope.
+    // A verdict addressed to `record[N]` belongs to the document produced from
+    // record N. Anything else ('ai_fields', 'page_metadata') is not addressed
+    // to a record:
+    //   - ONE document was approved: it is that document's;
+    //   - SEVERAL were (a flat extraction split into product documents, or a
+    //     result on a records-mode certificate's shared page metadata): nothing
+    //     says which, so it is registered against EVERY one of them, marked
+    //     unattributed (C-089). It used to be dropped -- no register row, no
+    //     alert, and since 0139 no hold, however Critical the failure.
     const byRecord = new Map<number | null, typeof documentsByRecord>();
     for (const d of documentsByRecord) {
       const list = byRecord.get(d.recordIndex) ?? [];
       list.push(d);
       byRecord.set(d.recordIndex, list);
     }
-    const flatTarget = documentsByRecord.length === 1 ? documentsByRecord[0] : null;
+    const several = documentsByRecord.length > 1;
+    const unattributedNote = (n: number) =>
+      `(not attributed to one document: registered on all ${n} documents approved from this file)`;
 
     type Doc = (typeof documentsByRecord)[number];
-    const grouped = new Map<
-      string,
-      { doc: Doc; verdicts: SpecVerdict[]; unjudged: UnjudgedResult[]; missing: MissingRequiredAnalyte[] }
-    >();
-    const entryFor = (scope: string) => {
-      const m = /^record\[(\d+)\]$/.exec(scope);
-      const target = m ? (byRecord.get(Number(m[1])) ?? [])[0] : flatTarget;
-      if (!target) return null;
-      const entry = grouped.get(target.documentId) ?? { doc: target, verdicts: [], unjudged: [], missing: [] };
+    interface Entry {
+      doc: Doc;
+      verdicts: SpecVerdict[];
+      unattributed: SpecVerdict[];
+      unjudged: UnjudgedResult[];
+      missing: MissingRequiredAnalyte[];
+    }
+    const grouped = new Map<string, Entry>();
+    const entryOf = (target: Doc): Entry => {
+      const entry = grouped.get(target.documentId) ?? { doc: target, verdicts: [], unattributed: [], unjudged: [], missing: [] };
       grouped.set(target.documentId, entry);
       return entry;
     };
-    for (const v of verdicts) entryFor(v.scope)?.verdicts.push(v);
-    for (const u of unjudged) entryFor(u.scope)?.unjudged.push(u);
-    for (const m of missing) entryFor(m.scope)?.missing.push(m);
+    /** The documents a scope addresses, and whether that is an attribution. */
+    const targetsFor = (scope: string): { docs: Doc[]; attributed: boolean } => {
+      const m = /^record\[(\d+)\]$/.exec(scope);
+      if (m) {
+        const target = (byRecord.get(Number(m[1])) ?? [])[0];
+        return { docs: target ? [target] : [], attributed: true };
+      }
+      if (!several) return { docs: documentsByRecord.slice(0, 1), attributed: !base.unattributed };
+      return { docs: documentsByRecord, attributed: false };
+    };
+    for (const v of verdicts) {
+      const t = targetsFor(v.scope);
+      for (const d of t.docs) (t.attributed ? entryOf(d).verdicts : entryOf(d).unattributed).push(v);
+    }
+    for (const u of unjudged) for (const d of targetsFor(u.scope).docs) entryOf(d).unjudged.push(u);
+    for (const m of missing) for (const d of targetsFor(m.scope).docs) entryOf(d).missing.push(m);
 
-    for (const { doc, verdicts: docVerdicts, unjudged: docUnjudged, missing: docMissing } of grouped.values()) {
-      await registerSpecGaps(
+    const fileDocuments = documentsByRecord.length;
+    // ONE DOCUMENT'S FAILURE NEVER SKIPS THE NEXT (C-087). Every step below is
+    // tried on its own, per document: a throw used to land in the one catch
+    // around the whole loop, and every later document of the same approval got
+    // no register row, no alert and no hold.
+    for (const entry of grouped.values()) {
+      const { doc, unjudged: docUnjudged, missing: docMissing } = entry;
+      const docVerdicts = [...entry.verdicts, ...entry.unattributed];
+      const note = entry.unattributed.length > 0 ? unattributedNote(Math.max(fileDocuments, 2)) : null;
+      const version = doc.versionNumber ?? 1;
+      const step = async (what: string, run: () => Promise<void>) => {
+        try {
+          await run();
+        } catch (err) {
+          console.error(
+            `[spec-register] ${what} failed for document ${doc.documentId}:`,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
+      };
+
+      await step('writing spec gaps', async () => {
+        await registerSpecGaps(
+          db,
+          { tenantId: base.tenantId, documentId: doc.documentId, versionNumber: version, queueItemId: base.queueItemId },
+          { unjudged: docUnjudged, missing_required: docMissing }
+        );
+      });
+
+      // What to alert about is decided from the verdicts themselves, so a
+      // register write that fails does not also silence the alert.
+      let failures = docVerdicts.filter((v) => v.verdict === 'out_of_spec');
+      let notifyOnly = docVerdicts.filter(isNotifyOnlyVerdict);
+      await step('writing spec checks', async () => {
+        const written = await registerSpecChecks(
+          db,
+          {
+            tenantId: base.tenantId,
+            documentId: doc.documentId,
+            versionNumber: version,
+            queueItemId: base.queueItemId,
+            unattributedNote: note,
+            unattributedVerdicts: new Set(entry.unattributed),
+            // The reviewer approved with these failures in front of them, so the
+            // approval itself is the acknowledgement.
+            acknowledgedBy: base.approvedBy,
+            acknowledgementNote: 'Approved from the review queue with this result showing.',
+          },
+          docVerdicts,
+          limits
+        );
+        failures = written.failures;
+        notifyOnly = written.notifyOnly;
+      });
+
+      // HOLDS (rules table B1 / E2, migration 0139). Written AFTER the verdicts,
+      // from the verdicts: a Critical result out of spec, or a zero-tolerance
+      // presence test on too small a sample, puts this document's lot on hold.
+      // Placed before the spec alert goes out so the alert's reader finds the
+      // certificate already held. Never an input to anything above. It never
+      // throws: a hold that could not be written is recorded, shown and mailed
+      // (`recordHoldFailure`).
+      await placeAutomaticHolds(
         db,
-        { tenantId: base.tenantId, documentId: doc.documentId, versionNumber: doc.versionNumber ?? 1, queueItemId: base.queueItemId },
-        { unjudged: docUnjudged, missing_required: docMissing }
-      );
-      const { failures, notifyOnly } = await registerSpecChecks(
-        db,
+        apiKey,
         {
           tenantId: base.tenantId,
           documentId: doc.documentId,
-          versionNumber: doc.versionNumber ?? 1,
+          documentTitle: doc.title,
+          versionNumber: version,
+          supplierId: base.supplierId,
+          documentTypeId: base.documentTypeId,
           queueItemId: base.queueItemId,
-          // The reviewer approved with these failures in front of them, so the
-          // approval itself is the acknowledgement.
-          acknowledgedBy: base.approvedBy,
-          acknowledgementNote: 'Approved from the review queue with this result showing.',
+          approvedBy: base.approvedBy,
+          appUrl: base.appUrl,
         },
         docVerdicts,
-        limits
+        { unattributedNote: note, unattributedVerdicts: entry.unattributed }
       );
 
-      await notifySpecFailures(db, apiKey, {
-        tenantId: base.tenantId,
-        tenantName: base.tenantName,
-        documentId: doc.documentId,
-        documentTitle: doc.title,
-        supplierId: base.supplierId,
-        supplierName: base.supplierName,
-        documentTypeId: base.documentTypeId,
-        appUrl: base.appUrl,
-      }, failures, docMissing, notifyOnly);
+      await step('notifying spec failures', async () => {
+        await notifySpecFailures(db, apiKey, {
+          tenantId: base.tenantId,
+          tenantName: base.tenantName,
+          documentId: doc.documentId,
+          documentTitle: doc.title,
+          supplierId: base.supplierId,
+          supplierName: base.supplierName,
+          documentTypeId: base.documentTypeId,
+          appUrl: base.appUrl,
+        }, failures, docMissing, notifyOnly);
+      });
     }
   } catch (err) {
     console.error(

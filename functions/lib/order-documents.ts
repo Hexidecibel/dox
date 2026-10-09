@@ -57,6 +57,7 @@ import {
   releaseIsStuck,
   type OrderDocumentJudgement,
 } from '../../shared/orderDocuments';
+import { holdRefusalText } from '../../shared/holds';
 import { isPrivateLabel } from '../../shared/itemApproval';
 import { looksLikeCoaType } from '../../shared/renewalPeriod';
 import { parseSharingRule, type ExitActor } from '../../shared/sharingRule';
@@ -206,6 +207,8 @@ async function judgeRows(
   return rows.map((row) => {
     const doc = row.document_id ? live.get(row.document_id) ?? null : null;
     const rule = row.document_id ? rules.get(row.document_id)?.rule ?? null : null;
+    // The document's active hold (0139), read with the rule and judged with it.
+    const hold = row.document_id ? rules.get(row.document_id)?.holds[0] ?? null : null;
     const now = fresh.get(currentDocumentKey(row)) ?? null;
     const expired = Boolean(doc && isPastDue(doc.due_date, today));
     const waiting = row.release_status === 'pending_qa' || row.release_status === 'releasing';
@@ -242,6 +245,7 @@ async function judgeRows(
         pending_at: row.pending_at,
         pending_recipients: pendingRecipients,
         release_stuck: releaseStuck,
+        hold,
       },
       actor,
     );
@@ -269,6 +273,7 @@ async function judgeRows(
       resolved_at: row.resolved_at,
       rule_at_resolve: parseSharingRule(row.rule_at_resolve),
       sharing_rule: rule,
+      hold,
       release_status: row.release_status,
       pending_send_id: waiting ? row.pending_send_id : null,
       pending_at: row.pending_at,
@@ -902,28 +907,33 @@ export async function markLinesSent(
 }
 
 /**
- * How many document lines of an order are LEFT BEHIND as of this send. An
- * order with one of those is not delivered (C-056).
+ * How many document lines of an order are LEFT BEHIND. An order with one of
+ * those is not delivered (C-056).
  *
- * A line is done in exactly two ways: QA released it, or it went with THIS
- * send and nothing is outstanding on it. Everything else is behind -- waiting
- * for QA, in the middle of a release, refused, missing, expired, locked, or
- * sent only by some other send.
+ * A line is done in exactly two ways: QA released it, or it WENT ON A SEND and
+ * nothing is outstanding on it (`last_send_id`, stamped by `markLinesSent`
+ * only when the mail was accepted, and cleared when the line is refreshed to a
+ * different document). Everything else is behind -- waiting for QA, in the
+ * middle of a release, refused, missing, expired, locked, on hold.
+ *
+ * `sendId` narrows "went" to one particular send. The order's delivered check
+ * does not pass it (C-090): what matters is that the line travelled, on
+ * whichever send, the same rule a COA line is held to.
  */
 export async function countDocumentLinesBehind(
   db: D1Database,
   tenantId: string,
   orderId: string,
-  sendId: string,
+  sendId?: string,
 ): Promise<number> {
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM order_documents
         WHERE tenant_id = ? AND order_id = ?
           AND NOT (release_status = 'released'
-                   OR (release_status = 'none' AND last_send_id IS NOT NULL AND last_send_id = ?))`,
+                   OR (release_status = 'none' AND last_send_id IS NOT NULL${sendId ? ' AND last_send_id = ?' : ''}))`,
     )
-    .bind(tenantId, orderId, sendId)
+    .bind(...(sendId ? [tenantId, orderId, sendId] : [tenantId, orderId]))
     .first<{ n: number }>();
   return Number(row?.n) || 0;
 }
@@ -970,6 +980,12 @@ export function releaseBlockedReason(line: JudgedOrderDocument, recipients: stri
   }
   if (line.judgement.reason === 'no_file') return 'The document has no file on record.';
   if (api.resolution === 'expired') return 'The document has expired. Refuse it, or refresh the line on the order.';
+  // On hold (0139): releasing a document to a customer is not how a hold is
+  // released. The hold is released first, on the document or the Holds page.
+  if (api.hold) {
+    const said = holdRefusalText(api.hold);
+    return `${said}${/[.!?]$/.test(said) ? '' : '.'} Release the hold first; a QA release does not lift it.`;
+  }
   if (api.sharing_rule === 'locked' || api.sharing_rule === null) {
     return 'The document is locked now. Nobody releases a locked document.';
   }
@@ -1089,6 +1105,7 @@ export async function listPendingOrderDocuments(
         release_status: line.row.release_status,
         stuck,
         sharing_rule: line.api.sharing_rule,
+        hold: line.api.hold,
         requested_by_name: line.api.pending_requested_by_name,
         requested_at: line.api.pending_at,
         recipients,

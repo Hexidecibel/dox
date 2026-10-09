@@ -41,6 +41,9 @@ vi.mock('./NotificationsBell', () => ({ NotificationsBell: () => null }));
 // may release. Everything else on `api` stays the real client.
 const pendingMock = vi.fn();
 const listMock = vi.fn();
+// "Holds" (migration 0139) carries the number of certificates on hold.
+const holdsCountMock = vi.fn();
+const holdsListMock = vi.fn();
 vi.mock('../lib/api', async (orig) => {
   const actual = await orig<typeof import('../lib/api')>();
   return {
@@ -52,6 +55,11 @@ vi.mock('../lib/api', async (orig) => {
       orderDocuments: {
         pendingCount: (...args: unknown[]) => pendingMock(...args),
         pending: (...args: unknown[]) => listMock(...args),
+      },
+      holds: {
+        ...actual.api.holds,
+        count: (...args: unknown[]) => holdsCountMock(...args),
+        list: (...args: unknown[]) => holdsListMock(...args),
       },
     },
   };
@@ -86,6 +94,68 @@ beforeEach(() => {
   pendingMock.mockReset();
   listMock.mockReset();
   pendingMock.mockResolvedValue({ can_release: false, count: 0 });
+  holdsCountMock.mockReset();
+  holdsListMock.mockReset();
+  holdsCountMock.mockResolvedValue({ count: 0, failures: 0 });
+});
+
+describe('Layout: Holds in the rail', () => {
+  it('is drawn for every role, a read-only account included, with the number on hold', async () => {
+    for (const role of ['reader', 'user', 'org_admin'] as Role[]) {
+      currentUser = user(role);
+      holdsCountMock.mockResolvedValue({ count: 4, failures: 0 });
+      const view = renderRail();
+      expect(await screen.findByText('Holds')).toBeInTheDocument();
+      expect(await screen.findByTestId('nav-holds-count')).toHaveTextContent('4');
+      view.unmount();
+    }
+    // The count form only: the rail never runs the list.
+    expect(holdsListMock).not.toHaveBeenCalled();
+  });
+
+  it('counts a hold that should have been placed and was not: it needs somebody too (C-087)', async () => {
+    holdsCountMock.mockResolvedValue({ count: 2, failures: 1 });
+    renderRail();
+    expect(await screen.findByTestId('nav-holds-count')).toHaveTextContent('3');
+  });
+
+  it('shows no number when nothing is on hold, or when the question fails', async () => {
+    holdsCountMock.mockResolvedValue({ count: 0, failures: 0 });
+    const first = renderRail();
+    expect(await screen.findByText('Holds')).toBeInTheDocument();
+    await waitFor(() => expect(holdsCountMock).toHaveBeenCalled());
+    expect(screen.queryByTestId('nav-holds-count')).not.toBeInTheDocument();
+    first.unmount();
+
+    holdsCountMock.mockRejectedValue(new Error('offline'));
+    renderRail();
+    expect(await screen.findByText('Holds')).toBeInTheDocument();
+    expect(screen.queryByTestId('nav-holds-count')).not.toBeInTheDocument();
+  });
+
+  it('asks once on mount and again when a screen says a hold was placed or released, not on every navigation', async () => {
+    holdsCountMock.mockResolvedValue({ count: 2, failures: 0 });
+    const view = renderRail();
+    expect(await screen.findByTestId('nav-holds-count')).toHaveTextContent('2');
+    expect(holdsCountMock).toHaveBeenCalledTimes(1);
+    (await screen.findAllByText('Orders'))[0].click();
+    await screen.findByText('Holds');
+    expect(holdsCountMock).toHaveBeenCalledTimes(1);
+
+    holdsCountMock.mockResolvedValue({ count: 1, failures: 0 });
+    window.dispatchEvent(new Event('dox:holds-changed'));
+    await waitFor(() => expect(screen.getByTestId('nav-holds-count')).toHaveTextContent('1'));
+    expect(holdsCountMock).toHaveBeenCalledTimes(2);
+    view.unmount();
+  });
+
+  it('follows the library module: with it switched off there is no rail entry and no question asked', async () => {
+    visibleModules = ['fulfillment'];
+    renderRail();
+    expect((await screen.findAllByText('Orders')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Holds')).not.toBeInTheDocument();
+    expect(holdsCountMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('Layout — Waiting for QA in the rail', () => {

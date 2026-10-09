@@ -1,3 +1,4 @@
+import { holdRefusalText } from '../../../shared/holds';
 import { useState } from 'react';
 import {
   Alert,
@@ -143,6 +144,15 @@ export function OrderLines({ orderId, items, suggestions, canEdit, compact, onCh
           </Button>
           <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: 'wrap', pl: 0.5 }}>
             {gone && <Chip size="small" color="error" variant="outlined" label={`Document ${item.coa_document_status}: will not be sent`} />}
+            {item.coa_hold && (
+              <Chip
+                size="small"
+                color="error"
+                label="On hold: will not be sent"
+                title={`${holdRefusalText(item.coa_hold)}. QA or an administrator releases a hold.`}
+                data-testid="order-line-hold"
+              />
+            )}
             <OriginalChip item={item} />
             {item.coa_file_size ? (
               <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>

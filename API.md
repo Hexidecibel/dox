@@ -1970,6 +1970,151 @@ is no unguarded window. `bin/backfill-sharing-rules` (dry run by default;
 such type is already read as, so the Document Types screen shows a stored
 setting. It never overwrites a stored rule.
 
+### Holds: a certificate that must not leave until QA says so (migration 0139)
+
+A hold is a status in the portal on ONE LOT ROW of a certificate, or on the
+whole certificate. While it is active the certificate does not leave. Nothing
+is pushed to a warehouse system.
+
+| | |
+|---|---|
+| `GET /api/documents/:id/holds` | active holds, released holds, the certificate's lot rows, `can_place`, `can_release` |
+| `POST /api/documents/:id/holds` | `{ reason, lot_id? }` places one. `lot_id` omitted = the whole certificate |
+| `POST /api/holds/:id/release` | `{ reason }` releases one. The only way a hold ends |
+| `GET /api/holds` | the organization's holds: `state=active\|released\|all`, `source`, `supplier_id`, `product_id` |
+| `GET /api/holds?count=1` | `{ count, failures }`: active holds, and holds that should have been placed and were not |
+| `POST /api/holds/failures/:id/retry` | place the holds a failed approval should have placed; idempotent |
+
+**Who.** Any login except a read-only one places a hold, and so does an API
+key: a hold only tightens. Only a QA releaser (the `QA` owner route, else the
+organization's master user) or an administrator releases one, signed in. An API
+key never releases. A reason is required both ways. Anybody signed in may read
+the list. Another organization's document or hold is a 404.
+
+**There is no PUT and no DELETE.** A hold is placed, and later its release is
+stamped on the same row. Both acts are audited (`document.hold_placed`,
+`document.hold_released`).
+
+**What it stops.** Every exit the sharing rule guards, asked live at each one,
+through the same checks:
+
+| exit | what a held certificate does |
+|---|---|
+| ZIP (`POST /api/document-exports/zip`) | left out; `X-Export-Refused-Ids: <id>:held`; named in `manifest.csv` |
+| emailed link (`/send`) | in `refused[]` with `reason: "held"`; the rest still goes |
+| a link minted BEFORE the hold | stops serving it (`unavailable_count`), serves it again once released |
+| bundle ZIP | left out; `X-Bundle-Refused-Ids`; named in `NOT-INCLUDED.txt` |
+| order send and resend | the line is in `lines_not_sent` with `sharing_refusal: "held"` and `hold`; a resend fails the part with "On hold: ..." |
+| document order line | `disposition: will_not_go`, `disposition_reason: held`; never queued for QA |
+| QA release of a waiting line | refused: "Release the hold first" |
+| API-key file read | 403 `sharing_rule_refused`, `reason: "held"` |
+
+With nothing left to hand over the answer is the same 403 `sharing_rule_refused`
+the sharing rule gives, each document named with `reason: "held"` and
+`message: "On hold: <reason>"`.
+
+**Nobody sends a held certificate.** Not a QA releaser and not an
+administrator: the hold is released first. A signed-in person opening or
+downloading the file in the portal is unaffected.
+
+**The reason stays in the portal.** A response, a header and the audit row
+carry the hold's reason. A file that leaves does not: the ZIP manifest and the
+bundle note print "On hold: this certificate is not sent until QA releases the
+hold.", and a link's recipient is told only a count.
+
+**A lot hold is on the lot, on every certificate of it.** A hold placed with
+`lot_id` names one lot row, and covers THE LOT: every certificate of the same
+supplier on any lot row with the same stored lot key and the same sublot code,
+whatever product that row was read under (two scans of one certificate often
+read the product differently, and so sit on different rows). A re-scan, a
+duplicate that was kept, a corrected certificate approved later: each is held,
+the last from the moment it is linked (QA is mailed once that it arrived). A
+certificate's supplier is its own `supplier_id`, else its lot row's. NOT
+covered: another supplier's lot with the same number, a different sublot, and
+a certificate with no supplier recorded anywhere unless it is on the very row
+the hold names. A held brief carries `reach` (`placed`, `lot`, `page`) and,
+for `lot`, `own_lot_id`: the asked document's own row. The hold still names the certificate it was
+placed from; a sibling's `also_held_by` carries that `document_id` and
+`document_title`. One lot row carries one person's hold at a time, wherever it
+was placed from (409, naming the certificate). Releasing is one act on the
+hold. A hold with no `lot_id` is on that one certificate only. A different
+sublot is a different row and is not reached.
+
+**Lots.** A file is what leaves, so any active hold on a document, on any of
+its lot rows, holds that document's file. A multi-lot certificate filed as one
+page per lot: the whole original prints every lot, so it stays in while ANY of
+its lots is held, including one that is not on the order; each unheld lot's own
+page still goes, and the review screen says why. **Unless that page prints the
+held lot too.** When two lots share a page of the certificate (a one-page
+certificate with a row per lot), or a per-lot file could not be cut and holds
+the whole certificate, sending one lot's file would send the held lot's results
+with it, so that file is refused as `held` as well, naming the lot that is on
+hold. `GET /api/documents/:id/holds` lists those under `also_held_by`, each
+with the `document_id` of the certificate the hold is on, which is where it is
+released.
+
+**The file is the current version.** Which lots a file prints is read from the
+queue item that wrote the document's CURRENT version
+(`document_versions.source_queue_id`), so a certificate reissued through
+"Replace existing" is judged for the reissued file, whole original included.
+
+**The sharing rule the same.** A file takes the strictest sharing rule of every
+lot it prints: a per-lot file that shares a page with a `locked` or `qa` lot of
+the same certificate is refused under that lot's rule, and the refusal carries
+`via_document_id`.
+
+**Delivered.** An order is `delivered` only when every line has actually gone
+on a successful send. A line that was on hold when the order was sent and has
+never gone since is still owed after the hold is released, until the order is
+sent again. The QA-release path asks the same question: a certificate that
+went on an earlier send is not owed again because a later send only asked QA.
+
+**Automatic holds.** Placed when a certificate is approved, from the verdicts
+just written, and never from the bulk recheck:
+
+- `spec_critical`: a result out of spec against a configured limit whose
+  criticality is Critical;
+- `zero_tolerance`: a presence test on a zero-tolerance analyte run on a
+  smaller sample than the limit requires.
+
+Nothing else places one: not a could-not-check on its own, not an MPN result
+against a CFU limit, not a bare "Negative" with no sample size, not a result
+judged against the certificate's own printed limit. Each judged result places a
+hold once; if QA releases it, approving the same version again does not put it
+back, and a new version that still fails is held again. The QA owner route is
+mailed once per approval; with nobody on the route it is audited as
+`document.hold_placed.routing_gap` and the administrators are told.
+
+When one flat extraction is approved as several product documents, each result
+is registered and held on the document of the product whose tables it came
+from. A result that cannot be attributed to one document is registered on every
+document from the file (its `result_location` says so) and holds each.
+
+**A hold that could not be placed.** The approval has already happened, so it
+stands and the certificate is NOT held. The failure is recorded, mailed to the
+QA route (the administrators when nobody is on it), and returned as `failures`
+on `GET /api/holds` and `GET /api/documents/:id/holds`:
+`{ id, document_id, document_title, document_version, created_at, error, holds: [{ source, reason }] }`.
+`POST /api/holds/failures/:id/retry` places exactly those holds, once per
+judged result, and answers `{ placed, already_held, released, message }`:
+`released` lists holds that had been placed and were since RELEASED (nothing
+is placed for those, and `message` says who released them and when rather than
+"already on hold"). Anybody who may place a hold may retry; a second retry is
+a 409. There is one open failure per certificate version, QA is mailed once
+when it opens, and it closes by itself once the holds it describes exist.
+
+**Replacing the file does not lift a hold.** A new version, or the Review
+Queue's "Replace existing", leaves an active hold on the document.
+
+**Where it shows.** `GET /api/documents/:id` carries `holds` (`active`,
+`can_place`, `can_release`); an order's COA line carries `coa_hold`; a document
+line and a Waiting for QA row carry `hold`; a search result row carries
+`active_hold` (display only: search does not filter or judge on a hold).
+
+`bin/propose-spec-holds` lists the certificates approved before 0139 whose
+stored approval-time verdicts would have placed a hold, and places them with
+`--tenant <id> --apply`. The migration holds nothing by itself.
+
 ### Building an order by hand, and sending its certificates (migration 0134)
 
 On the basic tier nothing feeds orders in, so a person records what the matcher

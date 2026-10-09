@@ -125,6 +125,7 @@ function docLine(over: Partial<ApiOrderDocument> = {}): ApiOrderDocument {
     resolved_at: '2026-10-08 10:00:00',
     rule_at_resolve: 'free',
     sharing_rule: 'free',
+    hold: null,
     release_status: 'none',
     pending_send_id: null,
     pending_at: null,
@@ -216,6 +217,27 @@ describe('OrderDocumentLines', () => {
     expect(screen.getByText(/Wrong revision\./)).toBeInTheDocument();
     expect(screen.getByText('Released by Quinn Lee')).toBeInTheDocument();
     expect(screen.getByTestId('order-document-stale')).toHaveTextContent('Refresh this line to use it');
+  });
+
+  it('a line whose document is on hold says so, with the reason (migration 0139)', () => {
+    render(
+      wrap(
+        <OrderDocumentLines
+          {...props}
+          documents={[
+            docLine({
+              id: 'h',
+              disposition: 'will_not_go',
+              disposition_reason: 'held',
+              disposition_text: 'On hold: Supplier withdrew this statement. It can go once QA or an administrator releases the hold.',
+              hold: { id: 'h1', document_id: 'd1', lot_id: null, lot_label: null, reason: 'Supplier withdrew this statement', source: 'person', placed_at: '2026-10-08 10:00:00' },
+            }),
+          ]}
+        />,
+      ),
+    );
+    expect(screen.getByTestId('order-document-status')).toHaveTextContent('On hold');
+    expect(screen.getByTestId('order-document-line')).toHaveTextContent('On hold: Supplier withdrew this statement.');
   });
 
   it('carries the private-label advisory on the line', () => {
@@ -587,6 +609,56 @@ describe('SendOrderDialog with document lines', () => {
     expect(screen.getByTestId('send-order-confirm')).toBeEnabled();
   });
 
+  it('lines on hold get their own group, COA lines and document lines together, each with the reason', async () => {
+    const base = documentPlan();
+    mocks.sendPreview.mockResolvedValue(
+      documentPlan({
+        lines_not_sent: [
+          ...base.lines_not_sent,
+          {
+            order_item_id: 'y', product_name: 'Heavy Cream', lot_number: '5501', document_id: 'd9',
+            reason: 'On hold (lot 5501): Critical result out of spec: Coliform 40 CFU/g.', sharing_refusal: 'held',
+            hold: { id: 'h1', document_id: 'd9', lot_id: 'l1', lot_label: '5501', reason: 'Critical result out of spec: Coliform 40 CFU/g.', source: 'spec_critical', placed_at: '2026-10-08 10:00:00' },
+          },
+          {
+            order_item_id: '', order_document_id: 'dl5', product_name: 'Cream Cheese 3 lb', lot_number: null, document_type_name: 'Allergen Statement',
+            reason: 'On hold: Supplier withdrew this statement. It can go once QA or an administrator releases the hold.', sharing_refusal: 'held',
+          },
+        ],
+        documents: {
+          ...base.documents!,
+          will_not_go: [
+            ...base.documents!.will_not_go,
+            planLine({ order_document_id: 'dl5', document_type_name: 'Allergen Statement', reason: 'held', text: 'On hold: Supplier withdrew this statement. It can go once QA or an administrator releases the hold.' }),
+          ],
+        },
+      }),
+    );
+    render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
+
+    const held = await screen.findByTestId('send-lines-on-hold');
+    expect(held).toHaveTextContent('On hold (2)');
+    expect(held).toHaveTextContent('QA or an administrator releases a hold');
+    const lines = within(held).getAllByTestId('send-line-on-hold');
+    expect(lines[0]).toHaveTextContent('Heavy Cream · Lot 5501: On hold (lot 5501): Critical result out of spec: Coliform 40 CFU/g.');
+    expect(lines[1]).toHaveTextContent('Cream Cheese 3 lb · Allergen Statement: On hold: Supplier withdrew this statement.');
+
+    // Nothing is printed twice: the held COA line is not under "Not sent",
+    // and the held document line is not under "Will not go".
+    expect(screen.getByTestId('send-lines-not-sent')).toHaveTextContent('Not sent (1)');
+    expect(screen.getByTestId('send-lines-not-sent')).not.toHaveTextContent('Heavy Cream');
+    const wont = screen.getByTestId('send-documents-will-not-go');
+    expect(wont).toHaveTextContent('Will not go (2)');
+    expect(wont).not.toHaveTextContent('Allergen Statement');
+  });
+
+  it('with nothing on hold there is no hold group at all', async () => {
+    mocks.sendPreview.mockResolvedValue(documentPlan());
+    render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
+    await screen.findByTestId('send-documents-goes-now');
+    expect(screen.queryByTestId('send-lines-on-hold')).toBeNull();
+  });
+
   it('says so when the send reaches nobody yet and only asks QA', async () => {
     mocks.sendPreview.mockResolvedValue(
       documentPlan({
@@ -781,6 +853,7 @@ describe('OrdersWaitingForQa', () => {
       product_name: 'Cream Cheese 3 lb', supplier_name: 'Northfield Creamery', facility_name: 'Plant 2',
       document_type_name: 'HACCP Plan', document_id: 'd2', document_title: 'Hazard plan', document_status: 'active',
       version_number: 3, document_approved_at: '2026-06-01 09:00:00', pending_send_id: 'send-9', release_status: 'pending_qa', stuck: false,
+      hold: null,
       sharing_rule: 'qa', requested_by_name: 'Dana Reid', requested_at: '2026-10-08 11:00:00',
       recipients: ['buyer@harborbakery.example'], private_label: false, advisory: null, releasable: true, blocked_reason: null,
       earlier_refusals: [],

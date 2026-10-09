@@ -542,7 +542,7 @@ describe('the emails carry the link', () => {
       failures: [{ test: 'Coliform', value: '40', limit: null, source: 'limit', criticality: 'high' }],
     });
     expect(html).toContain('Critical');
-    expect(html).toContain('Holds are not enforced yet');
+    expect(html).toContain('on hold: it cannot be sent until QA releases the hold');
     expect(text).toContain('[Critical]');
   });
 

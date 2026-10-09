@@ -4,7 +4,7 @@
  *
  * E1: MPN against CFU is never judged (D1) — and it notifies, every time.
  * E2: a presence/absence result on a smaller sample than the limit requires
- *     notifies, every time. (The hold half of E2 is out of scope: dox has no hold.)
+ *     notifies, every time. (The hold half of E2 is shared/holds.ts, tested in tests/unit/holds.test.ts.)
  *
  * What is pinned here is the SHAPE of that: the verdict stays `not_checked`
  * (three states, no fourth), it carries a machine-readable category, and every

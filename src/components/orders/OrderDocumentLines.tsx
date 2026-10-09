@@ -95,6 +95,7 @@ export function documentLineStatus(line: ApiOrderDocument): { label: string; col
     if (line.disposition_reason === 'missing') return { label: 'Missing', color: 'error' };
     if (line.disposition_reason === 'expired') return { label: 'Expired', color: 'error' };
     if (line.disposition_reason === 'locked') return { label: 'Locked', color: 'error' };
+    if (line.disposition_reason === 'held') return { label: 'On hold', color: 'error' };
     if (line.disposition_reason === 'stale') return { label: 'Refresh needed', color: 'warning' };
   }
   if (line.last_sent_at && line.disposition === 'goes_now') return { label: 'Sent', color: 'success' };

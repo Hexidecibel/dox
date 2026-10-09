@@ -37,6 +37,7 @@ import {
 import { onRequestGet as listGet } from '../../functions/api/request-uploads/index';
 import { onRequestGet as oneGet } from '../../functions/api/request-uploads/[id]';
 import { onRequestGet as fileGet } from '../../functions/api/request-uploads/[id]/file';
+import { placeHold, releaseHold } from '../../functions/lib/holds';
 import { onRequestPost as decidePost } from '../../functions/api/request-uploads/[id]/decide';
 import { onRequestPost as enqueuePost } from '../../functions/api/request-uploads/[id]/enqueue';
 import { onRequestGet as portalGet } from '../../functions/api/supplier-requests/public/[token]';
@@ -579,6 +580,53 @@ describe('amendments, re-uploads and files', () => {
     );
     expect(person.status).toBe(200);
     await person.arrayBuffer();
+  });
+
+  it('an API key does not read an approved arrival whose document is on hold (migration 0139)', async () => {
+    const withKey = (id: string) => {
+      const ctx = fnContext(`/api/request-uploads/${id}/file`, { user: admin, params: { id } }) as any;
+      ctx.data.authMethod = 'api_key';
+      return ctx as never;
+    };
+    const a = await arrive(['Allergen Statement']);
+    const docId = await extractAndApprove(fx, a.queueId, admin);
+    const ok = await fileGet(withKey(a.uploadId));
+    expect(ok.status).toBe(200);
+    await ok.arrayBuffer();
+
+    const held = await placeHold(db, {
+      tenantId: fx.tenantId,
+      documentId: docId,
+      reason: 'Supplier withdrew this statement',
+      user: admin,
+      data: { authMethod: 'jwt' },
+      clientIp: null,
+    });
+    const refused = await fileGet(withKey(a.uploadId));
+    expect(refused.status).toBe(403);
+    expect(await readJson(refused)).toMatchObject({
+      code: 'sharing_rule_refused',
+      reason: 'held',
+      error: 'On hold: Supplier withdrew this statement',
+    });
+    // A logged-in person still opens it: that is not leaving.
+    const person = await fileGet(
+      fnContext(`/api/request-uploads/${a.uploadId}/file`, { user: reader, params: { id: a.uploadId } }),
+    );
+    expect(person.status).toBe(200);
+    await person.arrayBuffer();
+
+    await releaseHold(db, {
+      tenantId: fx.tenantId,
+      holdId: held.id,
+      reason: 'Statement confirmed current',
+      user: admin,
+      data: { authMethod: 'jwt' },
+      clientIp: null,
+    });
+    const again = await fileGet(withKey(a.uploadId));
+    expect(again.status).toBe(200);
+    await again.arrayBuffer();
   });
 
   it('an API key is asked even while the arrival\'s OWN object is still in storage (migration 0137)', async () => {

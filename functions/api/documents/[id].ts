@@ -28,6 +28,7 @@ import {
   ruleChangeActor,
   type DocumentRuleChange,
 } from '../../lib/sharing-rule';
+import { documentHoldState } from '../../lib/holds';
 import type { Env, User, Document } from '../../lib/types';
 import type { RenewalType } from '../../../shared/types';
 import {
@@ -96,6 +97,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // where the answer comes from, and whether this caller may change it.
     (doc as Record<string, unknown>).sharing = await describeDocumentSharing(
       context.env.DB,
+      user,
+      doc.tenant_id as string,
+      docId,
+    );
+
+    // Active holds (migration 0139): is this certificate on hold, on which lot
+    // rows, and may this caller place or release one.
+    (doc as Record<string, unknown>).holds = await documentHoldState(
+      context.env.DB,
+      context.data,
       user,
       doc.tenant_id as string,
       docId,

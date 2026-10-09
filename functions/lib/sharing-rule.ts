@@ -31,11 +31,19 @@ import {
 } from '../../shared/sharingRule';
 import { parseSharingRule } from '../../shared/sharingRule';
 import type {
+  DocumentHoldBrief,
   DocumentSharingInfo,
   SharingRefusal,
   SharingRuleRefusedResponse,
 } from '../../shared/types';
 import { logAudit } from './db';
+import {
+  documentsOnQueueFiles,
+  loadEffectiveHolds,
+  loadFilePages,
+  loadPrintedNeighbours,
+} from './hold-state';
+import { HOLD_OUTWARD_TEXT } from '../../shared/holds';
 import { normalizeOwnerKey } from './alert-routing';
 import { loadMasterUser } from './renewal-requests';
 import type { User } from './types';
@@ -53,8 +61,28 @@ export interface DocumentSharingRule {
   title: string;
   document_type_id: string | null;
   document_type_name: string | null;
+  /**
+   * THE RULE THE DOCUMENT'S FILE LEAVES UNDER: the strictest of its own rule
+   * and the rule of every other document whose lot its file prints (C-088).
+   * This is what every exit judges.
+   */
   rule: SharingRule;
   source: SharingRuleSource;
+  /** The document's OWN rule (override, type, name), before its file's neighbours. */
+  own_rule: SharingRule;
+  /**
+   * Set when `rule` is stricter than `own_rule`: the neighbour whose lot this
+   * file prints and whose rule it therefore takes.
+   */
+  rule_via: { document_id: string; title: string } | null;
+  /**
+   * EVERY ACTIVE HOLD THAT STOPS THIS DOCUMENT'S FILE (migration 0139): its
+   * own, then those on other lots of the same certificate that its file
+   * prints (`loadEffectiveHolds`). Empty = not on hold. Read in the same call
+   * as the rule so that no caller can judge a document's rule and forget to
+   * ask whether it is held.
+   */
+  holds: DocumentHoldBrief[];
 }
 
 const IN_CHUNK = 80;
@@ -69,8 +97,57 @@ function chunk<T>(items: T[], size = IN_CHUNK): T[][] {
  * The effective rule of each document, TENANT SCOPED. An id that is not this
  * organization's document is simply absent from the map -- and a caller must
  * treat absent as "may not go" (`judgeDocumentsForExit` does).
+ *
+ * EACH ROW ALSO CARRIES THE DOCUMENT'S ACTIVE HOLDS (migration 0139). A hold
+ * is judged at the same doors as the rule, so it is loaded by the same read.
+ *
+ * A FILE TAKES THE STRICTEST RULE OF EVERYTHING IT PRINTS (C-088). C-042 said
+ * so for a whole multi-lot original. The same is true of a per-lot file that
+ * prints a neighbour lot's row -- two lots on one page, or a cut that failed
+ * and kept the whole binary -- and it was not checked: a `locked` or `qa`
+ * lot's results left on a `free` neighbour's file. `rule` is therefore the
+ * strictest of the document's own rule and its printed neighbours' own rules
+ * (`loadPrintedNeighbours`, the page test C-084 built for holds; unknown pages
+ * tighten). `own_rule` is kept for the screens that edit a document's rule.
  */
 export async function loadSharingRules(
+  db: D1Database,
+  tenantId: string,
+  documentIds: string[],
+): Promise<Map<string, DocumentSharingRule>> {
+  const out = await loadOwnRules(db, tenantId, documentIds);
+  const keys = [...out.keys()];
+  if (keys.length === 0) return out;
+
+  const pages = await loadFilePages(db, tenantId, keys);
+  const neighbours = await loadPrintedNeighbours(db, tenantId, keys, pages);
+  if (neighbours.size > 0) {
+    const others = [...new Set([...neighbours.values()].flat())].filter((id) => !out.has(id));
+    const otherRules = others.length > 0 ? await loadOwnRules(db, tenantId, others) : new Map<string, DocumentSharingRule>();
+    for (const [id, printed] of neighbours) {
+      const row = out.get(id);
+      if (!row) continue;
+      for (const n of printed) {
+        const neighbour = out.get(n) ?? otherRules.get(n);
+        if (!neighbour) continue;
+        if (strictest([row.rule, neighbour.own_rule]) !== row.rule) {
+          row.rule = neighbour.own_rule;
+          row.rule_via = { document_id: neighbour.document_id, title: neighbour.title };
+        }
+      }
+    }
+  }
+
+  const holds = await loadEffectiveHolds(db, tenantId, keys, { pages, neighbours });
+  for (const [id, list] of holds) {
+    const row = out.get(id);
+    if (row) row.holds = list;
+  }
+  return out;
+}
+
+/** Each document's OWN rule: its override, else its type. No neighbours, no holds. */
+async function loadOwnRules(
   db: D1Database,
   tenantId: string,
   documentIds: string[],
@@ -120,6 +197,9 @@ export async function loadSharingRules(
         document_type_name: r.type_name,
         rule: eff.rule,
         source: eff.source,
+        own_rule: eff.rule,
+        rule_via: null,
+        holds: [],
       });
     }
   }
@@ -250,7 +330,7 @@ export async function judgeDocumentsForExit(
     seen.add(id);
     const r = rules.get(id);
     if (!r) continue;
-    const verdict = judgeExit(r.rule, exit, actor);
+    const verdict = judgeExit(r.rule, exit, actor, r.holds.length > 0);
     if (verdict === 'allow') {
       allowed.push(id);
       if (r.rule === 'qa' && actor.method === 'jwt' && exit !== 'portal_file') qaReleased.push(id);
@@ -262,17 +342,27 @@ export async function judgeDocumentsForExit(
 }
 
 export function refusalFor(
-  r: Pick<DocumentSharingRule, 'document_id' | 'title' | 'document_type_name' | 'rule'>,
-  reason: 'needs_qa' | 'locked',
+  r: Pick<DocumentSharingRule, 'document_id' | 'title' | 'document_type_name' | 'rule'> & {
+    holds?: DocumentHoldBrief[];
+    rule_via?: DocumentSharingRule['rule_via'];
+  },
+  reason: 'needs_qa' | 'locked' | 'held',
   actor: ExitActor,
 ): SharingRefusal {
+  const hold = reason === 'held' ? r.holds?.[0] ?? null : null;
+  const said = sharingRefusalMessage(reason, { apiKey: actor.method === 'api_key', hold });
+  // The rule is a neighbour's (C-088): say so, or "Locked" on a certificate of
+  // analysis reads as a mistake.
+  const via = reason !== 'held' ? r.rule_via ?? null : null;
   return {
     document_id: r.document_id,
     title: r.title,
     document_type_name: r.document_type_name,
     rule: r.rule,
     reason,
-    message: sharingRefusalMessage(reason, { apiKey: actor.method === 'api_key' }),
+    message: via ? `${said} This file also prints another lot of the same certificate (${via.title || 'untitled'}), and takes its rule.` : said,
+    ...(hold ? { hold } : {}),
+    ...(via ? { via_document_id: via.document_id } : {}),
   };
 }
 
@@ -303,37 +393,47 @@ export async function documentsCitingPacket(
 }
 
 /**
- * Every document of this organization born from this Review Queue item: the
- * per-lot pages cut from one multi-lot certificate (`origin_queue_id`, 0130,
- * or the queue id inside `external_ref`).
+ * Every document of this organization ON this Review Queue item's file: one
+ * with ANY version written from it (`document_versions.source_queue_id`,
+ * 0139), or born from it (`origin_queue_id`, 0130, or the queue id inside
+ * `external_ref`).
+ *
+ * IT USED TO BE "BORN FROM" ONLY, and that let a held or locked lot out
+ * (C-085): a certificate reissued through "Replace existing" keeps the origin
+ * of its first version, so the document whose version 2 was cut from the
+ * reissued file was never judged for that file, and the whole original went
+ * with its lot on it.
  */
 export async function documentsFromQueueItem(
   db: D1Database,
   tenantId: string,
   queueId: string,
 ): Promise<string[]> {
-  const res = await db
-    .prepare(
-      `SELECT id FROM documents
-        WHERE tenant_id = ?
-          AND (origin_queue_id = ?
-               OR external_ref = 'queue-' || ?
-               OR external_ref LIKE 'queue-' || ? || '-%')`,
-    )
-    .bind(tenantId, queueId, queueId, queueId)
-    .all<{ id: string }>();
-  return (res.results ?? []).map((r) => r.id);
+  return [...((await documentsOnQueueFiles(db, tenantId, [queueId])).get(queueId) ?? [])];
 }
 
 export interface SharedFileJudgement {
   rule: SharingRule;
-  verdict: 'allow' | 'needs_qa' | 'locked';
+  verdict: 'allow' | 'needs_qa' | 'locked' | 'held';
   document_ids: string[];
+  /**
+   * The hold behind a `held` verdict: the oldest active hold on ANY document
+   * the file carries (migration 0139). Null when none of them is held.
+   */
+  hold: DocumentHoldBrief | null;
+  /** The document that hold is on. */
+  hold_document_id: string | null;
+  /** The documents on the file whose rule is `qa`. */
+  qa_document_ids: string[];
 }
 
 /**
  * The verdict for ONE file that holds several documents: the strictest rule of
  * the documents on it. No documents at all is `locked` (see `strictest`).
+ *
+ * A HOLD ON ANY ONE OF THEM HOLDS THE FILE (C-074): a whole multi-lot
+ * certificate prints every lot's results, so it does not go while one of its
+ * lots is on hold -- including a lot that is not on the order.
  */
 export async function judgeSharedFile(
   db: D1Database,
@@ -343,8 +443,68 @@ export async function judgeSharedFile(
   actor: ExitActor,
 ): Promise<SharedFileJudgement> {
   const rules = await loadSharingRules(db, tenantId, documentIds);
-  const rule = strictest([...rules.values()].map((r) => r.rule));
-  return { rule, verdict: judgeExit(rule, exit, actor), document_ids: [...rules.keys()] };
+  return judgeSharedFileFrom(rules, documentIds, exit, actor);
+}
+
+/**
+ * The same verdict from rules ALREADY LOADED: several files judged off one
+ * read. An id with no row in `rules` is simply not on the file (the caller
+ * compares `document_ids.length` with what it asked for).
+ */
+export function judgeSharedFileFrom(
+  rules: Map<string, DocumentSharingRule>,
+  documentIds: string[],
+  exit: SharingExit,
+  actor: ExitActor,
+): SharedFileJudgement {
+  const rows = [...new Set(documentIds)].map((id) => rules.get(id)).filter((r): r is DocumentSharingRule => Boolean(r));
+  const rule = strictest(rows.map((r) => r.rule));
+  let hold: DocumentHoldBrief | null = null;
+  let holdDocumentId: string | null = null;
+  for (const r of rows) {
+    const first = r.holds[0];
+    if (first && (!hold || first.placed_at < hold.placed_at)) {
+      hold = first;
+      holdDocumentId = r.document_id;
+    }
+  }
+  return {
+    rule,
+    verdict: judgeExit(rule, exit, actor, hold !== null),
+    document_ids: rows.map((r) => r.document_id),
+    hold,
+    hold_document_id: holdDocumentId,
+    // The `qa` documents among them that pass only because of who is asking.
+    qa_document_ids: rows.filter((r) => r.rule === 'qa').map((r) => r.document_id),
+  };
+}
+
+/**
+ * SEVERAL FILES, ONE READ. Each entry is the set of documents one file stands
+ * for; a whole original (`queueId`) additionally carries every document with a
+ * version cut from that queue item. Rules, neighbours and holds are loaded
+ * ONCE for the union, then each file is judged from that.
+ *
+ * Why it exists: an order send judged each stored file with its own
+ * `judgeSharedFile` and then loaded the same rules a second time, eight or
+ * nine D1 reads per file. A part of twenty certificates is now one pass.
+ */
+export async function judgeSharedFiles(
+  db: D1Database,
+  tenantId: string,
+  stored: { key: string; documentIds: string[]; queueId?: string | null }[],
+  exit: SharingExit,
+  actor: ExitActor,
+): Promise<Map<string, SharedFileJudgement & { asked: number }>> {
+  const onQueue = await documentsOnQueueFiles(db, tenantId, stored.map((f) => f.queueId ?? '').filter(Boolean));
+  const sets = stored.map((f) => ({
+    key: f.key,
+    ids: [...new Set([...f.documentIds, ...(f.queueId ? onQueue.get(f.queueId) ?? [] : [])])],
+  }));
+  const rules = await loadSharingRules(db, tenantId, [...new Set(sets.flatMap((s) => s.ids))]);
+  const out = new Map<string, SharedFileJudgement & { asked: number }>();
+  for (const s of sets) out.set(s.key, { ...judgeSharedFileFrom(rules, s.ids, exit, actor), asked: s.ids.length });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +862,15 @@ export function sharingRefusedResponse(refused: SharingRefusal[]): Response {
   });
 }
 
+/**
+ * The sentence a file that LEAVES prints for a document it left out (a ZIP's
+ * manifest, a bundle's NOT-INCLUDED.txt). The same as `message`, except for a
+ * hold: the hold's reason is an internal note and stays in the portal.
+ */
+export function outwardRefusalMessage(r: SharingRefusal): string {
+  return r.reason === 'held' ? HOLD_OUTWARD_TEXT : r.message;
+}
+
 /** `id:reason,id:reason` -- what a binary response can say in a header. */
 export function refusedHeaderValue(refused: SharingRefusal[]): string {
   return refused.map((r) => `${r.document_id}:${r.reason}`).join(',');
@@ -755,7 +924,7 @@ export async function auditQaRelease(
  * A LOGGED-IN PERSON IS NOT ASKED (C-039): opening one file in the portal is
  * not leaving, and this returns null without reading anything. AN API KEY IS
  * (C-041): it reads the file only when the strictest rule of the documents on
- * it is `free`. Otherwise this returns the 403 to send back, and writes an
+ * it is `free` AND none of them is on hold (migration 0139). Otherwise this returns the 403 to send back, and writes an
  * audit row -- a key reaching for a locked document is worth knowing about.
  *
  * `documentIds` is every document the file holds (C-042). An empty list is
@@ -792,6 +961,7 @@ export async function apiKeyFileRefusal(
         route: args.route,
         rule: judged.rule,
         reason: judged.verdict,
+        hold_id: judged.hold?.id ?? null,
         document_ids: args.documentIds,
       }),
       args.clientIp,
@@ -801,7 +971,7 @@ export async function apiKeyFileRefusal(
   }
   return new Response(
     JSON.stringify({
-      error: sharingRefusalMessage(judged.verdict, { apiKey: true }),
+      error: sharingRefusalMessage(judged.verdict, { apiKey: true, hold: judged.hold }),
       code: 'sharing_rule_refused',
       rule: judged.rule,
       reason: judged.verdict,

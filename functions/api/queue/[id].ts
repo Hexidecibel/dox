@@ -23,6 +23,7 @@ import { decideArrival, preflightArrivalDecision } from '../../lib/request-arriv
 import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings, withSalesSheetWarning } from '../../lib/queue-warnings';
 import { loadSpecConfig, withSpecConfig, specResultsWithConfig } from '../../lib/spec-warnings';
 import { registerAndNotifyForApproval } from '../../lib/spec-register';
+import { noticeCertificatesForHeldLots } from '../../lib/holds';
 import { recordArrivalAndCheckExpiry } from '../../lib/expired-on-arrival';
 import { arrivalForQueueItem, recordPacketProvenance } from '../../lib/packet-provenance';
 import {
@@ -1188,6 +1189,7 @@ async function handleApprove(
     // extraction is what was approved.
     null
   );
+  await noticeHeldLotArrivals(context, user, item, [result.documentId]);
   await checkArrivalForApproval(context, user, item, result.supplierId, supplierOverride?.supplierName ?? null, [
     result.documentId,
   ]);
@@ -1314,18 +1316,44 @@ async function handleMultiProductApprove(
       .run();
   }
 
-  await registerFlatApproveSpecChecks(
-    context,
-    user,
-    item,
-    result.supplierId,
-    supplierOverride?.supplierName ?? null,
-    result.documents.map((d) => ({ documentId: d.documentId, title: d.title })),
-    // Each product carries the tables the reviewer assigned to it; judged
-    // together here because a verdict cannot be attributed to one product's
-    // document more precisely than the reviewer's own split already did.
-    (products ?? []).flatMap((p) => p.tables ?? [])
-  );
+  // ONE FLAT EXTRACTION, SEVERAL PRODUCT DOCUMENTS (C-089). Document i is
+  // product i (`produceMultiProductCoa` writes them in order), and it stores
+  // the tables the reviewer assigned to that product -- so that product's
+  // results are judged for THAT document, the attribution the split itself
+  // makes. A product the reviewer gave no tables stores none; its document is
+  // judged on the whole stored extraction, marked unattributed, because a
+  // result nobody assigned must still be registered somewhere (and held, when
+  // it would hold). This used to judge every product's tables together and
+  // then drop every verdict, since nothing said which document one belonged
+  // to: no register row, no alert, no hold.
+  const productTables = (products ?? []).map((p) => (Array.isArray(p.tables) && p.tables.length > 0 ? p.tables : null));
+  for (const [i, d] of result.documents.entries()) {
+    const tables = productTables[i] ?? null;
+    if (!tables) continue;
+    await registerFlatApproveSpecChecks(
+      context,
+      user,
+      item,
+      result.supplierId,
+      supplierOverride?.supplierName ?? null,
+      [{ documentId: d.documentId, title: d.title }],
+      tables
+    );
+  }
+  const unassigned = result.documents.filter((_, i) => !productTables[i]);
+  if (unassigned.length > 0) {
+    await registerFlatApproveSpecChecks(
+      context,
+      user,
+      item,
+      result.supplierId,
+      supplierOverride?.supplierName ?? null,
+      unassigned.map((d) => ({ documentId: d.documentId, title: d.title })),
+      null,
+      { unattributed: true }
+    );
+  }
+  await noticeHeldLotArrivals(context, user, item, result.documents.map((d) => d.documentId));
   await checkArrivalForApproval(
     context,
     user,
@@ -1650,7 +1678,8 @@ async function registerFlatApproveSpecChecks(
   supplierId: string | null,
   supplierName: string | null,
   documents: Array<{ documentId: string; title: string; versionNumber?: number }>,
-  tables: unknown
+  tables: unknown,
+  opts: { unattributed?: boolean } = {}
 ): Promise<void> {
   try {
     const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
@@ -1676,6 +1705,7 @@ async function registerFlatApproveSpecChecks(
         documentTypeId: item.document_type_id == null ? null : String(item.document_type_id),
         approvedBy: user.id,
         appUrl: new URL(context.request.url).origin,
+        unattributed: opts.unattributed === true,
       },
       results,
       specConfig.limits,
@@ -1688,6 +1718,26 @@ async function registerFlatApproveSpecChecks(
       err instanceof Error ? err.message : String(err)
     );
   }
+}
+
+/**
+ * A certificate approved for a lot that is ALREADY on hold is held from the
+ * moment it is linked to the lot (C-086). This tells QA, once, that it
+ * arrived. Best-effort: the approval stands and the certificate is held either
+ * way.
+ */
+async function noticeHeldLotArrivals(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem,
+  documentIds: string[]
+): Promise<void> {
+  await noticeCertificatesForHeldLots(
+    context.env.DB,
+    context.env.RESEND_API_KEY,
+    { tenantId: String(item.tenant_id), actorUserId: user.id, appUrl: new URL(context.request.url).origin },
+    documentIds
+  );
 }
 
 /**
@@ -1874,6 +1924,8 @@ async function handleCoaRecordsApprove(
       err instanceof Error ? err.message : String(err)
     );
   }
+
+  await noticeHeldLotArrivals(context, user, item, result.documents.map((d) => d.documentId));
 
   const heldCount = result.heldRecordIndexes.length;
   const fullyApproved = heldCount === 0;

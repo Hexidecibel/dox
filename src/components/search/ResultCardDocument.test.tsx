@@ -63,4 +63,24 @@ describe('ResultCardDocument', () => {
     await user.click(screen.getByText('Acme COA April 2026'));
     expect(onOpen).toHaveBeenCalledWith(BASE);
   });
+
+  it('says a certificate is on hold, and says nothing when it is not (migration 0139)', () => {
+    const first = render(wrap(<ResultCardDocument doc={BASE} />));
+    expect(screen.queryByTestId('result-hold-chip')).toBeNull();
+    first.unmount();
+
+    render(
+      wrap(
+        <ResultCardDocument
+          doc={{
+            ...BASE,
+            active_hold: { id: 'h1', document_id: 'd_1', lot_id: 'l1', lot_label: '5501', reason: 'Retest pending', source: 'person', placed_at: '2026-10-08 10:00:00' },
+          }}
+        />,
+      ),
+    );
+    const chip = screen.getByTestId('result-hold-chip');
+    expect(chip).toHaveTextContent('On hold');
+    expect(chip).toHaveAttribute('title', 'On hold (lot 5501): Retest pending');
+  });
 });

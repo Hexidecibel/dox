@@ -2,6 +2,19 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## Found while building holds (2026-10-08): a reviewer's table edit changes nothing on the single-document approve
+
+Checked for the holds review, consistent, and left. On the single-document flat approve
+(`functions/api/queue/[id].ts`, `produceCoa` in `functions/lib/kinds/coa.ts`) the reviewer's table
+edits arrive as `captures.tableEdits` and are written ONLY to `reviewer_table_edits`, a learning
+capture. The approved document stores `buildFlatExtendedMetadata(item.tables)` -- the stored,
+uncorrected extraction -- and the spec judgement (and so any hold) judges the same stored tables. So
+the document and the judgement agree; neither carries the correction. Not a hold defect. The open
+question is the product one: a reviewer who corrects a misread result (40 that the paper shows as 4)
+has corrected nothing that is filed, judged or held. Fixing it means applying `tableEdits` to the
+tables before they are stored AND before they are judged, in one place, so the two cannot drift --
+the multi-product and records paths already store and judge the tables the reviewer sent.
+
 ## KNOWN GAPS left by the sharing-rule re-review (2026-10-08)
 
 Found by the second adversarial review of 0137, none a path by which a locked file leaves today.

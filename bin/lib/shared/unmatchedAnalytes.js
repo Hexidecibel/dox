@@ -28,6 +28,7 @@ module.exports = __toCommonJS(unmatchedAnalytes_exports);
 // shared/specCriticality.ts
 var SPEC_CRITICALITY_VALUES = ["high", "medium", "low"];
 var DEFAULT_SPEC_CRITICALITY = "medium";
+var HOLDING_SPEC_CRITICALITY = SPEC_CRITICALITY_VALUES[0];
 function isSpecCriticality(value) {
   return typeof value === "string" && SPEC_CRITICALITY_VALUES.includes(value);
 }

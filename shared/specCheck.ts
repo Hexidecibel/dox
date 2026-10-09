@@ -75,7 +75,10 @@ export type SpecVerdictKind = 'in_spec' | 'out_of_spec' | 'not_checked';
  *
  * Dilution is part of E2 but is not detected: nothing in the extraction records
  * a dilution, and inventing one from a printed ratio would be a guess.
- * NOTIFY ONLY. E2's hold half is out of scope — dox has no hold.
+ * THE CATEGORY NOTIFIES; IT HOLDS NOTHING BY ITSELF. E2's hold half is
+ * shared/holds.ts (migration 0139), which reads this category AFTER judging:
+ * a sample-size mismatch on a zero-tolerance analyte holds the lot, a method
+ * mismatch never does (E1).
  */
 export type NotCheckedCategory = 'method_mismatch' | 'sample_basis_mismatch';
 

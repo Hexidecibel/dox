@@ -46,6 +46,39 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Holds (C-005, finish-line item 2)
+
+**Status:** done — built 2026-10-08 (migration 0139 document_holds). Not yet deployed.
+
+**Source:** AJ Conner's rules table assumes holds exist (B1 "Critical: this result stops the
+shipment", E2 "zero-tolerance ... holds until a person resolves it") and nothing held anything.
+Decision C-005 and C-071..C-093 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
+under "Holds (migration 0139)".
+
+- `migrations/0139_document_holds.sql`: `document_versions.source_queue_id`, `document_hold_failures`, and `document_holds`, append-only, two unique indexes (one active per lot and source; an automatic hold once per judged result ever), an immutability trigger. Additive; holds nothing by itself.
+- `shared/holds.ts` (pure): the three sources, `holdSourceForResult` / `automaticHoldsForResults`, the refusal wording. `shared/sharingRule.ts`: `judgeExit` gains a fourth verdict, `held`, asked first.
+- `functions/lib/hold-state.ts` (`loadActiveHolds`, read by `loadSharingRules` so every exit sees it) and `functions/lib/holds.ts` (place, release, list, count, automatic placement, the QA notice).
+- Every exit refuses a held certificate through the sharing rule's own checks: ZIP, emailed link, public link reads, bundle, order send and resend, document order lines, the QA release, API-key file reads. A signed-in open or download is unchanged. A whole multi-lot original is held by any lot on it; unheld lots' own pages still go, unless that page prints the held lot too (two lots on one page: `loadEffectiveHolds`, C-084).
+- Automatic holds at approval only (`registerAndNotifyForApproval`): Critical out of spec, and a zero-tolerance sample-size mismatch. Once per judged result; a new version is a new result.
+- Routes: `GET / POST /api/documents/:id/holds`, `POST /api/holds/:id/release`, `GET /api/holds` (+ `?count=1`).
+- Screens: banner, lot chips, Place and Release on the document page; `/holds` beside the Review Queue with a count in the rail; an "On hold" group in Review and send; chips on order lines, the waiting list and search rows; Help.
+- `bin/propose-spec-holds` for certificates approved before 0139 (dry run by default). `bin/report-lot-key-scheme --apply` moves a hold with its lot.
+- Tests: `tests/unit/holds.test.ts`, `tests/unit/specHoldsPlan.test.ts`, `tests/api/holds.test.ts`, `tests/api/migration-0139-document-holds.test.ts`, `src/components/DocumentHolds.test.tsx`, `src/pages/Holds.test.tsx`.
+
+- After an independent review (same day, C-085..C-090): a file is its CURRENT version's queue item (`document_versions.source_queue_id`), so a reissued certificate no longer sends a held or locked lot on its whole original; a LOT hold follows the `lots` row onto every certificate of the lot (supersedes C-071); a hold that could not be placed is recorded, mailed, shown and retried (`document_hold_failures`), per document; a file takes the strictest sharing rule of every lot it prints; a flat extraction approved as several product documents is registered and held per product, unattributed results on every document; `delivered` means every line travelled; one read per part in an order send. `bin/migrate --reapply` for the amended migration.
+- After the re-review (C-091..C-093): a lot hold covers the same supplier + lot key + sublot on EVERY lot row, whatever product each scan was read under (not another supplier's same number, not another sublot); one open hold failure per certificate version, closed by itself once the hold exists, with a truthful retry; one `delivered` function for the send and the QA-release paths; the prod pre-check query for the version backfill is in `docs/migration-history.md`.
+
+**Not built:** B3 supplier-probation holds (no supplier watch statuses exist); anything to a WMS;
+C-016's notice for a bare "Negative"; dilution (not extracted).
+
+**To ship:** `bin/backup`, then 0139 on staging and prod with `bin/migrate-prod-one` BEFORE the code
+deploys (every exit reads `document_holds`, and that read fails closed). Run the read-only
+backfill check in the 0139 row of `docs/migration-history.md` on prod FIRST. After the deploy,
+`bin/propose-spec-holds --tenant <id> --remote` (dry run) per organization and decide whether to
+`--apply`. Release note reach tokens: holds and the automatic Critical hold are `[existing]`; QA
+being told by mail needs the `QA` owner route, `[config]`; the zero-tolerance hold needs an analyte
+with the zero-tolerance category, `[config]`. Nobody has clicked through these screens in a browser.
+
 ### The sharing rule on every exit (C-003, step 1d, release A of two)
 
 **Status:** done — built 2026-10-08 (migration 0137 sharing_rule), shipped as v2.30.0. Release B (document orders, migration 0138) is built: see the next entry.

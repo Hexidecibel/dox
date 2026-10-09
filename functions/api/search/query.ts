@@ -24,6 +24,7 @@
 import { BadRequestError, errorToResponse, requireRole, requireTenantAccess } from '../../lib/permissions';
 import { callerHasModule } from '../../lib/module-access';
 import { runSearch } from '../../lib/search/execute';
+import { attachActiveHolds } from '../../lib/hold-state';
 import type { Env, User } from '../../lib/types';
 import type { SearchQueryRequest } from '../../../shared/types';
 import { savedView, type SearchQuery } from '../../../shared/searchQuery';
@@ -73,6 +74,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ? body.facet_fields.filter((f): f is FacetField => (FACET_FIELDS as readonly string[]).includes(f as string))
         : undefined,
     });
+
+    // A held certificate says so on its row (0139). After the answer is built:
+    // a hold is not a search field and judges nothing.
+    await attachActiveHolds(context.env.DB, tenantId, result.documents);
 
     return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
   } catch (err) {

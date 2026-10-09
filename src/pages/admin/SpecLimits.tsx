@@ -677,8 +677,9 @@ export function SpecLimits() {
           <strong>{SPEC_CRITICALITY_LABELS.high}</strong>
         </Tooltip>{' '}
         so they are not read at the same volume as the many you simply track.
-        Critical is the tier a shipment hold will key on; holds are not enforced
-        yet, so today a critical result flags and alerts.
+        Critical is the tier a hold keys on: when a certificate is approved with a
+        critical result out of spec, that lot's certificate goes on hold and cannot
+        be sent until QA releases it.
       </Typography>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 3 }}>
@@ -937,8 +938,9 @@ export function SpecLimits() {
             </Select>
             <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
               Decides what "how far out" means for a result that misses: the band orders the
-              warnings and words the alert. It never changes whether a result passes, and
-              nothing is held.
+              warnings and words the alert. It never changes whether a result passes. One
+              category also holds: a zero-tolerance presence test run on a smaller sample
+              than the limit requires puts that lot's certificate on hold.
             </Typography>
           </FormControl>
           {testCategory === 'regulatory_ceiling' && (

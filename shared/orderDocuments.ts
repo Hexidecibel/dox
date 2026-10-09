@@ -19,7 +19,7 @@
  */
 
 import { isPrivateLabel } from './itemApproval';
-import { judgeExit, type ExitActor, type SharingRule } from './sharingRule';
+import { judgeExit, sharingRefusalMessage, type ExitActor, type SharingRule } from './sharingRule';
 import { humanDay } from './orderSend';
 import type {
   OrderDocumentDelivery,
@@ -108,6 +108,8 @@ export interface OrderDocumentLineFacts {
   pending_recipients?: readonly string[];
   /** A `releasing` claim that never finished. */
   release_stuck?: boolean;
+  /** The document's active hold (migration 0139), or null / absent. */
+  hold?: { reason?: string | null; lot_label?: string | null } | null;
 }
 
 export interface OrderDocumentJudgement {
@@ -188,7 +190,15 @@ export function judgeOrderDocumentLine(facts: OrderDocumentLineFacts, actor: Exi
 
   // No rule row means the document could not be judged: it does not go.
   const rule: SharingRule = facts.rule ?? 'locked';
-  const verdict = judgeExit(rule, 'order_send', actor);
+  const verdict = judgeExit(rule, 'order_send', actor, Boolean(facts.hold));
+  // ON HOLD (0139). Asked before everything the rule would say: a held
+  // document is not queued for QA, not released by a releaser's own send, and
+  // a line already waiting for QA stops waiting to go until the hold is
+  // released. Nothing about the line's release state is changed by this.
+  if (verdict === 'held') {
+    const said = sharingRefusalMessage('held', { hold: facts.hold });
+    return wont('held', `${said}${/[.!?]$/.test(said) ? '' : '.'} It can go once QA or an administrator releases the hold.`);
+  }
   if (verdict === 'locked') {
     return wont('locked', 'Locked. This document does not leave the organization.');
   }

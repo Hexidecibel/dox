@@ -52,6 +52,14 @@
  * on this order. When that is stricter than the sender may pass, the per-lot
  * page goes instead and the review screen says so.
  *
+ * HOLDS (decision C-005, migration 0139). A certificate with an active hold
+ * does not go: its line is listed in `lines_not_sent` with `sharing_refusal:
+ * 'held'` and the hold's own reason, for every sender, a QA releaser and an
+ * administrator included -- the hold is released first. Because a whole
+ * original prints every lot, a hold on ONE lot keeps the whole original in;
+ * the other lots' own pages still go, with a note saying why (C-074). The same
+ * two checks apply: the plan, and again before each file's bytes are read.
+ *
  * DOCUMENT LINES (migration 0138, decision C-044). An order may also carry
  * lines that ask for a supplier's documents (functions/lib/order-documents.ts).
  * They ride in THE SAME PLAN and the same send:
@@ -93,11 +101,11 @@ import { resolveWholeOriginals } from './coa-original';
 import {
   auditQaRelease,
   documentsFromQueueItem,
-  judgeDocumentsForExit,
   judgeSharedFile,
-  loadSharingRules,
+  judgeSharedFiles,
+  type SharedFileJudgement,
 } from './sharing-rule';
-import { judgeExit, sharingRefusalMessage, type ExitActor } from '../../shared/sharingRule';
+import { sharingRefusalMessage, type ExitActor } from '../../shared/sharingRule';
 import { loadOrderLines, type OrderWriteRow } from './order-items';
 import {
   countDocumentLinesBehind,
@@ -365,9 +373,14 @@ export async function planOrderSend(
       if (!whole || whole.verdict !== 'allow') {
         useOriginal = false;
         notes.push(
-          whole && whole.verdict === 'needs_qa'
-            ? 'The whole certificate also covers a document that needs QA approval, so only this lot\'s page is sent.'
-            : 'The whole certificate also covers a document that is locked, so only this lot\'s page is sent.',
+          whole && whole.verdict === 'held'
+            ? // Another lot of the same certificate is on hold (0139). The whole
+              // original prints that lot's results, so it stays in; this lot's
+              // own page carries none of them and goes (C-074).
+              `The whole certificate also covers ${whole.hold?.lot_label ? `lot ${whole.hold.lot_label}, which is on hold` : 'a lot that is on hold'}, so only this lot's page is sent.`
+            : whole && whole.verdict === 'needs_qa'
+              ? 'The whole certificate also covers a document that needs QA approval, so only this lot\'s page is sent.'
+              : 'The whole certificate also covers a document that is locked, so only this lot\'s page is sent.',
         );
       }
     }
@@ -433,6 +446,7 @@ export async function planOrderSend(
         lot_number: lotRowLabel(line.lot_row_number, line.sub_lot_code) ?? line.lot_number ?? null,
         reason: refusal.message,
         sharing_refusal: refusal.reason,
+        ...(refusal.hold ? { hold: refusal.hold } : {}),
         document_id: docId,
       });
       continue;
@@ -464,7 +478,7 @@ export async function planOrderSend(
         l.row.id,
         refusal.reason === 'needs_qa'
           ? { group: 'waits_for_qa', reason: null, text: refusal.message }
-          : { group: 'will_not_go', reason: 'locked', text: refusal.message },
+          : { group: 'will_not_go', reason: refusal.reason === 'held' ? 'held' : 'locked', text: refusal.message },
       );
       continue;
     }
@@ -599,6 +613,9 @@ export async function planOrderSend(
       document_type_name: x.l.api.document_type_name,
       reason: x.o.text,
       ...(x.o.reason === 'locked' ? { sharing_refusal: 'locked' as const } : {}),
+      ...(x.o.reason === 'held'
+        ? { sharing_refusal: 'held' as const, ...(x.l.api.hold ? { hold: x.l.api.hold } : {}) }
+        : {}),
       ...(x.l.api.document_id ? { document_id: x.l.api.document_id } : {}),
     });
   }
@@ -682,7 +699,11 @@ export async function planOrderSend(
     blocked = {
       code: 'nothing_to_send',
       message: heldByRule
-        ? 'Every document on this order is held back by its sharing rule, so there is nothing to send. See the list below.'
+        ? linesNotSent.every((l) => l.sharing_refusal === 'held')
+          ? 'Every certificate on this order is on hold, so there is nothing to send. A hold is released by QA or an administrator. See the list below.'
+          : linesNotSent.some((l) => l.sharing_refusal === 'held')
+            ? 'Every document on this order is on hold or held back by its sharing rule, so there is nothing to send. See the list below.'
+            : 'Every document on this order is held back by its sharing rule, so there is nothing to send. See the list below.'
         : documentLines.length > 0
           ? 'Nothing on this order can go, and QA has already been told about what is waiting, missing or expired. See the list below.'
           : 'No line of this order has an active document on it, so there is nothing to send.',
@@ -1120,37 +1141,59 @@ async function documentLineFileVerdict(
  * original additionally holds every document cut from the same queue item.
  * The strictest of all of them decides (C-042). A file whose documents can no
  * longer be found is refused: nothing says it may leave.
+ *
+ * A HOLD PLACED SINCE THE SEND WAS REVIEWED STOPS THE FILE HERE (0139): the
+ * part fails with "On hold: <reason>" and can be sent again once the hold is
+ * released. A whole original is held by a hold on ANY lot cut from it.
  */
-async function storedFileRefusal(
-  db: D1Database,
-  tenantId: string,
+function storedFileRefusal(
   f: StoredFile,
+  judged: (SharedFileJudgement & { asked: number }) | undefined,
   actor: ExitActor,
-): Promise<{ problem: string | null; qaReleased: string[] }> {
-  const own = parseJsonArray<string>(f.document_ids);
-  const ids = new Set<string>(own.length > 0 ? own : [f.document_id]);
-  if (f.source === 'original' && f.source_queue_id) {
-    for (const id of await documentsFromQueueItem(db, tenantId, f.source_queue_id)) ids.add(id);
-  }
-  const judged = await judgeSharedFile(db, tenantId, [...ids], 'order_send', actor);
-  if (judged.verdict !== 'allow') {
+): { problem: string | null; qaReleased: string[] } {
+  if (!judged || judged.verdict !== 'allow') {
     return {
-      problem: `${f.file_name} was not sent. ${sharingRefusalMessage(judged.verdict, { apiKey: actor.method === 'api_key' })}`,
+      problem: `${f.file_name} was not sent. ${sharingRefusalMessage(judged && judged.verdict !== 'allow' ? judged.verdict : 'locked', { apiKey: actor.method === 'api_key', hold: judged?.hold })}`,
       qaReleased: [],
     };
   }
-  if (judged.document_ids.length < ids.size) {
+  if (judged.document_ids.length < judged.asked) {
     return {
       problem: `${f.file_name} was not sent: a document it stands for is no longer in the portal.`,
       qaReleased: [],
     };
   }
-  // Which of them are `qa`, passing only because of who is sending.
-  const rules = await loadSharingRules(db, tenantId, [...ids]);
-  const qaReleased = [...rules.values()]
-    .filter((r) => r.rule === 'qa' && judgeExit(r.rule, 'order_send', actor) === 'allow')
-    .map((r) => r.document_id);
-  return { problem: null, qaReleased };
+  // Which of them are `qa`, passing only because of who is sending. Read from
+  // the judgement that just passed -- not loaded a second time.
+  return { problem: null, qaReleased: judged.verdict === 'allow' ? judged.qa_document_ids : [] };
+}
+
+/**
+ * Every file of ONE part, judged off one read (rules, neighbours and holds for
+ * the union of their documents). Made immediately before the part's bytes are
+ * read, so a hold or a lock placed while an earlier part was going still stops
+ * this one.
+ */
+async function judgePartFiles(
+  db: D1Database,
+  tenantId: string,
+  inPart: StoredFile[],
+  actor: ExitActor,
+): Promise<Map<string, SharedFileJudgement & { asked: number }>> {
+  return judgeSharedFiles(
+    db,
+    tenantId,
+    inPart.map((f) => {
+      const own = parseJsonArray<string>(f.document_ids);
+      return {
+        key: f.id,
+        documentIds: own.length > 0 ? own : [f.document_id],
+        queueId: f.source === 'original' ? f.source_queue_id : null,
+      };
+    }),
+    'order_send',
+    actor,
+  );
 }
 
 /**
@@ -1239,8 +1282,9 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
     // every file of the part, attached or linked. This is the check a resend
     // depends on: it rebuilds from the stored record, so the plan's own check
     // is days old by the time it runs.
+    const judgedFiles = await judgePartFiles(db, send.tenant_id, inPart, ctx.actor);
     for (const f of inPart) {
-      const ruled = await storedFileRefusal(db, send.tenant_id, f, ctx.actor);
+      const ruled = storedFileRefusal(f, judgedFiles.get(f.id), ctx.actor);
       if (ruled.problem) {
         problem = ruled.problem;
         break;
@@ -1421,50 +1465,96 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
 }
 
 /**
- * An order whose every line reached the customer is `delivered`.
+ * An order whose every line REACHED THE CUSTOMER is `delivered`.
  *
- * Two conditions, both required: every email of the send was accepted, AND no
- * line of the order was left behind -- a line with no document, or whose
- * document is no longer active, was listed as "not sent" on the review screen,
- * and an order with one of those is not delivered however well the rest went.
- * The same holds for a line the SHARING RULE held back (0137): its document is
- * active and on the line, and it did not go.
+ * WHAT TRAVELLED, NOT WHAT MAY TRAVEL NOW (C-090). This used to judge the
+ * order's lines against the live sharing rule and holds: "is anything refused
+ * right now?". So a line that was on hold (or locked, or needed QA) when the
+ * order was sent, and was therefore never in any email, made the order
+ * `delivered` the moment the hold was released and somebody resent an OLD
+ * failed part -- though that line's certificate had never gone anywhere.
+ *
+ * The record of what went is `order_send_files`: a file that left has
+ * `sent_ok = 1` and no `not_sent_reason`, and names the documents it stood
+ * for. So:
+ *
+ *   - every email of THIS send was accepted, and at least one really left;
+ *   - every COA line has an active document on it (a line with none, or whose
+ *     document is no longer active, was listed as "not sent" and is still
+ *     owed), AND that document is named by a file that left on SOME send of
+ *     this order;
+ *   - no document line (0138) was left behind (C-056): it went on a send, or
+ *     QA released it.
+ *
+ * A line that went and whose document was locked or held AFTERWARDS still
+ * went. A line that never went is still owed, whatever its state is now.
  */
-async function markDeliveredIfSent(db: D1Database, send: StoredSend, actor: ExitActor): Promise<string | null> {
+async function markDeliveredIfSent(db: D1Database, send: StoredSend): Promise<string | null> {
   if (send.status !== 'sent') return null;
   // A send in which no email actually left delivered nothing: one that only
   // asked QA, or a resend whose every file had been withdrawn.
   if (!parseJsonArray<OrderSendPartResult>(send.parts).some((p) => p.ok && p.sent_at)) return null;
-  const behind = await db
+  return markOrderDeliveredIfEverythingTravelled(db, send.tenant_id, send.order_id);
+}
+
+/**
+ * THE ONE DEFINITION OF "EVERYTHING ON THIS ORDER REACHED THE CUSTOMER"
+ * (C-090, C-093). Both the send path and the QA-release path ask it.
+ *
+ *   - every COA line has an active document on it, and that document is named
+ *     by a file that left (`sent_ok = 1`, no `not_sent_reason`) on SOME send
+ *     of this order;
+ *   - no document line (0138) is left behind: it went on a send, or QA
+ *     released it (C-056).
+ *
+ * "Some send", not "the latest": a certificate that went on Monday's send is
+ * not owed again because Tuesday's send only asked QA about a document line.
+ */
+export async function everyOrderLineTravelled(db: D1Database, tenantId: string, orderId: string): Promise<boolean> {
+  const lines = await db
     .prepare(
-      `SELECT COUNT(*) AS n
+      `SELECT oi.coa_document_id AS document_id, d.status AS status
          FROM order_items oi
-         LEFT JOIN documents d ON d.id = oi.coa_document_id
-        WHERE oi.order_id = ?
-          AND (oi.coa_document_id IS NULL OR d.status IS NULL OR d.status != 'active')`,
+         LEFT JOIN documents d ON d.id = oi.coa_document_id AND d.tenant_id = ?
+        WHERE oi.order_id = ?`,
     )
-    .bind(send.order_id)
-    .first<{ n: number }>();
-  if (Number(behind?.n) > 0) return null;
-  const onLines = await db
-    .prepare('SELECT DISTINCT coa_document_id AS id FROM order_items WHERE order_id = ? AND coa_document_id IS NOT NULL')
-    .bind(send.order_id)
-    .all<{ id: string }>();
-  const held = await judgeDocumentsForExit(
-    db,
-    send.tenant_id,
-    (onLines.results ?? []).map((r) => r.id),
-    'order_send',
-    actor,
-  );
-  if (held.refused.length > 0) return null;
-  // A document line (0138) that did not go with this send and was not released
-  // by QA -- waiting, missing, expired, locked, refused -- is a line left
+    .bind(tenantId, orderId)
+    .all<{ document_id: string | null; status: string | null }>();
+  const owed = lines.results ?? [];
+  if (owed.some((l) => !l.document_id || l.status !== 'active')) return false;
+
+  if (owed.length > 0) {
+    const travelled = await db
+      .prepare(
+        `SELECT DISTINCT je.value AS document_id
+           FROM order_send_files f
+           JOIN order_sends s ON s.id = f.send_id
+           JOIN json_each(f.document_ids) je
+          WHERE s.order_id = ? AND s.tenant_id = ?
+            AND f.sent_ok = 1 AND f.not_sent_reason IS NULL`,
+      )
+      .bind(orderId, tenantId)
+      .all<{ document_id: string }>();
+    const went = new Set((travelled.results ?? []).map((r) => r.document_id));
+    if (owed.some((l) => !went.has(l.document_id as string))) return false;
+  }
+
+  // A document line (0138) that did not go on a send and was not released by
+  // QA -- waiting, missing, expired, locked, held, refused -- is a line left
   // behind, exactly as a COA line with no certificate is.
-  if ((await countDocumentLinesBehind(db, send.tenant_id, send.order_id, send.id)) > 0) return null;
+  return (await countDocumentLinesBehind(db, tenantId, orderId)) === 0;
+}
+
+/** Marks the order `delivered` when everything on it has travelled. */
+export async function markOrderDeliveredIfEverythingTravelled(
+  db: D1Database,
+  tenantId: string,
+  orderId: string,
+): Promise<'delivered' | null> {
+  if (!(await everyOrderLineTravelled(db, tenantId, orderId))) return null;
   await db
     .prepare(`UPDATE orders SET status = 'delivered', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`)
-    .bind(send.order_id, send.tenant_id)
+    .bind(orderId, tenantId)
     .run();
   return 'delivered';
 }
@@ -1619,7 +1709,7 @@ export async function executeOrderSend(
 
   const send = (await db.prepare('SELECT * FROM order_sends WHERE id = ?').bind(sendId).first<StoredSend>())!;
   const run = await runParts(ctx, send, Array.from({ length: send.part_count }, (_, i) => i + 1));
-  const delivered = await markDeliveredIfSent(db, send, ctx.actor);
+  const delivered = await markDeliveredIfSent(db, send);
   if (kind === 'send') await auditSend(db, send, ctx.sender.id, args.clientIp, run.results, false);
   else {
     try {
@@ -1703,7 +1793,7 @@ export async function resendFailedParts(
   const failed = Array.from({ length: send.part_count }, (_, i) => i + 1).filter((n) => !done.has(n));
   if (failed.length === 0) return { orderStatus: null, attempted: 0, notResent: [] };
   const run = await runParts(ctx, send, failed);
-  const delivered = await markDeliveredIfSent(ctx.db, send, ctx.actor);
+  const delivered = await markDeliveredIfSent(ctx.db, send);
   // The audit row names whoever pressed resend, which may be an admin rather
   // than the original sender.
   await auditSend(ctx.db, send, args.actorId, args.clientIp, run.results, true);

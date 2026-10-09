@@ -10,6 +10,7 @@ import DocIcon from '@mui/icons-material/Description';
 import { useNavigate } from 'react-router-dom';
 import { Snippet } from './Snippet';
 import { formatDate } from '../../utils/format';
+import { holdRefusalText } from '../../../shared/holds';
 import type { UniversalSearchDocument } from '../../../shared/types';
 
 /**
@@ -105,6 +106,15 @@ export function ResultCardDocument({ doc, onOpen, footer, tone = 'default', acti
               )}
               {docType && (
                 <Chip size="small" label={docType} variant="outlined" color="info" />
+              )}
+              {doc.active_hold && (
+                <Chip
+                  size="small"
+                  color="error"
+                  label="On hold"
+                  title={holdRefusalText(doc.active_hold)}
+                  data-testid="result-hold-chip"
+                />
               )}
               {created && (
                 <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>

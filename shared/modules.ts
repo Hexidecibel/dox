@@ -98,6 +98,10 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       '/documents',
       '/import',
       '/review',
+      // Holds (0139), beside the Review Queue where QA already works. The
+      // SCREEN follows the library; `/api/holds` deliberately belongs to no
+      // module, so a hold is enforced and readable whatever is switched on.
+      '/holds',
       '/requests',
       '/bundles',
       '/ingest-history',

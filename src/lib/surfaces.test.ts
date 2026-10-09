@@ -69,6 +69,8 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/activity',
   '/import',
   '/review',
+  // Added with migration 0139: what is on hold, beside the Review Queue.
+  '/holds',
   '/orders',
   // Added with migration 0138: QA's worklist for document orders.
   '/orders/waiting-for-qa',
@@ -165,7 +167,8 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(70);
+    // 71 since migration 0139 added '/holds'.
+    expect(ROUTE_SNAPSHOT.length).toBe(71);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });
