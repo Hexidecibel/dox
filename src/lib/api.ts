@@ -2,6 +2,7 @@ import { parseRefusedHeader, type SharingRefusalReason } from '../../shared/shar
 import type {
   ApiDocumentHold,
   DocumentHoldsResponse,
+  HoldRetryResponse,
   HoldsCountResponse,
   HoldsListResponse,
   HoldSource,
@@ -1707,7 +1708,7 @@ export const api = {
       }),
     /** POST /api/holds/failures/:id/retry — place the holds a failed approval should have placed. */
     retryFailure: (failureId: string) =>
-      fetchApi<{ placed: number; already_held: number }>(`/holds/failures/${encodeURIComponent(failureId)}/retry`, {
+      fetchApi<HoldRetryResponse>(`/holds/failures/${encodeURIComponent(failureId)}/retry`, {
         method: 'POST',
       }),
     /** GET /api/holds — the organization's holds. */

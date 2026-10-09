@@ -261,7 +261,7 @@ describe('DocumentHolds', () => {
         failures: [{ id: 'f1', document_id: 'd1', document_title: 'Cream COA', document_version: 1, created_at: '2026-10-08 10:00:00', error: 'D1_ERROR', holds: [{ source: 'spec_critical', reason: 'Critical result out of spec: Coliform 40 CFU/g (limit <=10 CFU/g).' }] }],
       }),
     );
-    mocks.retryFailure.mockResolvedValue({ placed: 1, already_held: 0 });
+    mocks.retryFailure.mockResolvedValue({ placed: 1, already_held: 0, released: [], message: 'Cream COA is now on hold.' });
     const onChanged = vi.fn();
     render(<DocumentHolds documentId="d1" onChanged={onChanged} />);
     const box = await screen.findByTestId('hold-failure');

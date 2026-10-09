@@ -121,7 +121,12 @@ describe('0139 on a populated database', () => {
     await expect(run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-bad', '${T}', 'd-1', 1, 'not json')`)).rejects.toThrow();
     await run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-1', '${T}', 'd-1', 1, '[]')`);
     expect((await all(`SELECT resolved_at FROM document_hold_failures WHERE id = 'f-1'`))[0].resolved_at).toBeNull();
-    await run(`DELETE FROM document_hold_failures WHERE id = 'f-1'`);
+    // ONE OPEN failure per certificate version; a resolved one makes room.
+    await expect(run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-2', '${T}', 'd-1', 1, '[]')`)).rejects.toThrow(/UNIQUE/);
+    await run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-3', '${T}', 'd-1', 2, '[]')`);
+    await run(`UPDATE document_hold_failures SET resolved_at = datetime('now') WHERE id = 'f-1'`);
+    await run(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('f-2', '${T}', 'd-1', 1, '[]')`);
+    await run(`DELETE FROM document_hold_failures WHERE id IN ('f-1', 'f-2', 'f-3')`);
   });
 
   it('adds one table, its indexes and its trigger, and nothing else', async () => {

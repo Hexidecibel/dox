@@ -26,7 +26,7 @@ import { generateId, logAudit } from './db';
 import { sendEmail, buildHoldPlacedEmail } from './email';
 import { resolveAlertRouting, resolveTenantAdmins } from './alert-routing';
 import { canReleaseQa, QA_RELEASE_OWNER_LABEL } from './sharing-rule';
-import { holdBrief, loadEffectiveHolds } from './hold-state';
+import { heldLotOf, holdBrief, loadEffectiveHolds, lotHoldCovers } from './hold-state';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from './permissions';
 import {
   HOLD_SOURCE_LABELS,
@@ -44,6 +44,7 @@ import type { SpecVerdict } from '../../shared/specCheck';
 import type {
   ApiDocumentHold,
   ApiHoldFailure,
+  HoldRetryResponse,
   DocumentHoldBrief,
   DocumentHoldLot,
   DocumentHoldState,
@@ -198,7 +199,7 @@ async function loadDocumentLots(
     .bind(tenantId, documentId)
     .all<{ lot_id: string; lot_number: string; sub_lot_code: string | null }>();
   return (res.results ?? []).map((l) => {
-    const hold = active.find((h) => h.lot_id === l.lot_id) ?? null;
+    const hold = active.find((h) => h.lot_id === l.lot_id || h.own_lot_id === l.lot_id) ?? null;
     return {
       lot_id: l.lot_id,
       lot_number: l.lot_number,
@@ -541,19 +542,36 @@ export async function placeHold(db: D1Database, args: PlaceHoldArgs): Promise<Ap
       .first<{ id: string }>();
     if (!lot) throw new BadRequestError('That lot is not a lot row of this certificate.');
     lotId = lot.id;
-    // A LOT HOLD IS ON THE LOT ROW (C-086): it covers every certificate of
-    // that lot, so the lot is held once, whichever certificate it was placed
-    // from. A second person's hold on it is refused, not stacked: releasing is
-    // one act on one hold.
-    const already = await db
+    // A LOT HOLD IS ON THE LOT (C-086, C-091): it covers every certificate of
+    // that lot -- same supplier, same lot key, same sublot, whatever product a
+    // row resolved to -- so the lot is held once, whichever certificate and
+    // row it was placed from. A second person's hold on it is refused, not
+    // stacked: releasing is one act on one hold.
+    const mine = await db
+      .prepare('SELECT lot_key, sub_lot_code, supplier_id FROM lots WHERE id = ? AND tenant_id = ?')
+      .bind(lotId, tenantId)
+      .first<{ lot_key: string | null; sub_lot_code: string | null; supplier_id: string | null }>();
+    const link = {
+      lot_id: lotId,
+      lot_key: mine?.lot_key ?? null,
+      sub_lot_code: mine?.sub_lot_code ?? null,
+      lot_supplier_id: mine?.supplier_id ?? null,
+      document_id: documentId,
+      document_supplier_id: doc.supplier_id,
+    };
+    const others = await db
       .prepare(
-        `SELECT h.id, d.title FROM document_holds h
+        `SELECT h.id, h.lot_id, d.title, d.supplier_id AS document_supplier_id,
+                l.lot_key, l.sub_lot_code, l.supplier_id AS lot_supplier_id
+           FROM document_holds h
            JOIN documents d ON d.id = h.document_id AND d.tenant_id = h.tenant_id
-          WHERE h.tenant_id = ? AND h.lot_id = ? AND h.source = 'person' AND h.released_at IS NULL
-          LIMIT 1`,
+           JOIN lots l ON l.id = h.lot_id AND l.tenant_id = h.tenant_id
+          WHERE h.tenant_id = ? AND h.source = 'person' AND h.released_at IS NULL
+            AND (h.lot_id = ? OR l.lot_key = ?)`,
       )
-      .bind(tenantId, lotId)
-      .first<{ id: string; title: string | null }>();
+      .bind(tenantId, lotId, mine?.lot_key ?? '')
+      .all<{ id: string; lot_id: string; title: string | null; document_supplier_id: string | null; lot_key: string | null; sub_lot_code: string | null; lot_supplier_id: string | null }>();
+    const already = (others.results ?? []).find((h) => lotHoldCovers(heldLotOf(h), link));
     if (already) {
       throw new ConflictError(
         `That lot is already on hold, from ${already.title || 'another certificate'}. The hold covers every certificate of the lot. Release the hold that is there before placing another.`,
@@ -763,6 +781,7 @@ export async function writeAutomaticHolds(
   ctx: Pick<AutomaticHoldContext, 'tenantId' | 'documentId' | 'versionNumber' | 'queueItemId' | 'approvedBy'>,
   proposals: AutomaticHoldProposal[],
   specCheckIds: Map<string, string> = new Map(),
+  opts: { keepFailuresOpen?: boolean } = {},
 ): Promise<Array<{ id: string; lot_id: string | null; lot_label: string | null; reason: string; source: HoldSource }>> {
   if (proposals.length === 0) return [];
   const lotId = await singleLotOf(db, ctx.tenantId, ctx.documentId);
@@ -819,6 +838,9 @@ export async function writeAutomaticHolds(
       null,
     );
   }
+  // A failure recorded for these holds is over once they exist (C-092). The
+  // retry closes its own row, with who retried.
+  if (!opts.keepFailuresOpen) await closeSatisfiedHoldFailures(db, ctx.tenantId, { documentId: ctx.documentId });
   return placed;
 }
 
@@ -938,13 +960,11 @@ export async function noticeCertificatesForHeldLots(
     for (const id of ids) {
       // Only a hold that reaches this certificate THROUGH ITS LOT ROW, placed
       // from another certificate. One on a neighbour's page is not an arrival.
-      const candidates = (effective.get(id) ?? []).filter((h) => h.document_id !== id && h.lot_id);
+      // Only a hold that reaches this certificate AS A CERTIFICATE OF THE HELD
+      // LOT, placed from another certificate. One on a neighbour's page is not
+      // an arrival.
+      const candidates = (effective.get(id) ?? []).filter((h) => h.document_id !== id && h.reach === 'lot');
       if (candidates.length === 0) continue;
-      const lots = await db
-        .prepare('SELECT lot_id FROM document_lots WHERE document_id = ?')
-        .bind(id)
-        .all<{ lot_id: string }>();
-      const own = new Set((lots.results ?? []).map((l) => l.lot_id));
       const told = await db
         .prepare(
           `SELECT details FROM audit_log
@@ -960,7 +980,7 @@ export async function noticeCertificatesForHeldLots(
           // An unreadable row told nobody anything.
         }
       }
-      const fresh = candidates.filter((h) => own.has(h.lot_id as string) && !toldIds.has(h.id));
+      const fresh = candidates.filter((h) => !toldIds.has(h.id));
       if (fresh.length === 0) continue;
       const doc = await loadDocument(db, ctx.tenantId, id);
       if (!doc) continue;
@@ -1039,16 +1059,40 @@ export async function recordHoldFailure(
   error: string,
 ): Promise<void> {
   if (proposals.length === 0) return;
+  // ONE OPEN FAILURE PER (document, version) (C-092, `idx_document_hold_failures_one_open`).
+  // An approval that fails again for the same version adds what it would have
+  // placed to the row that is already open; it does not open a second, and QA,
+  // who were mailed when the first opened, are not mailed again.
   let failureId: string | null = generateId();
+  let alreadyOpen = false;
   try {
-    await db
+    const res = await db
       .prepare(
-        `INSERT INTO document_hold_failures
+        `INSERT OR IGNORE INTO document_hold_failures
            (id, tenant_id, document_id, document_version, proposals, error, queue_item_id, approved_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(failureId, ctx.tenantId, ctx.documentId, ctx.versionNumber, JSON.stringify(proposals), error.slice(0, 500), ctx.queueItemId, ctx.approvedBy)
       .run();
+    if (!res.meta?.changes) {
+      const open = await db
+        .prepare(
+          `SELECT id, proposals, qa_notified_at FROM document_hold_failures
+            WHERE document_id = ? AND document_version = ? AND resolved_at IS NULL`,
+        )
+        .bind(ctx.documentId, ctx.versionNumber)
+        .first<{ id: string; proposals: string; qa_notified_at: string | null }>();
+      if (open) {
+        failureId = open.id;
+        alreadyOpen = Boolean(open.qa_notified_at);
+        const merged = parseProposals(open.proposals);
+        for (const p of proposals) if (!merged.some((m) => m.source === p.source && m.source_key === p.source_key)) merged.push(p);
+        await db
+          .prepare('UPDATE document_hold_failures SET proposals = ?, error = ? WHERE id = ? AND resolved_at IS NULL')
+          .bind(JSON.stringify(merged), error.slice(0, 500), open.id)
+          .run();
+      }
+    }
   } catch (err) {
     failureId = null;
     console.error('[holds] recording a failed hold failed:', err instanceof Error ? err.message : String(err));
@@ -1074,6 +1118,7 @@ export async function recordHoldFailure(
   } catch {
     // The mail below is still attempted.
   }
+  if (alreadyOpen) return;
   await notifyQaOfHolds(
     db,
     apiKey,
@@ -1093,12 +1138,60 @@ export async function recordHoldFailure(
   );
 }
 
+/**
+ * A failure is over once EVERY hold it describes exists, placed by any path:
+ * a later approval of the same version, bin/propose-spec-holds, a retry. It is
+ * closed here (`resolution = 'placed_elsewhere'`, nobody named), so it stops
+ * being shown and counted. A hold that exists and was since RELEASED counts:
+ * it was placed, and QA released it.
+ */
+export async function closeSatisfiedHoldFailures(
+  db: D1Database,
+  tenantId: string,
+  filter: { documentId?: string } = {},
+): Promise<number> {
+  let closed = 0;
+  try {
+    const open = await db
+      .prepare(
+        `SELECT id, document_id, proposals FROM document_hold_failures
+          WHERE tenant_id = ? AND resolved_at IS NULL${filter.documentId ? ' AND document_id = ?' : ''}
+          LIMIT 200`,
+      )
+      .bind(...(filter.documentId ? [tenantId, filter.documentId] : [tenantId]))
+      .all<{ id: string; document_id: string; proposals: string }>();
+    for (const f of open.results ?? []) {
+      const proposals = parseProposals(f.proposals);
+      if (proposals.length === 0) continue;
+      const existing = await db
+        .prepare(`SELECT source, source_key FROM document_holds WHERE document_id = ? AND source_key IS NOT NULL`)
+        .bind(f.document_id)
+        .all<{ source: string; source_key: string }>();
+      const have = new Set((existing.results ?? []).map((h) => `${h.source}|${h.source_key}`));
+      if (!proposals.every((p) => have.has(`${p.source}|${p.source_key}`))) continue;
+      const res = await db
+        .prepare(
+          `UPDATE document_hold_failures
+              SET resolved_at = datetime('now'), resolution = 'placed_elsewhere'
+            WHERE id = ? AND resolved_at IS NULL`,
+        )
+        .bind(f.id)
+        .run();
+      if (res.meta?.changes) closed++;
+    }
+  } catch (err) {
+    console.error('[holds] closing satisfied hold failures failed:', err instanceof Error ? err.message : String(err));
+  }
+  return closed;
+}
+
 /** Holds that should exist and do not, newest first. */
 export async function listOpenHoldFailures(
   db: D1Database,
   tenantId: string,
   filter: { documentId?: string } = {},
 ): Promise<ApiHoldFailure[]> {
+  await closeSatisfiedHoldFailures(db, tenantId, filter);
   const res = await db
     .prepare(
       `SELECT f.id, f.document_id, f.document_version, f.proposals, f.error, f.created_at, d.title AS document_title
@@ -1122,6 +1215,7 @@ export async function listOpenHoldFailures(
 }
 
 export async function countOpenHoldFailures(db: D1Database, tenantId: string): Promise<number> {
+  await closeSatisfiedHoldFailures(db, tenantId);
   const row = await db
     .prepare('SELECT COUNT(*) AS n FROM document_hold_failures WHERE tenant_id = ? AND resolved_at IS NULL')
     .bind(tenantId)
@@ -1142,7 +1236,7 @@ export async function retryHoldFailure(
   db: D1Database,
   apiKey: string | undefined,
   args: { tenantId: string; failureId: string; user: Actor; clientIp: string | null; appUrl?: string },
-): Promise<{ placed: number; already_held: number }> {
+): Promise<HoldRetryResponse> {
   const row = await db
     .prepare(
       `SELECT f.*, d.title AS document_title, d.supplier_id, d.document_type_id, d.status
@@ -1167,14 +1261,40 @@ export async function retryHoldFailure(
     queueItemId: row.queue_item_id,
     approvedBy: row.approved_by,
   };
-  const placed = await writeAutomaticHolds(db, ctx, proposals);
+  const placed = await writeAutomaticHolds(db, ctx, proposals, new Map(), { keepFailuresOpen: true });
+
+  // WHAT BECAME OF THE REST, SAID TRUTHFULLY (C-092). A hold that was not
+  // placed now already exists: it is either still on, or it was placed and QA
+  // RELEASED it since -- and then the certificate is NOT on hold, and saying
+  // "already on hold" would be false.
+  const existing = await db
+    .prepare(
+      `SELECT h.source, h.source_key, h.reason, h.released_at, u.name AS released_by_name
+         FROM document_holds h LEFT JOIN users u ON u.id = h.released_by
+        WHERE h.document_id = ? AND h.tenant_id = ? AND h.source_key IS NOT NULL`,
+    )
+    .bind(row.document_id, args.tenantId)
+    .all<{ source: string; source_key: string; reason: string; released_at: string | null; released_by_name: string | null }>();
+  const byKey = new Map((existing.results ?? []).map((h) => [`${h.source}|${h.source_key}`, h]));
+  const placedKeys = new Set<string>();
+  // `placed` rows carry no key; anything not released and present is "on hold".
+  const released: HoldRetryResponse['released'] = [];
+  let alreadyHeld = 0;
+  for (const p of proposals) {
+    const h = byKey.get(`${p.source}|${p.source_key}`);
+    if (!h) continue;
+    if (h.released_at) released.push({ reason: h.reason, released_by_name: h.released_by_name, released_at: h.released_at });
+    else placedKeys.add(`${p.source}|${p.source_key}`);
+  }
+  alreadyHeld = Math.max(0, placedKeys.size - placed.length);
+  const resolution = placed.length > 0 ? 'placed' : alreadyHeld > 0 ? 'already_held' : 'released_earlier';
   const res = await db
     .prepare(
       `UPDATE document_hold_failures
           SET resolved_at = datetime('now'), resolved_by = ?, resolution = ?
         WHERE id = ? AND tenant_id = ? AND resolved_at IS NULL`,
     )
-    .bind(args.user.id, placed.length > 0 ? 'placed' : 'already_held', row.id, args.tenantId)
+    .bind(args.user.id, resolution, row.id, args.tenantId)
     .run();
   if (!res.meta?.changes) throw new ConflictError('This has already been retried.');
   await logAudit(
@@ -1184,7 +1304,7 @@ export async function retryHoldFailure(
     'document.hold_place_retried',
     'document',
     row.document_id,
-    JSON.stringify({ failure_id: row.id, placed: placed.map((p) => p.id), already_held: proposals.length - placed.length }),
+    JSON.stringify({ failure_id: row.id, placed: placed.map((p) => p.id), already_held: alreadyHeld, released_earlier: released, resolution }),
     args.clientIp,
   );
   await notifyQaOfHolds(
@@ -1202,5 +1322,14 @@ export async function retryHoldFailure(
     },
     placed,
   );
-  return { placed: placed.length, already_held: proposals.length - placed.length };
+  const title = row.document_title || 'The certificate';
+  const parts: string[] = [];
+  if (placed.length > 0) parts.push(`${title} is now on hold.`);
+  if (alreadyHeld > 0 && placed.length === 0) parts.push(`${title} was already on hold for that result. Nothing more was needed.`);
+  for (const r of released) {
+    parts.push(
+      `This hold was placed and later released${r.released_by_name ? ` by ${r.released_by_name}` : ''} on ${String(r.released_at).slice(0, 10)}; nothing was placed. ${title} is not on hold for that result.`,
+    );
+  }
+  return { placed: placed.length, already_held: alreadyHeld, released, message: parts.join(' ') || 'Nothing was placed.' };
 }

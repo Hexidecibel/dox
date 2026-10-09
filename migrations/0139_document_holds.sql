@@ -102,7 +102,10 @@
 --     An automatic hold is placed after an approval has already happened, so a
 --     failure to place it cannot undo the approval; it must not be quiet
 --     either. One row per (document, version) whose automatic holds could not
---     be written, with the proposals as they were computed (`proposals`, JSON:
+--     be written (ONE OPEN ROW per document and version:
+--     `idx_document_hold_failures_one_open`, so an approval that fails again
+--     adds to the open row instead of opening a second and mailing QA again),
+--     with the proposals as they were computed (`proposals`, JSON:
 --     source, source_key, reason, detail), so a retry places exactly those,
 --     idempotently, against `idx_document_holds_auto_once`. `resolved_at` /
 --     `resolved_by` are stamped by the retry; an unresolved row is shown on
@@ -234,3 +237,7 @@ CREATE TABLE IF NOT EXISTS document_hold_failures (
 
 CREATE INDEX IF NOT EXISTS idx_document_hold_failures_open ON document_hold_failures(tenant_id, resolved_at);
 CREATE INDEX IF NOT EXISTS idx_document_hold_failures_document ON document_hold_failures(document_id, resolved_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_hold_failures_one_open
+  ON document_hold_failures(document_id, document_version)
+  WHERE resolved_at IS NULL;

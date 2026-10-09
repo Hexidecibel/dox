@@ -41,7 +41,7 @@ import { judgeOrderDocumentLine, type OrderDocumentLineFacts } from '../../share
 import { compareToLimit, parseMeasuredValue } from '../../shared/specCheck';
 import { specResultsWithConfig } from '../../functions/lib/spec-warnings';
 import { holdResultFromVerdict } from '../../functions/lib/holds';
-import { fileCarriesLot, filePagesOf, holdForLot } from '../../functions/lib/hold-state';
+import { fileCarriesLot, filePagesOf, heldLotOf, holdForLot, lotHoldCovers, type LotLink } from '../../functions/lib/hold-state';
 
 const result = (over: Partial<HoldJudgedResult> = {}): HoldJudgedResult => ({
   verdict: 'out_of_spec',
@@ -442,3 +442,68 @@ describe('which files a hold stops: a file is what leaves (C-084)', () => {
     expect(holdForLot(undefined, 'l1')).toBeNull();
   });
 });
+
+describe('which certificates a LOT hold covers: supplier + lot key + sublot, whatever the product (C-091)', () => {
+  const held = heldLotOf({ lot_id: 'row-1', lot_key: '10426203', sub_lot_code: '03', lot_supplier_id: 'sup-a', document_supplier_id: 'sup-a' });
+  const link = (over: Partial<LotLink> = {}): LotLink => ({
+    lot_id: 'row-2',
+    lot_key: '10426203',
+    sub_lot_code: '03',
+    lot_supplier_id: 'sup-a',
+    document_id: 'd2',
+    document_supplier_id: 'sup-a',
+    ...over,
+  });
+
+  it('another row of the same lot (the product resolved differently) is covered', () => {
+    expect(lotHoldCovers(held, link())).toBe(true);
+    // The no-product row, whose own supplier is whoever printed the number first.
+    expect(lotHoldCovers(held, link({ lot_supplier_id: null }))).toBe(true);
+    expect(lotHoldCovers(held, link({ lot_supplier_id: 'sup-b' }))).toBe(true);
+  });
+
+  it("another supplier's lot with the same number is NOT covered, even on the very same row", () => {
+    expect(lotHoldCovers(held, link({ document_supplier_id: 'sup-b', lot_supplier_id: 'sup-b' }))).toBe(false);
+    expect(lotHoldCovers(held, link({ document_supplier_id: 'sup-b', lot_supplier_id: 'sup-a' }))).toBe(false);
+    expect(lotHoldCovers(held, link({ lot_id: 'row-1', document_supplier_id: 'sup-b' }))).toBe(false);
+  });
+
+  it('a different sublot, or a different key, is a different lot', () => {
+    expect(lotHoldCovers(held, link({ sub_lot_code: '04' }))).toBe(false);
+    expect(lotHoldCovers(held, link({ sub_lot_code: '' }))).toBe(false);
+    expect(lotHoldCovers(held, link({ sub_lot_code: null }))).toBe(false);
+    expect(lotHoldCovers(held, link({ lot_key: '10426204' }))).toBe(false);
+    // No fuzzing: the stored key, as stored.
+    expect(lotHoldCovers(held, link({ lot_key: '10426203 ' }))).toBe(true);
+    expect(lotHoldCovers(held, link({ lot_key: '1042-6203' }))).toBe(false);
+  });
+
+  it('a certificate with no supplier falls back to its lot row; with neither it is covered only on the held row', () => {
+    expect(lotHoldCovers(held, link({ document_supplier_id: null, lot_supplier_id: 'sup-a' }))).toBe(true);
+    expect(lotHoldCovers(held, link({ document_supplier_id: null, lot_supplier_id: 'sup-b' }))).toBe(false);
+    expect(lotHoldCovers(held, link({ document_supplier_id: null, lot_supplier_id: null }))).toBe(false);
+    expect(lotHoldCovers(held, link({ lot_id: 'row-1', document_supplier_id: null, lot_supplier_id: null }))).toBe(true);
+  });
+
+  it('a row with an empty lot key matches nothing but itself', () => {
+    const blank = heldLotOf({ lot_id: 'row-9', lot_key: '', sub_lot_code: '', lot_supplier_id: 'sup-a', document_supplier_id: 'sup-a' });
+    expect(lotHoldCovers(blank, link({ lot_key: '', sub_lot_code: '' }))).toBe(false);
+    expect(lotHoldCovers(blank, link({ lot_key: null, sub_lot_code: '' }))).toBe(false);
+    expect(lotHoldCovers(blank, link({ lot_id: 'row-9', lot_key: '', sub_lot_code: '' }))).toBe(true);
+  });
+
+  it('a hold whose supplier nobody recorded covers only the row it is on', () => {
+    const unknown = heldLotOf({ lot_id: 'row-1', lot_key: '10426203', sub_lot_code: '03', lot_supplier_id: null, document_supplier_id: null });
+    expect(unknown.supplier_id).toBeNull();
+    expect(lotHoldCovers(unknown, link())).toBe(false);
+    expect(lotHoldCovers(unknown, link({ lot_id: 'row-1' }))).toBe(true);
+    expect(lotHoldCovers(unknown, link({ lot_id: 'row-1', document_supplier_id: null }))).toBe(true);
+  });
+
+  it("whose lot it is: the placing certificate's supplier, else the row's", () => {
+    expect(heldLotOf({ lot_id: 'r', lot_key: 'k', sub_lot_code: null, lot_supplier_id: 'sup-row', document_supplier_id: 'sup-doc' })).toEqual({ lot_id: 'r', lot_key: 'k', sub_lot_code: '', supplier_id: 'sup-doc' });
+    expect(heldLotOf({ lot_id: 'r', lot_key: ' k ', lot_supplier_id: 'sup-row', document_supplier_id: null }).supplier_id).toBe('sup-row');
+    expect(heldLotOf({ lot_id: 'r', lot_key: ' k ' }).lot_key).toBe('k');
+  });
+});
+

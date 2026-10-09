@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 150 tables, 2 views, 277 indexes, 48 triggers.
+Objects: 150 tables, 2 views, 278 indexes, 48 triggers.
 
 ## Core documents & versions
 
@@ -1613,7 +1613,7 @@ Indexes: `idx_document_export_links_sender`, `idx_document_export_links_tenant`,
   resolution TEXT
 ```
 
-Indexes: `idx_document_hold_failures_document`, `idx_document_hold_failures_open`
+Indexes: `idx_document_hold_failures_document`, `idx_document_hold_failures_one_open`, `idx_document_hold_failures_open`
 
 ### `document_holds`
 

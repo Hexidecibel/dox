@@ -20,9 +20,13 @@
 #                                 # even though it is stamped. For a file that
 #                                 # was AMENDED after a local database ran its
 #                                 # first cut and before it was applied
-#                                 # anywhere else. The file must be safe to run
-#                                 # over its own first cut (IF NOT EXISTS, new
-#                                 # columns only); this flag checks nothing.
+#                                 # anywhere else. A one-line
+#                                 # `ALTER TABLE t ADD COLUMN c ...;` whose
+#                                 # column is already there is LEFT OUT (and
+#                                 # said), since SQLite cannot add a column
+#                                 # "if not exists". Everything else in the
+#                                 # file must be safe to run over its own
+#                                 # first cut (IF NOT EXISTS, guarded UPDATEs).
 #                                 # Refused with --remote: a migration applied
 #                                 # to production is never amended.
 #   ./bin/migrate --persist-to DIR [--only ...]
@@ -212,6 +216,25 @@ if [ "${#ONLY[@]}" -gt 0 ]; then
     fi
     if is_applied "$name"; then
       echo "  already applied; --reapply given, running it again: $name"
+      # Leave out each ADD COLUMN whose column the database already has.
+      REAPPLY_FILE="$(mktemp --suffix=.sql)"
+      cp "$path" "$REAPPLY_FILE"
+      while IFS=$'\t' read -r tbl col; do
+        [ -n "$tbl" ] || continue
+        has="$(npx wrangler d1 execute "$DB" $PERSIST_FLAG --json \
+          --command="SELECT COUNT(*) AS n FROM pragma_table_info('$tbl') WHERE name = '$col';" 2>/dev/null \
+          | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const m=/\"n\":\s*(\d+)/.exec(s);console.log(m?m[1]:'0')})")"
+        if [ "$has" != "0" ]; then
+          echo "  $tbl.$col is already there; leaving its ADD COLUMN out"
+          node -e "
+            const fs=require('fs');const [f,t,c]=process.argv.slice(1);
+            const re=new RegExp('^\\\\s*ALTER\\\\s+TABLE\\\\s+'+t+'\\\\s+ADD\\\\s+COLUMN\\\\s+'+c+'\\\\b.*;\\\\s*$','i');
+            fs.writeFileSync(f, fs.readFileSync(f,'utf8').split('\n').filter(l=>!re.test(l)).join('\n'));
+          " "$REAPPLY_FILE" "$tbl" "$col"
+        fi
+      done < <(grep -iE '^[[:space:]]*ALTER[[:space:]]+TABLE[[:space:]]+[A-Za-z_]+[[:space:]]+ADD[[:space:]]+COLUMN[[:space:]]+[A-Za-z_]+' "$path" \
+               | sed -E 's/^[[:space:]]*ALTER[[:space:]]+TABLE[[:space:]]+([A-Za-z_]+)[[:space:]]+ADD[[:space:]]+COLUMN[[:space:]]+([A-Za-z_]+).*/\1\t\2/I')
+      path="$REAPPLY_FILE"
     fi
     echo "Applying: $name"
     if ! d1_exec_file "$path"; then

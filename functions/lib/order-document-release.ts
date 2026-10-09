@@ -64,14 +64,18 @@ import {
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from './permissions';
 import { auditQaRelease, canReleaseQa } from './sharing-rule';
 import {
-  countDocumentLinesBehind,
   loadJudgedLinesById,
   loadOrderDocumentRow,
   releaseBlockedReason,
   type JudgedOrderDocument,
   type OrderDocumentRow,
 } from './order-documents';
-import { buildOrderDocumentsEmail, loadOrderSends, ORDER_SEND_MAX_SUBJECT_CHARS } from './order-send';
+import {
+  buildOrderDocumentsEmail,
+  loadOrderSends,
+  markOrderDeliveredIfEverythingTravelled,
+  ORDER_SEND_MAX_SUBJECT_CHARS,
+} from './order-send';
 import { notifyRequesterOfDecision, type RequesterNoticeLine } from './order-document-notices';
 import type { OrderWriteRow } from './order-items';
 import {
@@ -288,53 +292,18 @@ export async function recoverUnfinishedRelease(
 }
 
 /**
- * The order is delivered once QA's release was the last thing outstanding:
- * the latest send went in full, every COA line's certificate was in it, and
- * no document line is still waiting, missing, expired, locked or refused.
+ * The order is delivered once QA's release was the last thing outstanding.
+ * THE SAME QUESTION THE SEND PATH ASKS (C-093, `everyOrderLineTravelled`):
+ * every COA line's certificate went on some successful send, and no document
+ * line is still waiting, missing, expired, locked, held or refused.
+ *
+ * It used to ask whether everything went on the LATEST send, so an order whose
+ * certificates went on one send and whose document lines were asked of QA on a
+ * later one stayed undelivered for good after QA released them.
  */
 async function markDeliveredAfterRelease(db: D1Database, order: OrderWriteRow): Promise<string> {
   if (order.status === 'delivered') return order.status;
-  const latest = await db
-    .prepare(
-      `SELECT id, status FROM order_sends
-        WHERE tenant_id = ? AND order_id = ? AND (kind IS NULL OR kind = 'qa_request')
-        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-    )
-    .bind(order.tenant_id, order.id)
-    .first<{ id: string; status: string }>();
-  if (!latest || latest.status !== 'sent') return order.status;
-  if ((await countDocumentLinesBehind(db, order.tenant_id, order.id, latest.id)) > 0) return order.status;
-
-  const items = await db
-    .prepare(
-      `SELECT oi.coa_document_id AS document_id, d.status AS status
-         FROM order_items oi LEFT JOIN documents d ON d.id = oi.coa_document_id
-        WHERE oi.order_id = ?`,
-    )
-    .bind(order.id)
-    .all<{ document_id: string | null; status: string | null }>();
-  const lines = items.results ?? [];
-  if (lines.some((l) => !l.document_id || l.status !== 'active')) return order.status;
-  if (lines.length > 0) {
-    const files = await db
-      .prepare('SELECT document_ids FROM order_send_files WHERE send_id = ? AND sent_ok = 1')
-      .bind(latest.id)
-      .all<{ document_ids: string }>();
-    const went = new Set<string>();
-    for (const f of files.results ?? []) {
-      try {
-        for (const id of JSON.parse(f.document_ids) as unknown[]) if (typeof id === 'string') went.add(id);
-      } catch {
-        // An unreadable row proves nothing went.
-      }
-    }
-    if (lines.some((l) => !went.has(l.document_id as string))) return order.status;
-  }
-  await db
-    .prepare(`UPDATE orders SET status = 'delivered', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`)
-    .bind(order.id, order.tenant_id)
-    .run();
-  return 'delivered';
+  return (await markOrderDeliveredIfEverythingTravelled(db, order.tenant_id, order.id)) ?? order.status;
 }
 
 /**

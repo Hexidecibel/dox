@@ -1976,9 +1976,11 @@ describe('a LOT hold is on the lot row, on every certificate that carries it (C-
     expect(await audits('document.held_lot_certificate_arrived', a.id)).toEqual([]);
   });
 
-  it('end to end: a second approval for a held lot, through the Review Queue route, is held and QA hears', async () => {
+  it('end to end through the Review Queue route: the same lot read under THREE product names is one held lot; another supplier\'s is not (C-091)', async () => {
     const admin = person('org_admin');
-    const queued = async (name: string) => {
+    const otherSupplier = generateTestId();
+    await db.prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)').bind(otherSupplier, seed.tenantId, 'Lakeshore Dairy Cooperative', `lakeshore-${otherSupplier.slice(0, 5)}`).run();
+    const queued = async (name: string, supplier: string) => {
       const queueId = generateTestId();
       const key = `pending/test/${queueId}/${name}.pdf`;
       await files.put(key, new TextEncoder().encode(`%PDF-1.4 ${queueId}`));
@@ -1988,31 +1990,175 @@ describe('a LOT hold is on the lot row, on every certificate that carries it (C-
              status, processing_status, supplier_id, ai_fields, extracted_text, source, created_by)
            VALUES (?, ?, ?, ?, ?, 20, 'application/pdf', 'pending', 'ready', ?, '{}', 'text', 'import', ?)`,
         )
-        .bind(queueId, seed.tenantId, types.coa, key, `${name}.pdf`, supplierId, seed.orgAdminId)
+        .bind(queueId, seed.tenantId, types.coa, key, `${name}.pdf`, supplier, seed.orgAdminId)
         .run();
       return queueId;
     };
-    const approve = async (queueId: string, title: string) => {
-      const res = (await queuePut(queueId, { status: 'approved', fields: { title, lot_number: 'ARRIVAL-LOT-1' }, supplier_id: supplierId }, admin)) as { status: number; body: any };
+    const LOT = 'VARIANT-LOT-77';
+    /** One flat approval of a certificate for LOT, with the product as the extraction read it. */
+    const approve = async (title: string, product: string | null, supplier = supplierId) => {
+      const fields: Record<string, string> = { title, lot_number: LOT };
+      if (product) fields.product_name = product;
+      const res = (await queuePut(await queued(title.replace(/\W+/g, '-'), supplier), { status: 'approved', fields, supplier_id: supplier }, admin)) as { status: number; body: any };
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       return res.body.document.id as string;
     };
+    const lotRowOf = async (doc: string) =>
+      (await db
+        .prepare('SELECT l.id, l.product_id, l.lot_key, l.sub_lot_code, l.supplier_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id WHERE dl.document_id = ?')
+        .bind(doc)
+        .first<{ id: string; product_id: string | null; lot_key: string; sub_lot_code: string; supplier_id: string | null }>())!;
+
     stubMail();
-    const first = await approve(await queued('arrival-one'), 'Arrival one');
-    const lot = await db.prepare('SELECT lot_id FROM document_lots WHERE document_id = ?').bind(first).first<{ lot_id: string }>();
-    expect(lot, 'the approve did not link a lot row').toBeTruthy();
-    const id = await hold(first, 'Held before the second arrives', lot!.lot_id);
+    // The same certificate, read twice: once with a product name, once with none.
+    const a = await approve('Variant scan one', 'Sweet Cream Butter');
+    const b = await approve('Variant scan two', null);
+    const rowA = await lotRowOf(a);
+    const rowB = await lotRowOf(b);
+    // THE PREMISE: ordinary extraction noise makes these DIFFERENT `lots` rows
+    // of one lot. If they ever become one row this test stops proving anything.
+    expect(rowA.id).not.toBe(rowB.id);
+    expect(rowA.product_id).toBeTruthy();
+    expect(rowB.product_id).toBeNull();
+    expect([rowA.lot_key, rowA.sub_lot_code]).toEqual([rowB.lot_key, rowB.sub_lot_code]);
+    for (const d of [a, b]) {
+      const ok = await keyDownload(d);
+      expect(ok.status).toBe(200);
+      await ok.arrayBuffer();
+    }
+
+    const id = await hold(a, 'Lot failed, held everywhere', rowA.id);
     vi.unstubAllGlobals();
 
+    // The no-product scan is the same lot from the same supplier: held.
+    const refusedB = await keyDownload(b);
+    expect(refusedB.status).toBe(403);
+    expect(await readJson(refusedB)).toMatchObject({ reason: 'held', error: `On hold (lot ${LOT}): Lot failed, held everywhere` });
+    const pageB = (await holdsOf('qa', b)).body;
+    expect(pageB.active).toEqual([]);
+    expect(pageB.also_held_by).toHaveLength(1);
+    expect(pageB.also_held_by[0]).toMatchObject({ id, document_id: a, document_title: 'Variant scan one', reach: 'lot' });
+    // Its own lot row shows as held, though the hold names another row.
+    expect(pageB.lots.map((l) => l.hold?.id ?? null)).toEqual([id]);
+
+    // A THIRD read arrives after the hold, under yet another product name.
     const mails = stubMail();
-    const second = await approve(await queued('arrival-two'), 'Arrival two');
-    const lot2 = await db.prepare('SELECT lot_id FROM document_lots WHERE document_id = ?').bind(second).first<{ lot_id: string }>();
-    // The same lot number from the same supplier is the same lot row.
-    expect(lot2?.lot_id).toBe(lot!.lot_id);
-    expect((await keyDownload(second)).status).toBe(403);
+    const c = await approve('Variant scan three', 'Butter Sweet Cream 25kg');
+    const rowC = await lotRowOf(c);
+    expect(new Set([rowA.id, rowB.id, rowC.id]).size).toBe(3);
+    expect((await keyDownload(c)).status).toBe(403);
     const told = mails.filter((m) => /arrived for a lot that is on hold/.test(m.subject));
     expect(told).toHaveLength(1);
-    expect((await audits('document.held_lot_certificate_arrived', second))[0].details.hold_ids).toEqual([id]);
+    expect(told[0].html).toContain('held from Variant scan one');
+    expect((await audits('document.held_lot_certificate_arrived', c))[0].details.hold_ids).toEqual([id]);
+
+    // ANOTHER SUPPLIER's lot with the same number is not this lot. With no
+    // product it even shares the no-product ROW with scan two -- and stays free.
+    const d = await approve('Other supplier same number', null, otherSupplier);
+    const rowD = await lotRowOf(d);
+    expect(rowD.id).toBe(rowB.id);
+    const free = await keyDownload(d);
+    expect(free.status).toBe(200);
+    await free.arrayBuffer();
+    expect((await holdsOf('qa', d)).body.also_held_by).toEqual([]);
+    expect(await audits('document.held_lot_certificate_arrived', d)).toEqual([]);
+    // And one it reads under a product name, on its own row.
+    const e = await approve('Other supplier with a product', 'Sweet Cream Butter', otherSupplier);
+    const freeE = await keyDownload(e);
+    expect(freeE.status).toBe(200);
+    await freeE.arrayBuffer();
+
+    // Every exit, not only the key: an order and a ZIP.
+    const order = await newOrder();
+    await pick(order, [b, c, d]);
+    const plan = await preview(order, 'org_admin');
+    expect(plan.lines_not_sent.map((l) => [l.document_id, l.sharing_refusal]).sort()).toEqual([[b, 'held'], [c, 'held']].sort());
+    expect(plan.files.flatMap((f) => f.document_ids)).toEqual([d]);
+    const zip = await exportZip(as('org_admin', 'http://localhost/api/document-exports/zip', { method: 'POST', body: JSON.stringify({ document_ids: [a, b, c, d, e] }) }));
+    expect(zip.status).toBe(200);
+    expect((zip.headers.get('X-Export-Refused-Ids') ?? '').split(',').sort()).toEqual([`${a}:held`, `${b}:held`, `${c}:held`].sort());
+    await zip.arrayBuffer();
+
+    // The lot is held ONCE: a second person's hold from another scan's row is
+    // refused, naming the first. The other supplier may hold its own lot.
+    const again = await place('org_admin', c, { reason: 'Me too', lot_id: rowC.id });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toContain('from Variant scan one');
+    const theirs = await place('org_admin', d, { reason: 'Their own lot', lot_id: rowD.id });
+    expect(theirs.status).toBe(201);
+    // ...and THAT hold does not reach scan two, though they share the row.
+    expect((await holdsOf('qa', b)).body.also_held_by.map((h) => h.id)).toEqual([id]);
+    await lift(theirs.body.hold.id);
+
+    // One release frees all three.
+    await lift(id);
+    for (const doc of [a, b, c]) {
+      const ok = await keyDownload(doc);
+      expect(ok.status, doc).toBe(200);
+      await ok.arrayBuffer();
+    }
+  });
+
+  it('a certificate filed with no supplier is covered only on the very lot record the hold is on', async () => {
+    const a = await makeDocument(types.coa, 'Supplier known', { lots: 1 });
+    const row = await db.prepare('SELECT lot_key, sub_lot_code, lot_number FROM lots WHERE id = ?').bind(a.lotIds[0]).first<{ lot_key: string; sub_lot_code: string; lot_number: string }>();
+    // Same key and sublot, another row, and a certificate that names no supplier.
+    const other = generateTestId();
+    await db
+      .prepare(`INSERT INTO lots (id, tenant_id, supplier_id, product_id, lot_number, lot_key, sub_lot_code) VALUES (?, ?, NULL, NULL, ?, ?, ?)`)
+      .bind(other, seed.tenantId, row!.lot_number, row!.lot_key, row!.sub_lot_code)
+      .run()
+      .catch(async () => {
+        // The no-product row for this key already exists (the fixture's own): use a product row instead.
+        const productId = generateTestId();
+        await db.prepare(`INSERT INTO products (id, tenant_id, name, slug, created_at, updated_at) VALUES (?, ?, 'Nameless', ?, datetime('now'), datetime('now'))`).bind(productId, seed.tenantId, `p-${productId.slice(0, 8)}`).run();
+        await db
+          .prepare(`INSERT INTO lots (id, tenant_id, supplier_id, product_id, lot_number, lot_key, sub_lot_code) VALUES (?, ?, NULL, ?, ?, ?, ?)`)
+          .bind(other, seed.tenantId, productId, row!.lot_number, row!.lot_key, row!.sub_lot_code)
+          .run();
+      });
+    const nobody = await makeDocument(types.coa, 'No supplier recorded');
+    await db.prepare('UPDATE documents SET supplier_id = NULL WHERE id = ?').bind(nobody.id).run();
+    await db.prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)').bind(generateTestId(), nobody.id, other).run();
+    const sameRow = await makeDocument(types.coa, 'No supplier, same record');
+    await db.prepare('UPDATE documents SET supplier_id = NULL WHERE id = ?').bind(sameRow.id).run();
+    await db.prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)').bind(generateTestId(), sameRow.id, a.lotIds[0]).run();
+
+    const id = await hold(a.id, 'Supplier-scoped', a.lotIds[0]);
+    // Nothing says whose lot the other record is: not covered.
+    const free = await keyDownload(nobody.id);
+    expect(free.status).toBe(200);
+    await free.arrayBuffer();
+    // On the held record itself, cannot tell tightens.
+    expect((await keyDownload(sameRow.id)).status).toBe(403);
+    await lift(id);
+  });
+
+  it('cost: a 50-certificate ZIP is still a handful of statements with lot holds in force', async () => {
+    const docs: MadeDoc[] = [];
+    for (let i = 0; i < 50; i++) docs.push(await makeDocument(types.coa, `Bulk COA ${i}`, { lots: 1 }));
+    const h1 = await hold(docs[7].id, 'One of fifty', docs[7].lotIds[0]);
+    const h2 = await hold(docs[31].id, 'Another of fifty', docs[31].lotIds[0]);
+    let n = 0;
+    const counting = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            n++;
+            return target.prepare(sql);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as D1Database;
+    const judged = await judgeSharedFiles(counting, seed.tenantId, docs.map((d, i) => ({ key: `f${i}`, documentIds: [d.id] })), 'zip', { method: 'jwt', canReleaseQa: true });
+    expect([...judged.entries()].filter(([, j]) => j.verdict === 'held').map(([k]) => k).sort()).toEqual(['f31', 'f7']);
+    // Rules, pages, every active hold, and the certificates of the held lot
+    // keys: a fixed handful, whatever the number of certificates.
+    expect(n).toBeLessThanOrEqual(8);
+    await lift(h1);
+    await lift(h2);
   });
 });
 
@@ -2218,6 +2364,92 @@ describe('`delivered` means every line TRAVELLED, not that it could travel now (
   });
 });
 
+describe('one definition of `delivered`: the QA release asks what the send asks (C-093)', () => {
+  it('a certificate that went on an earlier send is not owed again because a later send only asked QA', async () => {
+    const x = await makeDocument(types.coa, 'Went on send one', { lots: 1 });
+    const order = await newOrder();
+    await pick(order, [x.id]);
+    const addLine = async (name: string) => {
+      const pair = await makePair(name);
+      const doc = await makeDocument(types.qa, `${name} guarantee`, { products: [pair.product_id] });
+      const added = await call<OrderDocumentsAddResponse>(
+        addDocuments,
+        as('user', `http://localhost/api/orders/${order}/documents`, { method: 'POST', body: JSON.stringify({ items: [pair], document_type_ids: [types.qa] }), params: { id: order } }),
+      );
+      expect(added.status).toBe(201);
+      expect(added.body.lines[0].document_id).toBe(doc.id);
+      return added.body.lines[0].order_document_id!;
+    };
+    const line1 = await addLine('Delivered item one');
+
+    // Send 1, by a plain user: the certificate is attached, the document waits for QA.
+    const mails = stubMail();
+    const plan1 = await preview(order, 'user');
+    const first = await send(order, 'user', { fingerprint: plan1.fingerprint, recipients: ['buyer@harbor.example'] });
+    expect(first.status).toBe(200);
+    expect(attachedBodies(mails)).toEqual([x.body]);
+    expect(await orderStatus(order)).not.toBe('delivered');
+
+    // A second document is asked for, and the certificate is held meanwhile:
+    // send 2 carries nothing and only asks QA.
+    const line2 = await addLine('Delivered item two');
+    const id = await hold(x.id, 'Held after it went');
+    const plan2 = await preview(order, 'user');
+    expect(plan2.files).toEqual([]);
+    expect(plan2.documents!.only_asks_qa).toBe(true);
+    const second = await send(order, 'user', { fingerprint: plan2.fingerprint, recipients: ['buyer@harbor.example'] });
+    expect(second.status).toBe(200);
+    const kinds = await db.prepare('SELECT kind FROM order_sends WHERE order_id = ? ORDER BY rowid').bind(order).all<{ kind: string | null }>();
+    expect((kinds.results ?? []).map((k) => k.kind)).toEqual([null, 'qa_request']);
+
+    // QA releases both document lines.
+    const targets = [];
+    for (const lineId of [line1, line2]) {
+      const row = await db.prepare('SELECT document_id, pending_send_id FROM order_documents WHERE id = ?').bind(lineId).first<{ document_id: string; pending_send_id: string }>();
+      targets.push({ id: lineId, document_id: row!.document_id, version_number: 1, pending_send_id: row!.pending_send_id });
+    }
+    const released = await call<OrderDocumentsReleaseResponse>(
+      releaseBatch,
+      as('qa', `http://localhost/api/orders/${order}/documents/release`, { method: 'POST', body: JSON.stringify({ lines: targets }), params: { id: order } }),
+    );
+    expect(released.body.released).toHaveLength(2);
+    // The certificate travelled on send 1; both documents were released. It
+    // used to stay undelivered for good: the LATEST send carried no certificate.
+    expect(released.body.order_status).toBe('delivered');
+    expect(await orderStatus(order)).toBe('delivered');
+    await lift(id);
+  });
+
+  it('a certificate that has NEVER gone still keeps the order undelivered after QA releases the documents', async () => {
+    const x = await makeDocument(types.coa, 'Never went', { lots: 1 });
+    const id = await hold(x.id, 'Held from the start');
+    const order = await newOrder();
+    await pick(order, [x.id]);
+    const pair = await makePair('Undelivered item');
+    await makeDocument(types.qa, 'Undelivered guarantee', { products: [pair.product_id] });
+    const added = await call<OrderDocumentsAddResponse>(
+      addDocuments,
+      as('user', `http://localhost/api/orders/${order}/documents`, { method: 'POST', body: JSON.stringify({ items: [pair], document_type_ids: [types.qa] }), params: { id: order } }),
+    );
+    const lineId = added.body.lines[0].order_document_id!;
+    stubMail();
+    const plan = await preview(order, 'user');
+    await send(order, 'user', { fingerprint: plan.fingerprint, recipients: ['buyer@harbor.example'] });
+    const row = await db.prepare('SELECT document_id, pending_send_id FROM order_documents WHERE id = ?').bind(lineId).first<{ document_id: string; pending_send_id: string }>();
+    const released = await call<OrderDocumentsReleaseResponse>(
+      releaseBatch,
+      as('qa', `http://localhost/api/orders/${order}/documents/release`, {
+        method: 'POST',
+        body: JSON.stringify({ lines: [{ id: lineId, document_id: row!.document_id, version_number: 1, pending_send_id: row!.pending_send_id }] }),
+        params: { id: order },
+      }),
+    );
+    expect(released.body.released).toHaveLength(1);
+    expect(await orderStatus(order)).not.toBe('delivered');
+    await lift(id);
+  });
+});
+
 describe('a hold that could NOT be placed is not quiet (C-087)', () => {
   const breakHolds = () =>
     db.prepare(`CREATE TRIGGER test_break_auto_holds BEFORE INSERT ON document_holds WHEN NEW.source != 'person' BEGIN SELECT RAISE(ABORT, 'simulated hold write failure'); END`).run();
@@ -2225,7 +2457,7 @@ describe('a hold that could NOT be placed is not quiet (C-087)', () => {
   const failuresOf = async (documentId: string) =>
     (await db.prepare('SELECT * FROM document_hold_failures WHERE document_id = ? ORDER BY rowid').bind(documentId).all<Record<string, any>>()).results ?? [];
   const retry = (who: Who, failureId: string) =>
-    call<{ placed: number; already_held: number }>(holdRetryRoute.onRequestPost, as(who, `http://localhost/api/holds/failures/${failureId}/retry`, { method: 'POST', params: { id: failureId } }));
+    call<{ placed: number; already_held: number; released: unknown[]; message: string }>(holdRetryRoute.onRequestPost, as(who, `http://localhost/api/holds/failures/${failureId}/retry`, { method: 'POST', params: { id: failureId } }));
 
   async function approveTwo(a: MadeDoc, b: MadeDoc) {
     await registerAndNotifyForApproval(
@@ -2289,7 +2521,7 @@ describe('a hold that could NOT be placed is not quiet (C-087)', () => {
     const mails2 = stubMail();
     const done = await retry('user', fa[0].id);
     expect(done.status).toBe(200);
-    expect(done.body).toEqual({ placed: 1, already_held: 0 });
+    expect(done.body).toMatchObject({ placed: 1, already_held: 0, released: [], message: 'Failed hold A is now on hold.' });
     const held = await holdRows(a.id);
     expect(held).toHaveLength(1);
     expect(held[0]).toMatchObject({ source: 'spec_critical', source_key: 'v1:limit:record[0]::t0r0', lot_id: a.lotIds[0] });
@@ -2302,7 +2534,42 @@ describe('a hold that could NOT be placed is not quiet (C-087)', () => {
     expect(await holdRows(a.id)).toHaveLength(1);
   });
 
-  it('a retry is idempotent: a hold placed in the meantime is not placed twice', async () => {
+  it('ONE open failure per certificate version: three failing approvals are one row and one mail (C-092)', async () => {
+    const a = await makeDocument(types.coa, 'Fails three times A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Fails three times B', { lots: 1 });
+    await breakHolds();
+    const mails = stubMail();
+    try {
+      await approveTwo(a, b);
+      await approveTwo(a, b);
+      // The third time a SECOND result fails too: it is added to the open row.
+      await registerAndNotifyForApproval(
+        db,
+        'test-resend-key',
+        { tenantId: seed.tenantId, tenantName: 'Test Corp', queueItemId: 'q-fail', supplierId, supplierName: 'Northfield Creamery', documentTypeId: null, approvedBy: seed.userId, appUrl: 'http://localhost' },
+        [verdict({ scope: 'record[0]' }), verdict({ scope: 'record[0]', target: { kind: 'table', table_index: 0, row_index: 4, table_name: 'micro' }, test_name_raw: 'E. coli' })],
+        [LIMIT],
+        [{ documentId: a.id, title: a.title, recordIndex: 0, versionNumber: 1 }],
+      );
+    } finally {
+      await mendHolds();
+    }
+    const rows = await failuresOf(a.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].resolved_at).toBeNull();
+    expect(JSON.parse(rows[0].proposals).map((p: { source_key: string }) => p.source_key).sort()).toEqual(['v1:limit:record[0]::t0r0', 'v1:limit:record[0]::t0r4']);
+    // QA mailed once per OPEN failure, not once per failing approval.
+    const told = mails.filter((m) => m.subject.includes('Fails three times A') && /was NOT/.test(m.subject));
+    expect(told).toHaveLength(1);
+    // The database refuses a second open row outright.
+    await expect(
+      db.prepare(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals) VALUES ('dup-open', ?, ?, 1, '[]')`).bind(seed.tenantId, a.id).run(),
+    ).rejects.toThrow(/UNIQUE/);
+    // A NEW version may have its own.
+    await db.prepare(`INSERT INTO document_hold_failures (id, tenant_id, document_id, document_version, proposals, resolved_at) VALUES (?, ?, ?, 2, '[]', datetime('now'))`).bind(generateTestId(), seed.tenantId, a.id).run();
+  });
+
+  it('an open failure closes by itself once the hold it describes exists, placed by any path', async () => {
     const a = await makeDocument(types.coa, 'Failed then held A', { lots: 1 });
     const b = await makeDocument(types.coa, 'Failed then held B', { lots: 1 });
     await breakHolds();
@@ -2312,14 +2579,85 @@ describe('a hold that could NOT be placed is not quiet (C-087)', () => {
     } finally {
       await mendHolds();
     }
+    expect((await failuresOf(a.id))[0].resolved_at).toBeNull();
     // The same result is judged again and this time the hold is written.
     await approveTwo(a, b);
     expect(await holdRows(a.id)).toHaveLength(1);
     const [failure] = await failuresOf(a.id);
-    const done = await retry('org_admin', failure.id);
-    expect(done.body).toEqual({ placed: 0, already_held: 1 });
+    expect(failure).toMatchObject({ resolution: 'placed_elsewhere', resolved_by: null });
+    expect(failure.resolved_at).toBeTruthy();
+    // No longer shown, counted, or retryable.
+    expect((await holdsOf('user', a.id)).body.failures).toEqual([]);
+    expect((await listHolds('user')).body.failures.map((f) => f.document_id)).not.toContain(a.id);
+    expect((await retry('org_admin', failure.id)).status).toBe(409);
     expect(await holdRows(a.id)).toHaveLength(1);
+  });
+
+  it('a hold placed OUTSIDE the portal (the script) closes the failure the next time anybody looks', async () => {
+    const a = await makeDocument(types.coa, 'Script placed A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Script placed B', { lots: 1 });
+    await breakHolds();
+    stubMail();
+    try {
+      await approveTwo(a, b);
+    } finally {
+      await mendHolds();
+    }
+    const [failure] = await failuresOf(a.id);
+    const key = JSON.parse(failure.proposals)[0].source_key as string;
+    // What bin/propose-spec-holds --apply writes: a bare row, no application code.
+    await db
+      .prepare(`INSERT INTO document_holds (id, tenant_id, document_id, reason, source, source_key, document_version) VALUES (?, ?, ?, 'Placed by the script', 'spec_critical', ?, 1)`)
+      .bind(generateTestId(), seed.tenantId, a.id, key)
+      .run();
+    expect((await listHolds('user', '?count=1')).body.failures).toBe((await db.prepare('SELECT COUNT(*) AS n FROM document_hold_failures WHERE tenant_id = ? AND resolved_at IS NULL').bind(seed.tenantId).first<{ n: number }>())!.n);
+    expect((await failuresOf(a.id))[0].resolution).toBe('placed_elsewhere');
+    // B's is still open: nothing placed its hold.
+    expect((await failuresOf(b.id))[0].resolved_at).toBeNull();
+  });
+
+  it('a retry says what really happened: already on hold, or placed and since RELEASED', async () => {
+    const a = await makeDocument(types.coa, 'Truthful retry A', { lots: 1 });
+    const b = await makeDocument(types.coa, 'Truthful retry B', { lots: 1 });
+    await breakHolds();
+    stubMail();
+    try {
+      await approveTwo(a, b);
+    } finally {
+      await mendHolds();
+    }
+    const [fa] = await failuresOf(a.id);
+    const [fb] = await failuresOf(b.id);
+    const insertHold = (doc: string, key: string, released: boolean) =>
+      db
+        .prepare(
+          `INSERT INTO document_holds (id, tenant_id, document_id, reason, source, source_key, document_version, released_by, released_at, release_reason)
+           VALUES (?, ?, ?, 'Critical result out of spec: Coliform 40 CFU/g.', 'spec_critical', ?, 1, ?, ?, ?)`,
+        )
+        .bind(generateTestId(), seed.tenantId, doc, key, released ? qaUserId : null, released ? '2026-10-07 09:30:00' : null, released ? 'Retest clean' : null)
+        .run();
+
+    // A: the hold is there and still on.
+    await insertHold(a.id, JSON.parse(fa.proposals)[0].source_key, false);
+    const still = await retry('user', fa.id);
+    expect(still.status).toBe(200);
+    expect(still.body).toMatchObject({ placed: 0, already_held: 1, released: [] });
+    expect(still.body.message).toBe('Truthful retry A was already on hold for that result. Nothing more was needed.');
     expect((await failuresOf(a.id))[0].resolution).toBe('already_held');
+
+    // B: the hold was placed and QA RELEASED it. Nothing is placed, and the
+    // answer must not say the certificate is on hold.
+    await insertHold(b.id, JSON.parse(fb.proposals)[0].source_key, true);
+    const gone = await retry('user', fb.id);
+    expect(gone.status).toBe(200);
+    expect(gone.body).toMatchObject({ placed: 0, already_held: 0 });
+    expect(gone.body.released).toEqual([{ reason: 'Critical result out of spec: Coliform 40 CFU/g.', released_by_name: 'Quality Lead', released_at: '2026-10-07 09:30:00' }]);
+    expect(gone.body.message).toBe('This hold was placed and later released by Quality Lead on 2026-10-07; nothing was placed. Truthful retry B is not on hold for that result.');
+    expect(gone.body.message).not.toMatch(/already on hold/);
+    expect((await failuresOf(b.id))[0].resolution).toBe('released_earlier');
+    const open = await keyDownload(b.id);
+    expect(open.status).toBe(200);
+    await open.arrayBuffer();
   });
 
   it('a retry that fails again leaves the failure open', async () => {

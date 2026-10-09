@@ -1494,6 +1494,23 @@ async function markDeliveredIfSent(db: D1Database, send: StoredSend): Promise<st
   // A send in which no email actually left delivered nothing: one that only
   // asked QA, or a resend whose every file had been withdrawn.
   if (!parseJsonArray<OrderSendPartResult>(send.parts).some((p) => p.ok && p.sent_at)) return null;
+  return markOrderDeliveredIfEverythingTravelled(db, send.tenant_id, send.order_id);
+}
+
+/**
+ * THE ONE DEFINITION OF "EVERYTHING ON THIS ORDER REACHED THE CUSTOMER"
+ * (C-090, C-093). Both the send path and the QA-release path ask it.
+ *
+ *   - every COA line has an active document on it, and that document is named
+ *     by a file that left (`sent_ok = 1`, no `not_sent_reason`) on SOME send
+ *     of this order;
+ *   - no document line (0138) is left behind: it went on a send, or QA
+ *     released it (C-056).
+ *
+ * "Some send", not "the latest": a certificate that went on Monday's send is
+ * not owed again because Tuesday's send only asked QA about a document line.
+ */
+export async function everyOrderLineTravelled(db: D1Database, tenantId: string, orderId: string): Promise<boolean> {
   const lines = await db
     .prepare(
       `SELECT oi.coa_document_id AS document_id, d.status AS status
@@ -1501,32 +1518,43 @@ async function markDeliveredIfSent(db: D1Database, send: StoredSend): Promise<st
          LEFT JOIN documents d ON d.id = oi.coa_document_id AND d.tenant_id = ?
         WHERE oi.order_id = ?`,
     )
-    .bind(send.tenant_id, send.order_id)
+    .bind(tenantId, orderId)
     .all<{ document_id: string | null; status: string | null }>();
   const owed = lines.results ?? [];
-  if (owed.some((l) => !l.document_id || l.status !== 'active')) return null;
+  if (owed.some((l) => !l.document_id || l.status !== 'active')) return false;
 
-  const travelled = await db
-    .prepare(
-      `SELECT DISTINCT je.value AS document_id
-         FROM order_send_files f
-         JOIN order_sends s ON s.id = f.send_id
-         JOIN json_each(f.document_ids) je
-        WHERE s.order_id = ? AND s.tenant_id = ?
-          AND f.sent_ok = 1 AND f.not_sent_reason IS NULL`,
-    )
-    .bind(send.order_id, send.tenant_id)
-    .all<{ document_id: string }>();
-  const went = new Set((travelled.results ?? []).map((r) => r.document_id));
-  if (owed.some((l) => !went.has(l.document_id as string))) return null;
+  if (owed.length > 0) {
+    const travelled = await db
+      .prepare(
+        `SELECT DISTINCT je.value AS document_id
+           FROM order_send_files f
+           JOIN order_sends s ON s.id = f.send_id
+           JOIN json_each(f.document_ids) je
+          WHERE s.order_id = ? AND s.tenant_id = ?
+            AND f.sent_ok = 1 AND f.not_sent_reason IS NULL`,
+      )
+      .bind(orderId, tenantId)
+      .all<{ document_id: string }>();
+    const went = new Set((travelled.results ?? []).map((r) => r.document_id));
+    if (owed.some((l) => !went.has(l.document_id as string))) return false;
+  }
 
   // A document line (0138) that did not go on a send and was not released by
   // QA -- waiting, missing, expired, locked, held, refused -- is a line left
   // behind, exactly as a COA line with no certificate is.
-  if ((await countDocumentLinesBehind(db, send.tenant_id, send.order_id)) > 0) return null;
+  return (await countDocumentLinesBehind(db, tenantId, orderId)) === 0;
+}
+
+/** Marks the order `delivered` when everything on it has travelled. */
+export async function markOrderDeliveredIfEverythingTravelled(
+  db: D1Database,
+  tenantId: string,
+  orderId: string,
+): Promise<'delivered' | null> {
+  if (!(await everyOrderLineTravelled(db, tenantId, orderId))) return null;
   await db
     .prepare(`UPDATE orders SET status = 'delivered', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`)
-    .bind(send.order_id, send.tenant_id)
+    .bind(orderId, tenantId)
     .run();
   return 'delivered';
 }

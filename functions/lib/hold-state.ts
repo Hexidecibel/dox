@@ -15,14 +15,26 @@
  *
  *   1. A HOLD PLACED ON THE DOCUMENT: on the whole certificate, or on one of
  *      its lot rows.
- *   2. A HOLD ON A LOT THE DOCUMENT CARRIES (C-086). A lot hold is on the
- *      `lots` ROW, not on one certificate's mention of it: every certificate
- *      linked to that row (`document_lots`) is held -- a re-scan, a "Keep
- *      both" duplicate, a corrected certificate -- from the moment it is
- *      linked. The hold still names the certificate it was placed from. A
- *      WHOLE-CERTIFICATE hold (no lot) stays on its one document. A lot row is
- *      tenant + supplier + product + lot + sublot: a hold on one row does not
- *      reach a different sublot's row.
+ *   2. A HOLD ON A LOT THE DOCUMENT CARRIES (C-086, widened by C-091). A lot
+ *      hold is on THE LOT, not on one certificate's mention of it and not on
+ *      one `lots` row either. A `lots` row is (organization, PRODUCT, lot key,
+ *      sublot), and the product is whatever the extraction read: two scans of
+ *      one certificate that read the product as "Sweet Cream Butter" and
+ *      "Butter Sweet Cream 25kg" are two rows of the same lot. So a lot hold
+ *      covers every certificate of the SAME SUPPLIER linked to ANY row with
+ *      the same LOT KEY and the same SUBLOT CODE, whatever product that row
+ *      resolved to, the no-product row included (`lotHoldCovers`). Matched on
+ *      the stored, indexed `lot_key` (the normalised key the declared lot
+ *      format produced) and `sub_lot_code`; no string is fuzzed.
+ *      WHOSE LOT: a certificate's supplier is `documents.supplier_id`, and
+ *      only when the certificate names none, its lot row's `supplier_id` (a
+ *      no-product row is shared by every supplier that printed that lot
+ *      number, so the row's supplier cannot speak for a certificate that
+ *      names its own). NOT covered: another supplier's lot with the same
+ *      number; a different sublot; a row whose lot key is empty. When neither
+ *      side names a supplier, only the very row the hold was placed on is
+ *      covered. The hold still names the row and certificate it was placed
+ *      from. A WHOLE-CERTIFICATE hold (no lot) stays on its one document.
  *   3. A HOLD ON ANOTHER DOCUMENT WHOSE LOT THIS FILE PRINTS (C-084). A
  *      multi-lot certificate is filed as one document per lot, each a cut of
  *      the pages its record was read from. When two lots share a page, or a
@@ -286,6 +298,70 @@ export async function loadPrintedNeighbours(
 }
 
 // ---------------------------------------------------------------------------
+// Which certificates a LOT hold covers (C-086, C-091)
+// ---------------------------------------------------------------------------
+
+/** The lot a hold is on, reduced to what the match reads. */
+export interface HeldLot {
+  /** The `lots` row the hold was placed on. */
+  lot_id: string;
+  lot_key: string;
+  sub_lot_code: string;
+  /** Whose lot it is: the placing certificate's supplier, else the row's. */
+  supplier_id: string | null;
+}
+
+/** One certificate's link to one `lots` row. */
+export interface LotLink {
+  lot_id: string;
+  lot_key: string | null;
+  sub_lot_code: string | null;
+  lot_supplier_id: string | null;
+  document_id: string;
+  document_supplier_id: string | null;
+}
+
+export function heldLotOf(r: {
+  lot_id: string | null;
+  lot_key?: string | null;
+  sub_lot_code?: string | null;
+  lot_supplier_id?: string | null;
+  document_supplier_id?: string | null;
+}): HeldLot {
+  return {
+    lot_id: r.lot_id as string,
+    lot_key: (r.lot_key ?? '').trim(),
+    sub_lot_code: r.sub_lot_code ?? '',
+    supplier_id: r.document_supplier_id || r.lot_supplier_id || null,
+  };
+}
+
+/**
+ * Does a hold on `held` cover the certificate behind `link`? PURE.
+ *
+ *   - the very row the hold was placed on, for a certificate that names no
+ *     supplier of its own, or names the held one: yes;
+ *   - any other row: only with the SAME lot key (non-empty), the SAME sublot
+ *     code, and the SAME supplier, where a certificate's supplier is its own
+ *     `supplier_id` and, only if it has none, its lot row's;
+ *   - a certificate that names a DIFFERENT supplier is never covered, even on
+ *     the same row (a no-product row is shared by every supplier that printed
+ *     that lot number);
+ *   - a supplier nobody recorded matches nothing beyond the held row itself.
+ */
+export function lotHoldCovers(held: HeldLot, link: LotLink): boolean {
+  const sameRow = link.lot_id === held.lot_id;
+  const supplier = link.document_supplier_id || link.lot_supplier_id || null;
+  if (sameRow) {
+    // Cannot tell tightens, but only on the row the hold is actually on.
+    return !held.supplier_id || !link.document_supplier_id || link.document_supplier_id === held.supplier_id;
+  }
+  if (!held.lot_key || (link.lot_key ?? '').trim() !== held.lot_key) return false;
+  if ((link.sub_lot_code ?? '') !== held.sub_lot_code) return false;
+  return Boolean(held.supplier_id) && supplier === held.supplier_id;
+}
+
+// ---------------------------------------------------------------------------
 // Everything that holds a document's file
 // ---------------------------------------------------------------------------
 
@@ -312,6 +388,7 @@ export async function loadEffectiveHolds(
     .prepare(
       `SELECT h.id, h.document_id, h.lot_id, h.reason, h.source, h.placed_at,
               l.lot_number, l.sub_lot_code, d.title AS document_title,
+              l.lot_key AS lot_key, l.supplier_id AS lot_supplier_id, d.supplier_id AS document_supplier_id,
               (SELECT l2.lot_number || CASE WHEN COALESCE(l2.sub_lot_code, '') != '' THEN ' / ' || l2.sub_lot_code ELSE '' END
                  FROM document_lots dl JOIN lots l2 ON l2.id = dl.lot_id
                 WHERE dl.document_id = h.document_id
@@ -323,34 +400,63 @@ export async function loadEffectiveHolds(
         ORDER BY h.placed_at ASC, h.rowid ASC`,
     )
     .bind(tenantId)
-    .all<ActiveHoldRow & { document_lot_label: string | null }>();
+    .all<
+      ActiveHoldRow & {
+        document_lot_label: string | null;
+        lot_key: string | null;
+        lot_supplier_id: string | null;
+        document_supplier_id: string | null;
+      }
+    >();
   const all = res.results ?? [];
   if (all.length === 0) return out;
 
   const briefs = all.map((r) => {
     const b = holdBrief(r);
-    return { brief: b, placedOn: r.document_id, lotId: r.lot_id, documentLotLabel: r.document_lot_label };
+    return {
+      brief: b,
+      placedOn: r.document_id,
+      lotId: r.lot_id,
+      documentLotLabel: r.document_lot_label,
+      lot: r.lot_id ? heldLotOf(r) : null,
+    };
   });
 
-  // 2. Which documents carry each held lot row.
-  const heldLots = [...new Set(briefs.map((b) => b.lotId).filter((l): l is string => Boolean(l)))];
-  const docsOfLot = new Map<string, Set<string>>();
-  for (const part of chunks(heldLots)) {
-    const links = await db
+  // 2. Which certificates carry each held LOT (C-091): every certificate
+  //    linked to a row with a held lot key. One read per chunk of keys, on
+  //    `idx_lots_lotkey (tenant_id, lot_key)`; the sublot and the supplier are
+  //    compared in `lotHoldCovers`.
+  const heldKeys = [...new Set(briefs.map((b) => b.lot?.lot_key).filter((k): k is string => Boolean(k)))];
+  const heldRowIds = [...new Set(briefs.filter((b) => b.lot && !b.lot.lot_key).map((b) => b.lotId as string))];
+  const links: LotLink[] = [];
+  for (const part of chunks(heldKeys)) {
+    const res2 = await db
       .prepare(
-        `SELECT dl.lot_id, dl.document_id
-           FROM document_lots dl
-           JOIN lots l ON l.id = dl.lot_id AND l.tenant_id = ?
+        `SELECT l.id AS lot_id, l.lot_key, l.sub_lot_code, l.supplier_id AS lot_supplier_id,
+                dl.document_id, d.supplier_id AS document_supplier_id
+           FROM lots l
+           JOIN document_lots dl ON dl.lot_id = l.id
            JOIN documents d ON d.id = dl.document_id AND d.tenant_id = ?
-          WHERE dl.lot_id IN (${part.map(() => '?').join(', ')})`,
+          WHERE l.tenant_id = ? AND l.lot_key IN (${part.map(() => '?').join(', ')})`,
       )
       .bind(tenantId, tenantId, ...part)
-      .all<{ lot_id: string; document_id: string }>();
-    for (const r of links.results ?? []) {
-      const set = docsOfLot.get(r.lot_id) ?? new Set<string>();
-      set.add(r.document_id);
-      docsOfLot.set(r.lot_id, set);
-    }
+      .all<LotLink>();
+    links.push(...(res2.results ?? []));
+  }
+  // A held row with no lot key matches nothing but itself.
+  for (const part of chunks(heldRowIds)) {
+    const res2 = await db
+      .prepare(
+        `SELECT l.id AS lot_id, l.lot_key, l.sub_lot_code, l.supplier_id AS lot_supplier_id,
+                dl.document_id, d.supplier_id AS document_supplier_id
+           FROM lots l
+           JOIN document_lots dl ON dl.lot_id = l.id
+           JOIN documents d ON d.id = dl.document_id AND d.tenant_id = ?
+          WHERE l.tenant_id = ? AND l.id IN (${part.map(() => '?').join(', ')})`,
+      )
+      .bind(tenantId, tenantId, ...part)
+      .all<LotLink>();
+    links.push(...(res2.results ?? []));
   }
 
   // Every document a hold applies to DIRECTLY (1 and 2), own holds first.
@@ -360,10 +466,15 @@ export async function loadEffectiveHolds(
     if (!list.some((x) => x.id === brief.id)) list.push(brief);
     map.set(docId, list);
   };
-  for (const b of briefs) add(direct, b.placedOn, b.brief);
+  for (const b of briefs) add(direct, b.placedOn, { ...b.brief, reach: 'placed' });
   for (const b of briefs) {
-    if (!b.lotId) continue;
-    for (const docId of docsOfLot.get(b.lotId) ?? []) add(direct, docId, b.brief);
+    if (!b.lot) continue;
+    for (const link of links) {
+      if (link.document_id === b.placedOn) continue;
+      // `own_lot_id`: the row of THIS certificate the hold covers, which is not
+      // the row the hold names when the product resolved differently.
+      if (lotHoldCovers(b.lot, link)) add(direct, link.document_id, { ...b.brief, reach: 'lot', own_lot_id: link.lot_id });
+    }
   }
 
   for (const id of ids) for (const b of direct.get(id) ?? []) add(out, id, b);
@@ -375,7 +486,8 @@ export async function loadEffectiveHolds(
       for (const b of direct.get(other) ?? []) {
         // A hold on a neighbour's WHOLE certificate still names that lot here.
         const from = briefs.find((x) => x.brief.id === b.id);
-        const brief = !b.lot_label && from?.documentLotLabel ? { ...b, lot_label: from.documentLotLabel } : b;
+        const brief: DocumentHoldBrief = { ...b, reach: 'page' };
+        if (!brief.lot_label && from?.documentLotLabel) brief.lot_label = from.documentLotLabel;
         add(out, id, brief);
       }
     }

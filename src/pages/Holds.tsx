@@ -99,11 +99,9 @@ export function Holds() {
     setError('');
     try {
       const r = await api.holds.retryFailure(failureId);
-      setNotice(
-        r.placed > 0
-          ? `${title || 'The certificate'} is now on hold.`
-          : `${title || 'The certificate'} was already on hold for that result. Nothing more was needed.`,
-      );
+      // The server says what happened: placed, already on hold, or placed and
+      // since RELEASED (in which case nothing was placed and it is not on hold).
+      setNotice(r.message || `${title || 'The certificate'}: nothing was placed.`);
       announceHoldsChanged();
       load(true);
     } catch (e) {
@@ -128,7 +126,8 @@ export function Holds() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         A certificate on hold cannot be sent on an order, in a ZIP, by link, in a bundle or read with an API key until QA
         or an administrator releases the hold. It can still be opened in the portal. Nothing here reaches a warehouse
-        system.
+        system. A hold on a lot covers every certificate of that lot from the same supplier, whatever product name each
+        was read under. It does not cover another supplier's lot with the same number, or a different sublot.
       </Typography>
 
       <HelpWell id="holds.list" title={helpContent.holds.headline}>

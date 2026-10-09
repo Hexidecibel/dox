@@ -167,7 +167,7 @@ describe('Holds page', () => {
         failures: [{ id: 'f1', document_id: 'd7', document_title: 'Butter COA lot 88', document_version: 1, created_at: '2026-10-08 10:00:00', error: 'D1_ERROR', holds: [{ source: 'spec_critical', reason: 'Critical result out of spec: Coliform 40 CFU/g.' }] }],
       }),
     );
-    mocks.retryFailure.mockResolvedValue({ placed: 1, already_held: 0 });
+    mocks.retryFailure.mockResolvedValue({ placed: 1, already_held: 0, released: [], message: 'Butter COA lot 88 is now on hold.' });
     const heard = vi.fn();
     window.addEventListener(HOLDS_CHANGED, heard);
     renderPage();
@@ -182,6 +182,26 @@ describe('Holds page', () => {
     expect(await screen.findByTestId('holds-notice')).toHaveTextContent('Butter COA lot 88 is now on hold.');
     expect(heard).toHaveBeenCalled();
     window.removeEventListener(HOLDS_CHANGED, heard);
+  });
+
+  it('a retry of a hold that was placed and since RELEASED says so, and does not claim the certificate is on hold (C-092)', async () => {
+    mocks.list.mockResolvedValue(
+      list({ failures: [{ id: 'f1', document_id: 'd7', document_title: 'Butter COA lot 88', document_version: 1, created_at: '', error: null, holds: [{ source: 'spec_critical', reason: 'Critical result out of spec.' }] }] }),
+    );
+    const message = 'This hold was placed and later released by Quinn Lee on 2026-10-07; nothing was placed. Butter COA lot 88 is not on hold for that result.';
+    mocks.retryFailure.mockResolvedValue({ placed: 0, already_held: 0, released: [{ reason: 'x', released_by_name: 'Quinn Lee', released_at: '2026-10-07 09:30:00' }], message });
+    renderPage();
+    await userEvent.click(await screen.findByTestId('holds-failure-retry'));
+    const notice = await screen.findByTestId('holds-notice');
+    expect(notice).toHaveTextContent(message);
+    expect(notice).not.toHaveTextContent('is now on hold');
+  });
+
+  it('says what a lot hold covers and what it does not', async () => {
+    renderPage();
+    await screen.findAllByTestId('hold-row');
+    expect(screen.getByText(/covers every certificate of that lot from the same supplier, whatever product name each/)).toBeInTheDocument();
+    expect(screen.getByText(/does not cover another supplier's lot with the same number, or a different sublot/)).toBeInTheDocument();
   });
 
   it('with no failures there is no such notice, and a read-only account gets no retry', async () => {

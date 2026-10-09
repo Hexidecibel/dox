@@ -77,6 +77,19 @@ export interface DocumentHoldBrief {
   document_id: string;
   /** That certificate's title, for "held from <certificate>". */
   document_title?: string | null;
+  /**
+   * HOW the hold reaches the document being asked about: `placed` on it; `lot`
+   * = it is a certificate of the held lot (same supplier, lot key and sublot);
+   * `page` = its file prints a held neighbour's lot. Set by the read that
+   * judges an exit; absent on a plain listing of holds.
+   */
+  reach?: 'placed' | 'lot' | 'page';
+  /**
+   * With `reach: 'lot'`: the lot row OF THE DOCUMENT BEING ASKED ABOUT that the
+   * hold covers. `lot_id` is the row the hold was placed on, which is another
+   * row of the same lot when the product was read differently.
+   */
+  own_lot_id?: string;
   /** The lot row the hold is on, or null for the whole certificate. */
   lot_id: string | null;
   /** "1042 / 03", or null for the whole certificate. */
@@ -138,6 +151,21 @@ export interface ApiHoldFailure {
   error: string | null;
   /** The holds that were not placed. */
   holds: { source: HoldSource; reason: string }[];
+}
+
+/** POST /api/holds/failures/:id/retry */
+export interface HoldRetryResponse {
+  /** Holds written by this retry. */
+  placed: number;
+  /** Holds that were already there and still active. */
+  already_held: number;
+  /**
+   * Holds that had been placed and were RELEASED since: nothing was placed
+   * for them, and the certificate is not on hold for that result.
+   */
+  released: { reason: string; released_by_name: string | null; released_at: string }[];
+  /** What happened, in words a screen prints as they stand. */
+  message: string;
 }
 
 /** GET /api/documents/:id/holds */

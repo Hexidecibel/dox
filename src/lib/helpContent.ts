@@ -1086,7 +1086,8 @@ const holds: ModuleHelpExpanded = {
         heading: 'What a hold is on',
         body:
           "A hold is on one lot, or on one whole certificate. Choose when you place it. " +
-          "A hold on a lot covers every certificate of that lot: a second scan, a duplicate you kept, a corrected certificate that arrives later. Each of them says it is held and which certificate the hold was placed from, and QA is told when a new certificate arrives for a held lot. One release frees them all. A hold on a whole certificate stays on that one certificate. A different sublot is a different lot. " +
+          "A hold on a lot covers every certificate of that lot from the same supplier: a second scan, a duplicate you kept, a corrected certificate that arrives later, whatever product name each one was read under. Each of them says it is held and which certificate the hold was placed from, and QA is told when a new certificate arrives for a held lot. One release frees them all. A hold on a whole certificate stays on that one certificate. " +
+          "What a lot hold does not cover: another supplier's lot that happens to carry the same number; a different sublot of the same lot; and a certificate filed with no supplier at all, unless it is on the very lot record the hold was placed on. Give such a certificate its supplier, or hold it on its own. " +
           "A file is what leaves, so a hold on one lot stops every file that prints that lot. When a certificate covers several lots and was filed as one page per lot, the other lots' own pages still go; the whole original, which prints every lot, stays in until the hold is released, and the order says so. " +
           "When two lots share a page, such as a one-page certificate with a row for each lot, the other lot's file shows the held lot's results too, so it is stopped as well. Its page says which lot is on hold and links to that certificate, where the hold is released.",
       },

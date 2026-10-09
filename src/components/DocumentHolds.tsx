@@ -156,7 +156,9 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
     setBusy(true);
     setRetryError('');
     try {
-      await api.holds.retryFailure(failureId);
+      const r = await api.holds.retryFailure(failureId);
+      // Placed and since released is not "on hold": say what the server said.
+      if (r.placed === 0) setRetryError(r.message);
       done();
     } catch (err) {
       setRetryError(err instanceof Error ? err.message : 'The hold could not be placed.');
@@ -248,8 +250,8 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
             On hold. This certificate cannot be sent: a hold placed on another certificate covers it.
           </Typography>
           <Typography variant="caption" component="div">
-            A hold on a lot covers every certificate of that lot, and every file that prints it. It goes once that hold
-            is released.
+            A hold on a lot covers every certificate of that lot from the same supplier, and every file that prints it.
+            It goes once that hold is released.
           </Typography>
         </Alert>
       )}
@@ -261,7 +263,7 @@ export function DocumentHolds({ documentId, onChanged }: Props) {
                 <strong>{holdWhere(h)}:</strong> {h.reason}
               </Typography>
               <Typography variant="caption" color="text.secondary" component="div">
-                {h.lot_id && ownLots.has(h.lot_id)
+                {h.reach === 'lot' || (h.reach === undefined && h.lot_id !== null && ownLots.has(h.lot_id))
                   ? 'This lot is on hold. Held from '
                   : "This file also prints that lot's results. Held from "}
                 <Link component={RouterLink} to={`/documents/${h.document_id}`} underline="hover">
