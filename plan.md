@@ -52,10 +52,10 @@ silent-apply, and eventually full auto-ingest.
 
 **Source:** AJ Conner's rules table assumes holds exist (B1 "Critical: this result stops the
 shipment", E2 "zero-tolerance ... holds until a person resolves it") and nothing held anything.
-Decision C-005 and C-071..C-084 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
+Decision C-005 and C-071..C-090 in `docs/decision-log.md`; full notes in `docs/feature-notes.md`
 under "Holds (migration 0139)".
 
-- `migrations/0139_document_holds.sql`: `document_holds`, append-only, two unique indexes (one active per lot and source; an automatic hold once per judged result ever), an immutability trigger. Additive; holds nothing by itself.
+- `migrations/0139_document_holds.sql`: `document_versions.source_queue_id`, `document_hold_failures`, and `document_holds`, append-only, two unique indexes (one active per lot and source; an automatic hold once per judged result ever), an immutability trigger. Additive; holds nothing by itself.
 - `shared/holds.ts` (pure): the three sources, `holdSourceForResult` / `automaticHoldsForResults`, the refusal wording. `shared/sharingRule.ts`: `judgeExit` gains a fourth verdict, `held`, asked first.
 - `functions/lib/hold-state.ts` (`loadActiveHolds`, read by `loadSharingRules` so every exit sees it) and `functions/lib/holds.ts` (place, release, list, count, automatic placement, the QA notice).
 - Every exit refuses a held certificate through the sharing rule's own checks: ZIP, emailed link, public link reads, bundle, order send and resend, document order lines, the QA release, API-key file reads. A signed-in open or download is unchanged. A whole multi-lot original is held by any lot on it; unheld lots' own pages still go, unless that page prints the held lot too (two lots on one page: `loadEffectiveHolds`, C-084).
@@ -64,6 +64,8 @@ under "Holds (migration 0139)".
 - Screens: banner, lot chips, Place and Release on the document page; `/holds` beside the Review Queue with a count in the rail; an "On hold" group in Review and send; chips on order lines, the waiting list and search rows; Help.
 - `bin/propose-spec-holds` for certificates approved before 0139 (dry run by default). `bin/report-lot-key-scheme --apply` moves a hold with its lot.
 - Tests: `tests/unit/holds.test.ts`, `tests/unit/specHoldsPlan.test.ts`, `tests/api/holds.test.ts`, `tests/api/migration-0139-document-holds.test.ts`, `src/components/DocumentHolds.test.tsx`, `src/pages/Holds.test.tsx`.
+
+- After an independent review (same day, C-085..C-090): a file is its CURRENT version's queue item (`document_versions.source_queue_id`), so a reissued certificate no longer sends a held or locked lot on its whole original; a LOT hold follows the `lots` row onto every certificate of the lot (supersedes C-071); a hold that could not be placed is recorded, mailed, shown and retried (`document_hold_failures`), per document; a file takes the strictest sharing rule of every lot it prints; a flat extraction approved as several product documents is registered and held per product, unattributed results on every document; `delivered` means every line travelled; one read per part in an order send. `bin/migrate --reapply` for the amended migration.
 
 **Not built:** B3 supplier-probation holds (no supplier watch statuses exist); anything to a WMS;
 C-016's notice for a bare "Negative"; dilution (not extracted).

@@ -108,6 +108,24 @@ components:
         and optionally have an expiration date.
 
   schemas:
+    HoldFailure:
+      type: object
+      description: "A hold that should have been placed at approval and was not (migration 0139). The certificate is NOT held until somebody retries."
+      properties:
+        id: { type: string }
+        document_id: { type: string }
+        document_title: { type: string, nullable: true }
+        document_version: { type: integer }
+        created_at: { type: string }
+        error: { type: string, nullable: true }
+        holds:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string, enum: [spec_critical, zero_tolerance] }
+              reason: { type: string }
+
     DocumentHold:
       type: object
       description: |
@@ -115,7 +133,7 @@ components:
         Append-only: a hold is placed and later released, never edited.
       properties:
         id: { type: string }
-        document_id: { type: string }
+        document_id: { type: string, description: "The certificate the hold was PLACED from. A lot hold also covers every other certificate of that lot." }
         document_title: { type: string, nullable: true }
         document_type_name: { type: string, nullable: true }
         supplier_id: { type: string, nullable: true }
@@ -5887,12 +5905,13 @@ paths:
                   history: { type: array, items: { $ref: '#/components/schemas/DocumentHold' }, description: "Released holds, newest release first." }
                   also_held_by:
                     type: array
-                    description: "Active holds on OTHER lots of the same certificate whose page this document's file also prints. They stop this file too, and are released on the certificate they are on (`document_id`)."
+                    description: "Active holds placed on ANOTHER certificate that stop this one too: a hold on a lot row this certificate carries (a lot hold covers every certificate of the lot), or on a neighbour lot whose page this file prints. Each names the certificate it was placed from (`document_id`, `document_title`)."
                     items:
                       type: object
                       properties:
                         id: { type: string }
                         document_id: { type: string }
+                        document_title: { type: string, nullable: true }
                         lot_id: { type: string, nullable: true }
                         lot_label: { type: string, nullable: true }
                         reason: { type: string }
@@ -5908,6 +5927,7 @@ paths:
                         sub_lot_code: { type: string, nullable: true }
                         lot_label: { type: string }
                         hold: { type: object, nullable: true, description: "The active hold on this lot row, if any." }
+                  failures: { type: array, items: { $ref: '#/components/schemas/HoldFailure' }, description: "Holds that should have been placed on this certificate and were not." }
                   can_place: { type: boolean, description: "Any login but a read-only one. An API key may place." }
                   can_release: { type: boolean, description: "A QA releaser or an administrator, signed in. Never an API key." }
         '404': { description: "No such document in the caller's organization" }
@@ -5974,7 +5994,41 @@ paths:
                   truncated: { type: boolean }
                   can_release: { type: boolean }
                   count: { type: integer, description: "Only with ?count=1" }
+                  failures:
+                    description: "With ?count=1, how many holds should have been placed and were not. Otherwise the list of them: each certificate is NOT held until somebody retries."
+                    oneOf:
+                      - { type: integer }
+                      - { type: array, items: { $ref: '#/components/schemas/HoldFailure' } }
+                  can_place: { type: boolean, description: "May the caller retry a failed hold (anybody who may place one)" }
         '400': { description: "An unknown state or source" }
+
+  /api/holds/failures/{id}/retry:
+    post:
+      tags: [Documents]
+      summary: Place the holds an approval should have placed and could not
+      description: |
+        An automatic hold is written after the approval has happened. When that
+        write fails the approval stands, the certificate is NOT held, and the
+        failure is recorded, mailed to QA and shown on the document page and
+        the Holds page. This places exactly the holds that were computed then,
+        once per judged result: a hold placed in the meantime is not placed
+        twice. Anybody who may place a hold may retry.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Retried
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placed: { type: integer }
+                  already_held: { type: integer }
+        '403': { description: A read-only account }
+        '404': { description: "No such failure in the caller's organization" }
+        '409': { description: Already retried }
+        '500': { description: "The hold could not be written again. The failure stays open." }
 
   /api/holds/{id}/release:
     post:

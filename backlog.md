@@ -2,11 +2,18 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
-## KNOWN GAP found while building holds (2026-10-08): the sharing rule and two lots on one page
+## Found while building holds (2026-10-08): a reviewer's table edit changes nothing on the single-document approve
 
-Unlike the list below, this IS a path by which a restricted lot's results can leave.
-
-- **Sharing rule: two lots on the same page.** C-042 takes the strictest sharing rule for the WHOLE original of a multi-lot certificate, but not for a per-lot file that prints a neighbour lot's row (a one-page certificate with a row per lot; a cut that failed). So a `locked` or `qa` lot's results can leave on a `free` neighbour's file. Holds closed this for themselves in 0139 (`fileCarriesLot` / `loadEffectiveHolds` in `functions/lib/hold-state.ts`, C-084); the same page test would close it for the rule in `loadSharingRules`. Low exposure today: lots of one certificate share a document type, so they share a rule unless one has an override.
+Checked for the holds review, consistent, and left. On the single-document flat approve
+(`functions/api/queue/[id].ts`, `produceCoa` in `functions/lib/kinds/coa.ts`) the reviewer's table
+edits arrive as `captures.tableEdits` and are written ONLY to `reviewer_table_edits`, a learning
+capture. The approved document stores `buildFlatExtendedMetadata(item.tables)` -- the stored,
+uncorrected extraction -- and the spec judgement (and so any hold) judges the same stored tables. So
+the document and the judgement agree; neither carries the correction. Not a hold defect. The open
+question is the product one: a reviewer who corrects a misread result (40 that the paper shows as 4)
+has corrected nothing that is filed, judged or held. Fixing it means applying `tableEdits` to the
+tables before they are stored AND before they are judged, in one place, so the two cannot drift --
+the multi-product and records paths already store and judge the tables the reviewer sent.
 
 ## KNOWN GAPS left by the sharing-rule re-review (2026-10-08)
 
