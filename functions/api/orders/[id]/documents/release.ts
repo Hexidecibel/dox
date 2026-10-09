@@ -25,6 +25,7 @@ import { loadOrderForLineWrite, refuseStaged, requireOrderAccess } from '../../.
 import { releaseOrderDocuments, requireQaReleaser } from '../../../../lib/order-document-release';
 import type { OrderDocumentsReleaseRequest } from '../../../../../shared/types';
 import type { Env, User } from '../../../../lib/types';
+import { loadOutwardName } from '../../../../lib/tenant-brand';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -62,7 +63,7 @@ export async function handleRelease(
       db: context.env.DB,
       apiKey: context.env.RESEND_API_KEY,
       origin: new URL(context.request.url).origin,
-      tenantName: tenant?.name ?? 'Documents',
+      tenantName: await loadOutwardName(context.env.DB, order.tenant_id, tenant?.name ?? 'Documents'),
       order,
       user,
       actor,

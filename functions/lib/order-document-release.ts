@@ -90,6 +90,7 @@ import type {
   OrderSendSummary,
 } from '../../shared/types';
 import type { User } from './types';
+import { loadPublicBrand } from './tenant-brand';
 
 /**
  * Lines one release may name: what one link carries. Past it the release is
@@ -587,6 +588,8 @@ export async function releaseOrderDocuments(
         })),
         documentsLinkUrl: exportLinkUrl(ctx.origin, link.token),
         documentsLinkDays: ORDER_DOCUMENT_LINK_DAYS,
+        // The organisation's brand for an order mail (0140); null = as before.
+        brand: await loadPublicBrand(db, order.tenant_id, 'order_send', { origin: ctx.origin }),
       });
 
       // FROM HERE THE CUSTOMER MAY HOLD THE LINK. The record stops saying

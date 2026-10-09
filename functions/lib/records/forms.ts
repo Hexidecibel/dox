@@ -11,6 +11,7 @@
  *     applies to forms as it does to sheets/rows.
  */
 
+import { parseBrandColor } from '../../../shared/tenantBrand';
 import { generateId } from '../db';
 import { rebuildRowRefs, computeDisplayTitle, logRecordsActivity } from './helpers';
 import { BadRequestError } from '../permissions';
@@ -239,8 +240,13 @@ export function buildPublicFormView(
     form: {
       name: form.name,
       description: form.description,
-      accent_color: settings.accent_color ?? null,
-      logo_url: settings.logo_url ?? null,
+      // A real '#RRGGBB' or nothing: the builder's field is free text, and this
+      // value is drawn on a page outsiders open (0140).
+      accent_color: parseBrandColor(settings.accent_color),
+      // Never published. It was a link to any outside address, which would
+      // tell that site every time the form is opened; the logo a form shows is
+      // the organisation's own, served by us (`brand.logo_url`).
+      logo_url: null,
     },
     fields,
     turnstile_site_key: turnstileSiteKey,

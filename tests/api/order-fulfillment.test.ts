@@ -1258,3 +1258,103 @@ describe('the whole original of a multi-lot certificate', () => {
     expect(res.get(cert.docIds[0])).toEqual({ state: 'not_split' });
   });
 });
+
+// ===========================================================================
+// The tenant brand on an order send (migration 0140)
+// ===========================================================================
+
+describe('the tenant brand on an order send (migration 0140)', () => {
+  async function setBrand(tenantId: string, cols: Record<string, string | null>): Promise<void> {
+    const keys = Object.keys(cols);
+    await db
+      .prepare(`INSERT INTO tenant_brands (tenant_id, ${keys.join(', ')}) VALUES (?, ${keys.map(() => '?').join(', ')})`)
+      .bind(tenantId, ...keys.map((k) => cols[k]))
+      .run();
+  }
+  const clearBrands = () => db.prepare('DELETE FROM tenant_brands').run();
+
+  it('no brand record, while ANOTHER tenant has one: the order mail is the unbranded one', async () => {
+    await clearBrands();
+    await setBrand(seed.tenantId2, { display_name: 'OTHER-TENANT-BRAND', primary_color: '#7A1F5C', support_text: 'OTHER-TENANT-LINE' });
+    const doc = await makeDocument({ lots: [{ number: '99100' }] });
+    const order = await orderId();
+    await pick(order, [doc.id]);
+    const plan = await preview(order);
+    expect(plan.from_name).toBe('Test Corp via SupDox');
+    const mail = stubMail();
+    await send(order, { fingerprint: plan.fingerprint });
+    expect(mail[0].from).toBe('Test Corp via SupDox <noreply@supdox.com>');
+    expect(mail[0].html).toContain(
+      '<td style="background:#1A365D;padding:24px 32px;">\n        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Test Corp</h1>',
+    );
+    for (const leak of ['OTHER-TENANT-BRAND', 'OTHER-TENANT-LINE', '#7A1F5C', '<strong>', 'brand-logo']) {
+      expect(mail[0].html).not.toContain(leak);
+    }
+    await clearBrands();
+  });
+
+  it('carries the display name, the colours and the ORDER support line -- in the mail and on the oversize-file page', async () => {
+    await clearBrands();
+    await setBrand(seed.tenantId, {
+      display_name: 'Northfield Foods',
+      primary_color: '#0B6E4F',
+      accent_color: '#F2A900',
+      support_text: 'DEFAULT-LINE',
+      support_overrides: JSON.stringify({
+        order_send: { text: 'Order desk', email: 'orders@northfield.example', phone: '555 0142' },
+        document_export: { text: 'EXPORT-ONLY-LINE', email: null, phone: null },
+      }),
+    });
+    await setBrand(seed.tenantId2, { display_name: 'OTHER-TENANT-BRAND', support_text: 'OTHER-TENANT-LINE' });
+
+    const big = await makeDocument({ size: 16 * MB, lots: [{ number: '99201' }] });
+    const small = await makeDocument({ lots: [{ number: '99202' }] });
+    const order = await orderId({ po_number: 'PO-77' });
+    await pick(order, [big.id, small.id]);
+
+    // The review screen shows what will really be sent.
+    const plan = await preview(order);
+    expect(plan.from_name).toBe('Northfield Foods via SupDox');
+    expect(plan.default_subject.startsWith('Northfield Foods: documents for order')).toBe(true);
+    expect(plan.reply_to).toBe('user@test.com');
+
+    const mail = stubMail();
+    const { status } = await send(order, { fingerprint: plan.fingerprint, message: 'For your delivery.' });
+    expect(status).toBe(200);
+    const m = mail[0];
+    // The address and the reply-to never move; only the name in front does.
+    expect(m.from).toBe('Northfield Foods via SupDox <noreply@supdox.com>');
+    expect(m.reply_to).toBe('user@test.com');
+    expect(m.subject.startsWith('Northfield Foods: documents for order')).toBe(true);
+    expect(m.html).toContain('<td style="background:#0B6E4F;padding:24px 32px;border-bottom:4px solid #F2A900;">');
+    expect(m.html).toContain('font-weight:600;">Northfield Foods</h1>');
+    expect(m.html).toContain('background:#0B6E4F;color:#ffffff;');
+    expect(m.html).toContain('border-left:3px solid #F2A900;');
+    expect(m.html).toContain(
+      '<strong>Northfield Foods</strong> &middot; Order desk &middot; <a href="mailto:orders@northfield.example" style="color:#666666;">orders@northfield.example</a> &middot; 555 0142',
+    );
+    for (const leak of ['DEFAULT-LINE', 'EXPORT-ONLY-LINE', 'OTHER-TENANT-BRAND', 'OTHER-TENANT-LINE', 'Test Corp', '#1A365D']) {
+      expect(m.html).not.toContain(leak);
+    }
+    // Nothing internal rides along with the brand.
+    expect(JSON.stringify(m)).not.toContain('INTERNAL do not send');
+
+    // The page behind the "too large to attach" link is an order page: the
+    // order line, not the document-export one.
+    const token = /\/export\/([A-Za-z0-9_-]+)/.exec(m.html)![1];
+    const landing = await exportLanding(
+      fnContext(`http://localhost/api/document-exports/public/${token}`, { params: { token } }),
+    );
+    const view = (await readJson(landing)) as DocumentExportLandingView;
+    expect(view.brand).toEqual({
+      display_name: 'Northfield Foods',
+      logo_url: null,
+      primary_color: '#0B6E4F',
+      accent_color: '#F2A900',
+      support: { text: 'Order desk', email: 'orders@northfield.example', phone: '555 0142' },
+    });
+    expect(JSON.stringify(view)).not.toContain('EXPORT-ONLY-LINE');
+    expect(JSON.stringify(view)).not.toContain('OTHER-TENANT');
+    await clearBrands();
+  });
+});

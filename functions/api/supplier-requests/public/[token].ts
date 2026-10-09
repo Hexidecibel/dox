@@ -31,6 +31,7 @@ import {
   recordRequestLinkView,
 } from '../../../lib/request-links';
 import type { Env } from '../../../lib/types';
+import { loadPublicBrand } from '../../../lib/tenant-brand';
 
 /** Generous for a person reloading on a train; tight enough to stop a scraper. */
 const RATE_LIMIT_PER_HOUR = 60;
@@ -110,7 +111,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       ip,
     );
 
-    return new Response(JSON.stringify(view), {
+    // The organisation's brand (0140), from the tenant of the link this token
+    // resolved to -- never from anything the caller sent.
+    const brand = await loadPublicBrand(context.env.DB, link.tenant_id, 'supplier_request');
+
+    // No brand record: the payload is exactly what it was before 0140.
+    return new Response(JSON.stringify(brand ? { ...view, brand } : view), {
       headers: {
         'Content-Type': 'application/json',
         // Never let a shared cache hold a compliance record keyed by a URL that

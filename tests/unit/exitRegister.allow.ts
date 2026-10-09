@@ -405,4 +405,30 @@ export const EXIT_REGISTER: ExitRegisterEntry[] = [
     reason:
       'Re-reads the file a source run ingested so the run can be dispatched again. Intake input, not an approved document, and nothing is returned.',
   },
+  // ---- the tenant brand logo (migration 0140) ----------------------------
+  // A NEW PUBLIC, UNAUTHENTICATED READ OF THE BUCKET, registered on purpose.
+  // It is not an exit because no document can be reached through it: the only
+  // key ever read is rebuilt as brand/<tenant>/logo-<sha256>.<ext> from a row
+  // of tenant_brand_logos, and must equal the key that row stores.
+  {
+    path: 'functions/lib/tenant-brand.ts',
+    classification: 'not_exit',
+    signature: { bucket: 6, gets: 2, readers: 0, checks: 0 },
+    reason:
+      'Writes and reads an organisation logo. readBrandLogo takes a 40-hex token, finds a tenant_brand_logos row by it, REBUILDS the key from that row (brand/<tenant>/logo-<sha256>.<ext>) and refuses unless it equals the stored key, so no caller-supplied string reaches the bucket and no document key can be formed. The second .get( is the per-request brand cache, a Map.',
+  },
+  {
+    path: 'functions/api/public/brand-logo/[token].ts',
+    classification: 'not_exit',
+    signature: { bucket: 2, gets: 0, readers: 0, checks: 0 },
+    reason:
+      'The public logo route: unauthenticated by design, because a logo is drawn in mail and on token pages. It hands the bucket to readBrandLogo and returns only what that returns -- an image a tenant admin published as their logo, never an approved document. The sharing rule does not apply to a logo.',
+  },
+  {
+    path: 'functions/api/tenants/[id]/brand/logo.ts',
+    classification: 'not_exit',
+    signature: { bucket: 2, gets: 1, readers: 0, checks: 0 },
+    reason:
+      'An admin uploads or removes the organisation logo. It writes INTO the bucket (through storeBrandLogo) and returns the brand record as JSON, never file bytes. The .get( is FormData.get on the upload.',
+  },
 ];

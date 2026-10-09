@@ -111,6 +111,8 @@ import type {
   RequestLineInput,
   SupplierRequestRunResult,
 } from '../../shared/types';
+import { loadOutwardName, loadPublicBrand } from './tenant-brand';
+import { mailBrandAudit } from './brand-mail';
 
 // ---------------------------------------------------------------------------
 // Rows
@@ -480,6 +482,10 @@ export async function draftSupplierRequests(
 
   const supplierNames = await loadSupplierNames(db, tenantId);
   const rowById = new Map(opts.rows.map((r) => [r.id, r]));
+  // What the SUPPLIER reads the organisation called (0140): the brand's display
+  // name, the organisation's own name until an admin sets one. Internal notices
+  // from this run keep `opts.tenantName`.
+  const outwardName = await loadOutwardName(db, tenantId, opts.tenantName);
 
   // -- 1. cycles that are over ---------------------------------------------
   const open = cycles.filter((c) => c.status === 'open');
@@ -651,7 +657,7 @@ export async function draftSupplierRequests(
     // The allow-list call. Every argument is named; nothing of `r` beyond its
     // due date reaches the template.
     const draft = renderRenewalRequestDraft({
-      tenantName: opts.tenantName,
+      tenantName: outwardName,
       contactName: contact.name,
       items: plan.items,
       dueDate: due,
@@ -1289,9 +1295,15 @@ export async function approveRenewalSend(
     .prepare('SELECT name FROM tenants WHERE id = ?')
     .bind(tenantId)
     .first<{ name: string }>();
-  const tenantName = tenant?.name ?? 'SupDox';
+  // The organisation's brand for a supplier request (0140), from the cycle's
+  // own tenant. Null = the mail as it always was. With a brand, the name the
+  // supplier reads -- in the header and as the sender -- is its display name.
+  // The brand DRESSES the message; the approved text (`sentBody`) is untouched
+  // and is still exactly what is stored and audited.
+  const brand = await loadPublicBrand(db, tenantId, 'supplier_request', { origin: input.appUrl });
+  const tenantName = brand?.display_name ?? tenant?.name ?? 'SupDox';
   const sentBody = renewalRequestEmailText(body, linkUrl);
-  const { html } = buildRenewalRequestSupplierEmail({ tenantName, body, linkUrl });
+  const { html } = buildRenewalRequestSupplierEmail({ tenantName, body, linkUrl, brand });
 
   const mail = await sendEmailDetailed(resendApiKey, {
     to: contact.email,
@@ -1343,6 +1355,7 @@ export async function approveRenewalSend(
       assigned_approver_user_id: send.approver_user_id,
       subject,
       body: sentBody,
+      ...(brand ? { brand: mailBrandAudit(brand) } : {}),
       edited: subject !== send.draft_subject || body !== send.draft_body.trim(),
     },
     input.ip,

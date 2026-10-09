@@ -39,6 +39,7 @@ import type {
   WorkflowStepType,
   PublicApprovalView,
 } from '../../../shared/types';
+import { loadPublicBrand } from '../tenant-brand';
 
 // ---------------------------------------------------------------------
 // Token + JSON helpers
@@ -500,6 +501,8 @@ export async function executeStep(
           sheetName: sheet?.name || '',
           rowTitle: row?.display_title ?? null,
           publicUrl: `${env.appOrigin}/a/${token}`,
+          // The organisation's brand (0140), from the workflow's own tenant.
+          brand: await loadPublicBrand(env.DB, workflow.tenant_id, 'records_approval', { origin: env.appOrigin }),
         });
         await sendEmail(env.RESEND_API_KEY, {
           to: cfg.assignee_email,
@@ -600,6 +603,8 @@ export async function executeStep(
           dueDate: null,
           fieldCount: fields.length,
           publicUrl: `${env.appOrigin}/u/${urToken}`,
+          // The organisation's brand (0140), from the workflow's own tenant.
+          brand: await loadPublicBrand(env.DB, workflow.tenant_id, 'records_update_request', { origin: env.appOrigin }),
         });
         await sendEmail(env.RESEND_API_KEY, {
           to: cfg.recipient_email,

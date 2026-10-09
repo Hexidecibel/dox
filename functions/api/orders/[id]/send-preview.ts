@@ -17,6 +17,7 @@ import { loadOrderForLineWrite, requireOrderAccess } from '../../../lib/order-it
 import { planOrderSend } from '../../../lib/order-send';
 import { exitActorForRequest } from '../../../lib/sharing-rule';
 import type { Env, User } from '../../../lib/types';
+import { loadOutwardName } from '../../../lib/tenant-brand';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -35,7 +36,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const plan = await planOrderSend(context.env.DB, context.env.FILES, {
       order,
-      tenantName: tenant?.name ?? 'Documents',
+      tenantName: await loadOutwardName(context.env.DB, order.tenant_id, tenant?.name ?? 'Documents'),
       sender: user,
       actor: await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id),
       emailConfigured: Boolean(context.env.RESEND_API_KEY),
