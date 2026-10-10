@@ -986,7 +986,7 @@ const documentTypes: ModuleHelpExpanded = {
       "Document types are how dox classifies inbound files. Add the categories your tenant cares about (COA, Spec Sheet, SDS, etc.) and the AI pipeline will route every ingest to one of them.",
     columnTooltips: {
       name: 'Display name for the document type — shown on documents, in the Review Queue, and in the type filter dropdowns. Pick something users will recognize at a glance (COA, Spec Sheet, SDS).',
-      slug: 'URL-safe identifier auto-generated from the name. Stable across renames; used in API paths and as the canonical key when matching the AI\'s detected document_type to your catalog.',
+      slug: 'Internal identifier, generated from the name when the type is created and never changed afterwards. Rename the type as often as you like: starter-pack updates, saved links and the classifier keep finding it by this.',
       description: "Optional free-form notes about what this type is and isn't. Surfaced as a tooltip in pickers; doesn't affect any matching logic.",
       tenant: 'Which tenant owns this document type. Document types are tenant-scoped — every tenant maintains its own catalog.',
       status: 'Active types show up in pickers and accept new ingests. Inactive types are hidden from new flows but keep their existing documents.',
@@ -1623,6 +1623,8 @@ const settings: ModuleHelpExpanded = {
           "Names and support lines are plain text: invisible characters and characters that reverse the direction of text are refused, and a display name needs at least one letter or digit. The message says which kind of character was found and its code, since you cannot see it; it usually arrives with pasted text. Names in Persian, in Indic scripts and with emoji are fine: the joining characters those use inside a word are accepted. " +
           "Remove brand, at the bottom of the screen, clears everything and takes the logo off in one step. Clearing every field one at a time does the same thing: an empty brand is no brand. " +
           "Until a brand is saved, pages and emails show your organization name in the default navy, exactly as before. Emails to your own staff (alerts, QA notices, invitations, password resets) are not branded. The look of the portal itself when you are signed in does not change. " +
+          "How do I get an updated starter pack? Settings › Starter pack. It shows the version you are on and the one available, and Preview lists what the newer version would change before anything is written: values the pack wrote and nobody has touched are updated; values you changed are kept and shown beside the pack's new value, and replaced only if you tick them; new items are added; anything you removed or switched off stays that way; anything the pack no longer has is pointed out and left alone. An update never deletes, never switches anything off and never loosens a sharing rule. If the page says there is no starter-pack record, the organization was set up before versions existed and your administrator establishes the record once (it changes nothing you have). " +
+          "Can I rename a document type, a requirement or a claim? Yes, freely. The internal slug shown beside the name is set when the row is created and never changes, so a rename does not break pack updates, supplier packets, saved links or how documents are classified. What you cannot do is make a second one for the same thing: creating a name you already use, or one the starter pack lists as another name for something you have (Spec Sheet for Specification Sheet), is refused with the name of the existing one. If you really do want a separate one, the same dialog lets you say so, and that choice is recorded. " +
           "Where do I configure expiration alert recipients? Settings › Owner Routing. A renewal alert is grouped by the record's owner label ('QA', 'Insurance', 'Purchasing'), and an owner route points that label at a portal user or a bare email address. A record whose owner resolves to nobody is NOT broadcast to the admins — it is reported as a routing gap, so a missing route shows up instead of being papered over. How far ahead owners are warned is set on the same screen (60 days unless you change it) and can be overridden per document type. Spec alerts fall back to the tenant's org_admins when nothing else routes; renewal alerts deliberately do not. " +
           "Does the portal email my suppliers? Only when a person approves it. When a document from a supplier nears its renewal date, a request to that supplier's document contact is drafted - when the warning window opens, on the day of expiry, and 7 and 14 days after - and waits on Renewals > Supplier requests. The approver (the first portal user behind the document's owner, otherwise the master user chosen on Settings > Owner Routing, otherwise an administrator) reads it, edits the wording if they want, and presses Approve and send. It goes out as 'your organization via SupDox' with replies coming to the approver, and carries a link where the supplier uploads the new document. After 21 days with nothing accepted, reminders stop and your administrators are told. A supplier with no document contact (Supplier > Contacts) gets no request, and Renewals says so. " +
           "Why can't I see other tenants' settings? Tenant isolation — even super_admin has to switch tenant context (via the tenant switcher in the navbar) to view another tenant's settings.",
@@ -1717,6 +1719,19 @@ export const helpContent = {
   activity,
   audit,
   search,
+  /**
+   * Settings > Starter pack (migration 0141). One screen, so a plain object:
+   * the well is the whole of what it has to say before the preview says the
+   * rest item by item.
+   */
+  starter_pack: {
+    headline: 'Starter pack',
+    well:
+      'A starter pack is the set of document types, requirements, claims, lab tests and limits your organisation began with. It has a version number, and this page shows which one you are on and whether a newer one is available. ' +
+      'Preview shows exactly what a newer version would do before anything changes. Whatever the pack wrote and nobody has touched is updated. Whatever you changed is kept, shown beside the pack\'s new value, and replaced only if you tick it. New items are added, unless you already have the same thing under another name, in which case you are asked. ' +
+      'Anything you removed or switched off stays that way, and anything the pack has dropped is pointed out and left alone: an update never deletes, never switches anything off, and never makes a document easier to send outside the organisation. ' +
+      'The internal slug of a document type, requirement or claim never changes, including when you rename it. That is how an update finds the right row, so rename things as often as you like.',
+  },
   /**
    * "Documents you sent" — the export-link register. Written as a plain object
    * rather than a ModuleHelpExpanded because the surface has one screen and no

@@ -549,6 +549,25 @@ describe('the story: v1, the organisation lives in it, v2 arrives', () => {
     expect(await snapshot()).toBe(before);
   });
 
+  it('a NEWER version does not come in through apply: nothing is written, and the route says where to go', async () => {
+    const v3: StarterPack = structuredClone(v2);
+    v3.version = 3;
+    v3.requirements.push({
+      name: 'Only in version three',
+      slug: 'only-in-v3',
+      aliases: [],
+      description: null,
+      checklist: 'Commercial & Legal',
+      sort_order: 9100,
+      scope: 'supplier',
+    });
+    const before = await snapshot();
+    const res = await applyStarterPack(db, v3, tenantId, tenantSlug, seed.superAdminId);
+    expect(res.inserted).toBe(0);
+    expect(await snapshot()).toBe(before);
+    expect(await currentPackVersion(db, tenantId, 'fsqa')).toBe(2);
+  });
+
   it('a person accepts the pack\'s value for one kept column, and settles the conflict', async () => {
     const res = await roll(v2, {
       dryRun: false,
@@ -675,6 +694,37 @@ describe('POST /api/starter-packs/roll-forward and GET /status', () => {
       update_available: false,
       source: 'apply',
     });
+  });
+
+  it('POST /apply refuses an organisation on another version and points at the roll-forward', async () => {
+    const other = generateTestId();
+    await db
+      .prepare('INSERT INTO tenants (id, name, slug, active) VALUES (?, ?, ?, 1)')
+      .bind(other, `Other version ${other}`, `other-${other.slice(0, 8)}`)
+      .run();
+    // On record as a version this build does not ship (an older one, in real life).
+    await db
+      .prepare(
+        `INSERT INTO tenant_packs (id, tenant_id, pack, version, source) VALUES (?, ?, 'fsqa', ?, 'apply')`,
+      )
+      .bind(generateTestId(), other, STARTER_PACKS.fsqa.version + 1)
+      .run();
+    const { onRequestPost: applyRoute } = await import('../../functions/api/starter-packs/apply');
+    const res = await applyRoute({
+      request: new Request('http://localhost/api/starter-packs/apply', {
+        method: 'POST',
+        body: JSON.stringify({ tenant_id: other, pack: 'fsqa' }),
+      }),
+      env,
+      data: { user: superAdmin() },
+      params: {},
+    } as never);
+    const body = (await res.json()) as Record<string, any>;
+    expect(res.status).toBe(409);
+    expect(body.code).toBe('roll_forward_required');
+    expect(body.error).toMatch(/Settings > Starter pack/);
+    const rows = await db.prepare('SELECT COUNT(*) AS n FROM requirements WHERE tenant_id = ?').bind(other).first<{ n: number }>();
+    expect(rows!.n).toBe(0);
   });
 
   it('status tells an unledgered organisation what it is', async () => {

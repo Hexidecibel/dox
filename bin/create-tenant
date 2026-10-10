@@ -48,8 +48,12 @@
 # + vocabulary only (e.g. when an existing super_admin will scope into it).
 #
 # Re-running is safe: tenant rows upsert, and every pack statement is
-# INSERT OR IGNORE against a deterministic id derived from the tenant slug, so
-# nothing duplicates and admin edits to a seeded row are preserved.
+# INSERT OR IGNORE with its rows found by (tenant_id, slug), so nothing
+# duplicates, a row somebody made by hand under a pack slug is adopted, and
+# admin edits to a seeded row are preserved. The pack also records what it
+# wrote (pack_applied_items / tenant_packs, migration 0141 -- the target
+# database needs that migration first). It never UPDATES a row and never moves
+# a tenant to a newer pack version: that is POST /api/starter-packs/roll-forward.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

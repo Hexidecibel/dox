@@ -37,7 +37,9 @@
  *
  *  3. An item the ledger already knows is never inserted again. That is what
  *     lets "the tenant deleted it" stay true: re-applying a pack used to put a
- *     hard-deleted junction row straight back.
+ *     hard-deleted junction row straight back. And an organisation on another
+ *     VERSION of the pack is not written to at all: a new version reaches it
+ *     through the roll-forward, which previews first.
  *
  * Dependency-free apart from the two name-match helpers, because this file is
  * compiled to `bin/lib/shared/packItems.js` for the CLI
@@ -590,26 +592,52 @@ function idExpr(q: Sql, table: string, id: string, tenantId: string): void {
   );
 }
 
-function ledgerGuard(q: Sql, pack: string, item: PackItem, tenantId: string): void {
+/**
+ * True when the organisation has no version on record for the pack, or is on
+ * exactly this one. `tenant_packs` is append-only history, so "the version it
+ * is on" is the HIGHEST row, not any row. Parameters: tenant, pack, version, version.
+ */
+const SAME_VERSION = `COALESCE((SELECT MAX(version) FROM tenant_packs WHERE tenant_id = ? AND pack = ?), ?) = ?`;
+
+/**
+ * The two things that stop an APPLY from writing:
+ *
+ *   the ledger already knows this item (rule 3), or
+ *   the organisation is on ANOTHER VERSION of this pack.
+ *
+ * The second is what keeps a newer pack from reaching an existing organisation
+ * through the side door: without it, applying v2 over a v1 organisation would
+ * quietly insert every item v2 added -- no preview, no conflict check -- and
+ * leave the version saying 1. A new version comes through the roll-forward.
+ */
+function ledgerGuard(q: Sql, pack: string, version: number, item: PackItem, tenantId: string): void {
   q.add(
-    `NOT EXISTS (SELECT 1 FROM pack_applied_items WHERE tenant_id = ? AND pack = ? AND kind = ? AND item_key = ?)`,
+    `NOT EXISTS (SELECT 1 FROM pack_applied_items WHERE tenant_id = ? AND pack = ? AND kind = ? AND item_key = ?)` +
+      ` AND ` +
+      SAME_VERSION,
     tenantId,
     pack,
     item.kind,
     item.key,
+    tenantId,
+    pack,
+    version,
+    version,
   );
 }
 
 /**
  * The statement that INSERTS the item's row when nothing holds its natural
- * key. `guarded` adds rule 3 (never insert what the ledger already knows);
- * the roll-forward executor passes false because it has already decided.
+ * key. `guardVersion` (the pack version being applied) adds the two apply
+ * guards -- never insert what the ledger already knows, and write nothing for
+ * an organisation on another version; the roll-forward executor passes null
+ * because it has already decided.
  */
 export function packRowInsert(
   packName: string,
   item: PackItem,
   ctx: PackApplyContext,
-  guarded = true,
+  guardVersion: number | null,
 ): PackStatement {
   const spec = PACK_KIND_SPECS[item.kind];
   const q = new Sql();
@@ -617,9 +645,9 @@ export function packRowInsert(
   const f = item.fields;
   const id = packItemRowId(item, ctx.tenantSlug);
   const guard = (lead: string) => {
-    if (!guarded) return;
+    if (guardVersion === null) return;
     q.add(lead);
-    ledgerGuard(q, packName, item, t);
+    ledgerGuard(q, packName, guardVersion, item, t);
   };
 
   switch (item.kind) {
@@ -809,13 +837,16 @@ export type PackDifferenceOrigin =
  * SQL, against the row as it stands after the insert above, so the CLI (which
  * cannot read before it writes) records exactly what the portal does.
  *
- * INSERT OR IGNORE: an item already in the ledger keeps its entry.
+ * INSERT OR IGNORE: an item already in the ledger keeps its entry. `guarded`
+ * (an apply) also writes nothing for an organisation on another version of
+ * the pack, for the same reason the row insert does not.
  */
 export function packLedgerAdopt(
   packName: string,
   packVersion: number,
   item: PackItem,
   ctx: PackApplyContext,
+  guarded = false,
 ): PackStatement {
   const spec = PACK_KIND_SPECS[item.kind];
   const q = new Sql();
@@ -845,6 +876,9 @@ export function packLedgerAdopt(
   q.add(` AS differing `);
   rowLocator(q, item, ctx.tenantId);
   q.add(`) y`);
+  if (guarded) {
+    q.add(` WHERE ${SAME_VERSION}`, ctx.tenantId, packName, packVersion, packVersion);
+  }
   return { section: 'ledger', sql: q.text, params: q.params };
 }
 
@@ -879,9 +913,9 @@ export function packApplyStatements(
 ): { rows: PackStatement[]; ledger: PackStatement[] } {
   const items = packItems(pack);
   return {
-    rows: items.map((item) => packRowInsert(pack.pack, item, ctx)),
+    rows: items.map((item) => packRowInsert(pack.pack, item, ctx, pack.version)),
     ledger: [
-      ...items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx)),
+      ...items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx, true)),
       packTenantStamp(pack.pack, pack.version, ctx),
     ],
   };

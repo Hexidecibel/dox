@@ -84,6 +84,10 @@ tags:
     description: |
       What a supplier owes, derived from the verified supplier list rather than
       guessed uniformly (migration 0112).
+  - name: Starter Packs
+    description: |
+      Which starter pack and version an organisation is on, and the one door a
+      newer version is previewed and rolled forward through (migration 0141).
   - name: Records Public Pages
     description: |
       The three Records pages an outsider opens with no login: a public form,
@@ -5281,6 +5285,155 @@ paths:
                 type: object
                 properties:
                   success: { type: boolean }
+
+  /api/starter-packs/status:
+    get:
+      tags: [Starter Packs]
+      summary: Which starter pack and version an organisation is on
+      description: |
+        Migration 0141. super_admin / org_admin. One entry per pack the
+        organisation's ledger names, with the version it is on and the version
+        this build ships. `not_ledgered` is set for an organisation that has
+        pack rows and no ledger (it was set up before pack versions existed);
+        such an organisation is baselined with `bin/baseline-pack-ledger`
+        before any update can reach it.
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+      responses:
+        '200':
+          description: The packs the organisation is on
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: { type: string }
+                  packs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        pack: { type: string }
+                        label: { type: string }
+                        version: { type: integer }
+                        available_version: { type: integer, nullable: true }
+                        update_available: { type: boolean }
+                        applied_at: { type: string }
+                        applied_by_name: { type: string, nullable: true }
+                        source: { type: string, description: apply / cli / baseline / roll_forward }
+                        history: { type: array, items: { type: object } }
+                  not_ledgered:
+                    type: object
+                    nullable: true
+                    properties:
+                      pack: { type: string, nullable: true }
+
+  /api/starter-packs/roll-forward:
+    post:
+      tags: [Starter Packs]
+      summary: Preview or apply a newer starter-pack version
+      description: |
+        Migration 0141. super_admin / org_admin. The ONE door a pack update
+        comes through for an organisation that already exists.
+
+        `dry_run` DEFAULTS TO TRUE and writes nothing at all. An apply
+        recomputes the plan and guards every update by the value it was planned
+        against, so a row edited between the preview and the apply is left as
+        edited and reported in `not_applied`.
+
+        A row that still holds what the pack wrote is updated. A row the
+        organisation changed is KEPT and reported with both values; it changes
+        only when named in `accept`. A new item is inserted, or adopted when a
+        row already holds its slug, or reported as a `conflict` when the
+        organisation has the same concept under another slug. An item the pack
+        dropped is flagged and left alone. What the organisation deleted or
+        switched off stays that way. A slug is never changed, nothing is
+        deleted, and a looser sharing rule is never applied (it is reported as
+        `needs_person`). A limit's threshold moves `spec_limits.version` as a
+        manual edit does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pack: { type: string, description: Needed only when the organisation is on more than one pack }
+                dry_run: { type: boolean, default: true }
+                tenant_id: { type: string, description: super_admin only }
+                accept:
+                  type: array
+                  description: Items where the pack's value replaces the organisation's own, or an absent / conflicting item is added.
+                  items:
+                    type: object
+                    required: [kind, key]
+                    properties:
+                      kind: { type: string }
+                      key: { type: string }
+                      field: { type: string, nullable: true }
+      responses:
+        '200':
+          description: The plan (dry run) or what was applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dry_run: { type: boolean }
+                  tenant_id: { type: string }
+                  pack: { type: string }
+                  label: { type: string }
+                  from_version: { type: integer, nullable: true }
+                  to_version: { type: integer }
+                  ledgered: { type: boolean }
+                  up_to_date: { type: boolean }
+                  summary: { type: object }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind: { type: string }
+                        key: { type: string }
+                        label: { type: string }
+                        noun: { type: string }
+                        row_id: { type: string, nullable: true }
+                        outcome:
+                          type: string
+                          enum: [insert, adopt, update, keep, conflict, parent_missing, deleted, inactive, absent, removed_from_pack, unchanged]
+                        news: { type: boolean }
+                        fields:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              field: { type: string }
+                              action: { type: string, enum: [update, keep, customised, needs_person] }
+                              reason: { type: string, enum: [pack_wrote, accepted, edited, unknown, setting, loosens] }
+                              base: {}
+                              current: {}
+                              target: {}
+                        conflict: { type: object }
+                        missing: { type: string }
+                  not_applied:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind: { type: string }
+                        key: { type: string }
+                        label: { type: string }
+                        reason: { type: string, description: changed_since_preview / not_inserted / invalid_limit }
+        '400':
+          description: Malformed `accept`, or `pack` missing for an organisation on several
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: "`not_ledgered`: the organisation has no starter-pack record and must be baselined first"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/supplier-list/import:
     post:

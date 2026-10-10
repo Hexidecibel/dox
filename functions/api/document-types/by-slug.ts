@@ -24,8 +24,17 @@ function parseExtractionFields(docType: Record<string, unknown>): void {
 
 /**
  * GET /api/document-types/by-slug?slug=X&tenant_id=Y
- * Also accepts: ?name=X&tenant_id=Y (derives slug server-side)
+ * Also accepts: ?name=X&tenant_id=Y
  * Look up a document type by slug within a tenant.
+ *
+ * `?slug=` is the stable form: a slug never changes after create (decision
+ * C-154), so a renamed type still answers to the slug it was created with.
+ *
+ * `?name=` matches the type's CURRENT NAME first (case and spacing folded),
+ * and only then the slug that name would have produced. It used to do the
+ * second alone, which was the same thing while every rename re-slugged; now
+ * that a rename leaves the slug, a lookup by a renamed type's new name would
+ * otherwise miss it.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -57,11 +66,23 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       }
     }
 
-    const documentType = await context.env.DB.prepare(
-      'SELECT * FROM document_types WHERE slug = ? AND tenant_id = ? AND active = 1'
-    )
-      .bind(lookupSlug, tenantId)
-      .first();
+    let documentType: Record<string, unknown> | null = null;
+    if (!slugParam && nameParam) {
+      const wanted = sanitizeString(nameParam).toLowerCase().replace(/\s+/g, ' ').trim();
+      const named = await context.env.DB.prepare(
+        'SELECT * FROM document_types WHERE tenant_id = ? AND active = 1 AND lower(trim(name)) = ? ORDER BY created_at LIMIT 1'
+      )
+        .bind(tenantId, wanted)
+        .first();
+      documentType = (named as Record<string, unknown> | null) ?? null;
+    }
+    if (!documentType) {
+      documentType = (await context.env.DB.prepare(
+        'SELECT * FROM document_types WHERE slug = ? AND tenant_id = ? AND active = 1'
+      )
+        .bind(lookupSlug, tenantId)
+        .first()) as Record<string, unknown> | null;
+    }
 
     if (!documentType) {
       throw new NotFoundError('Document type not found');

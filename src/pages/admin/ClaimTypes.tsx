@@ -50,6 +50,12 @@ import {
   Rule as RuleIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import {
+  DuplicateConceptNotice,
+  slugStaysNote,
+  useDuplicateConcept,
+  type DuplicateConceptChoice,
+} from '../../components/DuplicateConceptNotice';
 import type { ApiClaimType, ApiRequirement, ClaimSubjectGrain } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
@@ -73,6 +79,7 @@ export function ClaimTypes() {
   const [requirements, setRequirements] = useState<ApiRequirement[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const { duplicate, clear: clearDuplicate, capture: captureDuplicate } = useDuplicateConcept();
 
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -123,6 +130,7 @@ export function ClaimTypes() {
     setFormDescription('');
     setFormGrain('any');
     setFormTenantId(isSuperAdmin ? tenantFilter || selectedTenantId || '' : user?.tenant_id || '');
+    clearDuplicate();
     setDialogOpen(true);
   };
 
@@ -132,10 +140,11 @@ export function ClaimTypes() {
     setFormDescription(ct.description || '');
     setFormGrain((ct.subject_grain as ClaimSubjectGrain) || 'any');
     setFormTenantId(ct.tenant_id);
+    clearDuplicate();
     setDialogOpen(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (choice: DuplicateConceptChoice = {}) => {
     setSaving(true);
     setError('');
     try {
@@ -144,6 +153,7 @@ export function ClaimTypes() {
           name: formName.trim(),
           description: formDescription.trim() || null,
           subject_grain: formGrain,
+          ...(choice.allow_duplicate ? { allow_duplicate: true } : {}),
         });
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
@@ -157,11 +167,15 @@ export function ClaimTypes() {
           description: formDescription.trim() || undefined,
           subject_grain: formGrain,
           tenant_id: tenantId,
+          ...choice,
         });
       }
+      clearDuplicate();
       setDialogOpen(false);
       load();
     } catch (err) {
+      // "You already have this" is answered inside the dialog, with the choices.
+      if (captureDuplicate(err)) return;
       setError(err instanceof Error ? err.message : 'Failed to save claim');
     } finally {
       setSaving(false);
@@ -391,6 +405,15 @@ export function ClaimTypes() {
           </IconButton>
         </DialogTitle>
         <DialogContent dividers>
+          {duplicate && (
+            <DuplicateConceptNotice
+              state={duplicate}
+              renaming={!!editing}
+              busy={saving}
+              onChoose={(choice) => handleSave(choice)}
+              onDismiss={clearDuplicate}
+            />
+          )}
           {isSuperAdmin && !editing && (
             <FormControl fullWidth sx={{ mt: 1, mb: 2 }}>
               <InputLabel>Tenant</InputLabel>
@@ -444,6 +467,11 @@ export function ClaimTypes() {
             onChange={(e) => setFormDescription(e.target.value)}
             disabled={saving}
           />
+          {editing && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
+              {slugStaysNote(editing.slug)}
+            </Typography>
+          )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setDialogOpen(false)} disabled={saving}>
@@ -451,7 +479,7 @@ export function ClaimTypes() {
           </Button>
           <Button
             variant="contained"
-            onClick={handleSave}
+            onClick={() => handleSave()}
             disabled={!formName.trim() || saving || (!editing && isSuperAdmin && !formTenantId)}
           >
             {saving ? 'Saving…' : editing ? 'Save Changes' : 'Add Claim'}

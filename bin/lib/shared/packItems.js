@@ -476,25 +476,30 @@ function idExpr(q, table, id, tenantId) {
     id
   );
 }
-function ledgerGuard(q, pack, item, tenantId) {
+var SAME_VERSION = `COALESCE((SELECT MAX(version) FROM tenant_packs WHERE tenant_id = ? AND pack = ?), ?) = ?`;
+function ledgerGuard(q, pack, version, item, tenantId) {
   q.add(
-    `NOT EXISTS (SELECT 1 FROM pack_applied_items WHERE tenant_id = ? AND pack = ? AND kind = ? AND item_key = ?)`,
+    `NOT EXISTS (SELECT 1 FROM pack_applied_items WHERE tenant_id = ? AND pack = ? AND kind = ? AND item_key = ?) AND ` + SAME_VERSION,
     tenantId,
     pack,
     item.kind,
-    item.key
+    item.key,
+    tenantId,
+    pack,
+    version,
+    version
   );
 }
-function packRowInsert(packName, item, ctx, guarded = true) {
+function packRowInsert(packName, item, ctx, guardVersion) {
   const spec = PACK_KIND_SPECS[item.kind];
   const q = new Sql();
   const t = ctx.tenantId;
   const f = item.fields;
   const id = packItemRowId(item, ctx.tenantSlug);
   const guard = (lead) => {
-    if (!guarded) return;
+    if (guardVersion === null) return;
     q.add(lead);
-    ledgerGuard(q, packName, item, t);
+    ledgerGuard(q, packName, guardVersion, item, t);
   };
   switch (item.kind) {
     case "owner_label":
@@ -650,7 +655,7 @@ function rowLocator(q, item, tenantId) {
       break;
   }
 }
-function packLedgerAdopt(packName, packVersion, item, ctx) {
+function packLedgerAdopt(packName, packVersion, item, ctx, guarded = false) {
   const spec = PACK_KIND_SPECS[item.kind];
   const q = new Sql();
   const fieldNames = Object.keys(item.fields);
@@ -678,6 +683,9 @@ function packLedgerAdopt(packName, packVersion, item, ctx) {
   q.add(` AS differing `);
   rowLocator(q, item, ctx.tenantId);
   q.add(`) y`);
+  if (guarded) {
+    q.add(` WHERE ${SAME_VERSION}`, ctx.tenantId, packName, packVersion, packVersion);
+  }
   return { section: "ledger", sql: q.text, params: q.params };
 }
 function packTenantStamp(packName, packVersion, ctx) {
@@ -690,9 +698,9 @@ function packTenantStamp(packName, packVersion, ctx) {
 function packApplyStatements(pack, ctx) {
   const items = packItems(pack);
   return {
-    rows: items.map((item) => packRowInsert(pack.pack, item, ctx)),
+    rows: items.map((item) => packRowInsert(pack.pack, item, ctx, pack.version)),
     ledger: [
-      ...items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx)),
+      ...items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx, true)),
       packTenantStamp(pack.pack, pack.version, ctx)
     ]
   };

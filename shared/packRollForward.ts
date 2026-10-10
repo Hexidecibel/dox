@@ -30,6 +30,8 @@
  *   in the ledger, row gone                    the organisation deleted it:
  *                                              STAYS GONE, and that is recorded
  *                                              so no later version resurrects it
+ *                                              (a person may ask for it back by
+ *                                              naming it; nothing else does)
  *   in the ledger, row switched off            STAYS OFF, untouched
  *   in the ledger, not in the pack any more    FLAGGED. Never deleted, never
  *                                              switched off.
@@ -86,7 +88,11 @@ export interface PackCurrentRow {
   [column: string]: PackValue | undefined;
 }
 
-/** A person's "take the pack's value here". No `field` = every kept column of the item. */
+/**
+ * A person's "take the pack's value here". No `field` = every kept column of
+ * the item -- or, for an item that is not in the organisation at all (a
+ * conflict, or one recorded as absent or deleted), "add it".
+ */
 export interface PackAccept {
   kind: string;
   key: string;
@@ -181,6 +187,8 @@ export interface PackPlanItem {
   missing?: string;
   /** For `insert`: the item itself, so the executor does not look it up again. */
   item?: PackItem;
+  /** For `insert`: a gone item a person asked for back. Its old ledger entry is replaced. */
+  restores?: boolean;
   /** Columns the row is updated to, guarded by the values they were planned against. */
   row_update?: { set: Record<string, PackValue>; guard: Record<string, PackValue> };
   /** The ledger entry this run writes, or null when the entry already says it. */
@@ -346,7 +354,12 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
 
     // ---- no row --------------------------------------------------------
     if (!row) {
-      if (entry) {
+      // A person may ask for a gone item back by naming it in `accept`. That
+      // is the ONLY way one returns: it matters most for an organisation that
+      // was baselined, where "absent" covers both "we removed it" and "the pack
+      // gained it after we were set up", and only a person can say which.
+      const restoring = !!entry && acceptAll.has(id);
+      if (entry && !restoring) {
         // Ledgered, and there is nothing there: the organisation removed it
         // (or never had it). It stays gone; the first run that notices writes
         // that down so the next one has nothing to report as new.
@@ -384,13 +397,16 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
       }
       if (goneParent) {
         // The organisation removed what this would hang off, so it is gone by
-        // the same decision. Recorded, so it is settled.
+        // the same decision. Recorded, so it is settled. (Asked back for while
+        // its parent is still gone: it stays as it was, and says what is missing.)
         out.push({
           ...base,
           outcome: 'absent',
-          news: true,
+          news: !entry,
           missing: goneParent,
-          ledger: { row_id: null, pack_version: pack.version, written: item.fields, differing: {}, state: 'absent' },
+          ledger: entry
+            ? null
+            : { row_id: null, pack_version: pack.version, written: item.fields, differing: {}, state: 'absent' },
         });
         resolved.set(id, 'gone');
         continue;
@@ -430,7 +446,7 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
         }
       }
 
-      out.push({ ...base, outcome: 'insert', news: true, item });
+      out.push({ ...base, outcome: 'insert', news: true, item, ...(restoring ? { restores: true } : {}) });
       resolved.set(id, 'present');
       atNaturalKey.add(id);
       continue;
@@ -501,7 +517,21 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
       }
     }
 
-    // A person's accept: every kept column of the item, or one named column.
+    // One setting, several columns: it moves whole or not at all.
+    for (const group of spec.groups) {
+      const members = fields.filter((f) => group.includes(f.field));
+      if (members.some((f) => f.action !== 'update')) {
+        for (const f of members) {
+          if (f.action === 'update') {
+            f.action = 'keep';
+            f.reason = 'setting';
+          }
+        }
+      }
+    }
+
+    // A person's accept: every kept column of the item, or one named column --
+    // and with a column of a setting, the rest of that setting.
     const groupOf = (name: string) => spec.groups.find((g) => g.includes(name)) ?? [name];
     const accepted = new Set<string>();
     for (const f of fields) {
@@ -514,19 +544,6 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
       if (accepted.has(f.field) && (f.action === 'keep' || f.action === 'customised')) {
         f.action = 'update';
         f.reason = 'accepted';
-      }
-    }
-
-    // One setting, several columns: it moves whole or not at all.
-    for (const group of spec.groups) {
-      const members = fields.filter((f) => group.includes(f.field));
-      if (members.some((f) => f.action !== 'update')) {
-        for (const f of members) {
-          if (f.action === 'update') {
-            f.action = 'keep';
-            f.reason = 'setting';
-          }
-        }
       }
     }
 

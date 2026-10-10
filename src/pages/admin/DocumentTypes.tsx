@@ -42,6 +42,12 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import {
+  DuplicateConceptNotice,
+  slugStaysNote,
+  useDuplicateConcept,
+  type DuplicateConceptChoice,
+} from '../../components/DuplicateConceptNotice';
+import {
   defaultRenewalMonthsForTypeName,
   defaultRenewalPolicyForTypeName,
   defaultRenewalSettingForTypeName,
@@ -84,6 +90,7 @@ export function DocumentTypes() {
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const { duplicate, clear: clearDuplicate, capture: captureDuplicate } = useDuplicateConcept();
 
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -248,6 +255,7 @@ export function DocumentTypes() {
         ? (tenantFilter || selectedTenantId || '')
         : (user?.tenant_id || '')
     );
+    clearDuplicate();
     setDialogOpen(true);
   };
 
@@ -276,6 +284,7 @@ export function DocumentTypes() {
     setFormTenantId(dt.tenant_id);
     setFormCloses(null);
     setClosesOriginal(null);
+    clearDuplicate();
     setDialogOpen(true);
     api.documentTypeRequirements
       .list({ documentTypeId: dt.id })
@@ -379,7 +388,7 @@ export function DocumentTypes() {
     return { renewal_policy: 'period', renewal_interval_months: Number(formRenewalMonths), renewal_window: null };
   };
 
-  const handleSave = async () => {
+  const handleSave = async (choice: DuplicateConceptChoice = {}) => {
     setSaving(true);
     setError('');
     try {
@@ -391,6 +400,7 @@ export function DocumentTypes() {
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
           sharing_rule: formSharingRule,
+          ...(choice.allow_duplicate ? { allow_duplicate: true } : {}),
         });
         if (formCloses !== null && closesOriginal !== null && !sameIdSet(formCloses, closesOriginal)) {
           await api.documentTypeRequirements.replace({
@@ -414,6 +424,7 @@ export function DocumentTypes() {
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
           sharing_rule: formSharingRule,
+          ...choice,
         });
         if (formCloses && formCloses.length > 0 && created.documentType?.id) {
           await api.documentTypeRequirements.replace({
@@ -423,9 +434,12 @@ export function DocumentTypes() {
           });
         }
       }
+      clearDuplicate();
       setDialogOpen(false);
       loadDocumentTypes();
     } catch (err) {
+      // "You already have this" is answered inside the dialog, with the choices.
+      if (captureDuplicate(err)) return;
       setError(err instanceof Error ? err.message : 'Failed to save document type');
     } finally {
       setSaving(false);
@@ -728,6 +742,15 @@ export function DocumentTypes() {
           </IconButton>
         </DialogTitle>
         <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+          {duplicate && (
+            <DuplicateConceptNotice
+              state={duplicate}
+              renaming={!!editingType}
+              busy={saving}
+              onChoose={(choice) => handleSave(choice)}
+              onDismiss={clearDuplicate}
+            />
+          )}
           {isSuperAdmin && !editingType && (
             <FormControl fullWidth sx={{ mt: 1, mb: 2 }}>
               <InputLabel>Tenant</InputLabel>
@@ -754,6 +777,7 @@ export function DocumentTypes() {
             onChange={(e) => setFormName(e.target.value)}
             disabled={saving}
             autoFocus
+            helperText={editingType ? slugStaysNote(editingType.slug) : undefined}
             sx={{ mt: isSuperAdmin && !editingType ? 0 : 1, mb: 2 }}
           />
           <TextField
@@ -958,7 +982,7 @@ export function DocumentTypes() {
           </Button>
           <Button
             variant="contained"
-            onClick={handleSave}
+            onClick={() => handleSave()}
             disabled={!formName.trim() || saving || !formLeadValid || windowInvalid || (!editingType && isSuperAdmin && !formTenantId)}
           >
             {saving ? 'Saving...' : editingType ? 'Save Changes' : 'Add Document Type'}

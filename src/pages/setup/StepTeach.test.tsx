@@ -108,6 +108,7 @@ const TYPES: ApiDocumentType[] = [
 
 const PACK: StarterPackCatalogEntry = {
   pack: 'fsqa',
+  version: 1,
   label: 'Food Safety',
   description: '',
   sections: [],

@@ -76,6 +76,7 @@ const run: TenantSetupRun = {
 
 const pack = {
   pack: 'fsqa',
+  version: 1,
   label: 'Food Safety',
   description: '',
   sections: [],

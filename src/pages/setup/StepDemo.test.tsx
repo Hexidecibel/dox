@@ -355,6 +355,7 @@ describe('StepDemo — the whole screen', () => {
 describe('StepDemo — the closing action', () => {
   const pack = {
     pack: 'fsqa',
+    version: 1,
     label: 'Food Safety',
     description: '',
     sections: [],

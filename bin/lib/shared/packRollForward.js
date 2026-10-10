@@ -504,7 +504,8 @@ function planPackRollForward(input) {
       ledger: null
     };
     if (!row) {
-      if (entry) {
+      const restoring = !!entry && acceptAll.has(id);
+      if (entry && !restoring) {
         const state = GONE_STATES.has(entry.state) ? entry.state : "deleted";
         const next2 = {
           row_id: null,
@@ -539,9 +540,9 @@ function planPackRollForward(input) {
         out.push({
           ...base,
           outcome: "absent",
-          news: true,
+          news: !entry,
           missing: goneParent,
-          ledger: { row_id: null, pack_version: pack.version, written: item.fields, differing: {}, state: "absent" }
+          ledger: entry ? null : { row_id: null, pack_version: pack.version, written: item.fields, differing: {}, state: "absent" }
         });
         resolved.set(id, "gone");
         continue;
@@ -578,7 +579,7 @@ function planPackRollForward(input) {
           continue;
         }
       }
-      out.push({ ...base, outcome: "insert", news: true, item });
+      out.push({ ...base, outcome: "insert", news: true, item, ...restoring ? { restores: true } : {} });
       resolved.set(id, "present");
       atNaturalKey.add(id);
       continue;
@@ -629,6 +630,17 @@ function planPackRollForward(input) {
         });
       }
     }
+    for (const group of spec.groups) {
+      const members = fields.filter((f) => group.includes(f.field));
+      if (members.some((f) => f.action !== "update")) {
+        for (const f of members) {
+          if (f.action === "update") {
+            f.action = "keep";
+            f.reason = "setting";
+          }
+        }
+      }
+    }
     const groupOf = (name) => spec.groups.find((g) => g.includes(name)) ?? [name];
     const accepted = /* @__PURE__ */ new Set();
     for (const f of fields) {
@@ -641,17 +653,6 @@ function planPackRollForward(input) {
       if (accepted.has(f.field) && (f.action === "keep" || f.action === "customised")) {
         f.action = "update";
         f.reason = "accepted";
-      }
-    }
-    for (const group of spec.groups) {
-      const members = fields.filter((f) => group.includes(f.field));
-      if (members.some((f) => f.action !== "update")) {
-        for (const f of members) {
-          if (f.action === "update") {
-            f.action = "keep";
-            f.reason = "setting";
-          }
-        }
       }
     }
     if (item.kind === "document_type") {

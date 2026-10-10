@@ -116,6 +116,9 @@ import type {
   TenantSetupRunResponse,
   TenantSetupStatus,
   StarterPackCatalogResponse,
+  TenantPackStatusResponse,
+  PackRollForwardResponse,
+  PackAccept,
   ApplyStarterPackResponse,
   ApplyRequirementPacketResponse,
   DocumentTypeRequirementsResponse,
@@ -221,6 +224,12 @@ function parseDocument(doc: any): Document {
   };
 }
 
+// What a non-2xx answer is thrown as: an Error with the status, the server's
+// `code` and the parsed body attached. Lives in ./apiError so a component can
+// import the class without importing this whole client.
+export { ApiError } from './apiError';
+import { ApiError } from './apiError';
+
 /**
  * Core fetch helper. Reads the auth token, sets headers, handles errors.
  */
@@ -251,13 +260,15 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
     }
 
     let message: string;
+    let parsed: unknown;
     try {
       const body = await res.json();
+      parsed = body;
       message = body.error || body.message || res.statusText;
     } catch {
       message = await res.text() || res.statusText;
     }
-    throw new Error(message);
+    throw new ApiError(message, res.status, parsed);
   }
 
   // Handle empty responses (204 No Content)
@@ -1285,7 +1296,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null; sharing_rule?: import('../../shared/sharingRule').SharingRule }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null; sharing_rule?: import('../../shared/sharingRule').SharingRule; allow_duplicate?: boolean; adopt_pack_slug?: boolean }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1295,7 +1306,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null; sharing_rule?: import('../../shared/sharingRule').SharingRule }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null; sharing_rule?: import('../../shared/sharingRule').SharingRule; allow_duplicate?: boolean }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1601,6 +1612,10 @@ export const api = {
       sort_order?: number;
       tenant_id?: string;
       scope?: RequirementScope;
+      /** Create it although it duplicates an existing requirement or a pack item (audited). */
+      allow_duplicate?: boolean;
+      /** The name is a pack item this organisation lacks: create it under the pack's slug. */
+      adopt_pack_slug?: boolean;
     }) =>
       fetchApi<{ requirement: ApiRequirement }>('/requirements', {
         method: 'POST',
@@ -1611,13 +1626,14 @@ export const api = {
     update: (
       id: string,
       data: {
+        // No `slug`: it is set once, at create, and the server refuses a change.
         name?: string;
-        slug?: string;
         description?: string | null;
         checklist?: string | null;
         sort_order?: number;
         active?: number;
         scope?: RequirementScope;
+        allow_duplicate?: boolean;
       },
     ) =>
       fetchApi<{ requirement: ApiRequirement }>(`/requirements/${id}`, {
@@ -1932,6 +1948,8 @@ export const api = {
       subject_grain?: ClaimSubjectGrain;
       sort_order?: number;
       tenant_id?: string;
+      allow_duplicate?: boolean;
+      adopt_pack_slug?: boolean;
     }) =>
       fetchApi<{ claimType: ApiClaimType }>('/claim-types', {
         method: 'POST',
@@ -1942,12 +1960,13 @@ export const api = {
     update: (
       id: string,
       data: {
+        // No `slug`: it is set once, at create, and the server refuses a change.
         name?: string;
-        slug?: string;
         description?: string | null;
         subject_grain?: ClaimSubjectGrain;
         sort_order?: number;
         active?: number;
+        allow_duplicate?: boolean;
       },
     ) =>
       fetchApi<{ claimType: ApiClaimType }>(`/claim-types/${id}`, {
@@ -2423,6 +2442,36 @@ export const api = {
           pack: params.pack,
           tenant_id: params.tenantId,
           run_id: params.runId,
+        }),
+      }),
+
+    /**
+     * GET /api/starter-packs/status — which pack and version the organisation
+     * is on, and whether this build ships a newer one.
+     */
+    status: (params?: { tenantId?: string }): Promise<TenantPackStatusResponse> => {
+      const qs = params?.tenantId ? `?tenant_id=${encodeURIComponent(params.tenantId)}` : '';
+      return fetchApi<TenantPackStatusResponse>(`/starter-packs/status${qs}`);
+    },
+
+    /**
+     * POST /api/starter-packs/roll-forward — the one door a pack update comes
+     * through. `dryRun` defaults to TRUE here as it does on the server: a call
+     * that does not say otherwise writes nothing.
+     */
+    rollForward: (params: {
+      tenantId?: string;
+      pack?: string;
+      dryRun?: boolean;
+      accept?: PackAccept[];
+    }): Promise<PackRollForwardResponse> =>
+      fetchApi<PackRollForwardResponse>('/starter-packs/roll-forward', {
+        method: 'POST',
+        body: JSON.stringify({
+          tenant_id: params.tenantId,
+          pack: params.pack,
+          dry_run: params.dryRun !== false,
+          accept: params.accept ?? [],
         }),
       }),
 

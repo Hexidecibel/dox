@@ -47,6 +47,7 @@ const MODULE_LABEL: Record<HelpModuleKey, string> = {
   audit: 'Audit Log',
   search: 'Search',
   sentDocuments: 'Documents you sent',
+  starter_pack: 'Starter pack',
   approvedItems: 'Approved items',
   customerCoa: 'Customer contacts and COA requirements',
   tenants: 'Tenants',

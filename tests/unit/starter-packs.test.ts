@@ -848,16 +848,14 @@ describe('starter packs — the CLI summary stays truthful', () => {
 // The two implementations of "apply a pack"
 // ---------------------------------------------------------------------------
 /**
- * There are two, and there have to be: `bin/lib/starter-packs.mjs` emits SQL
- * TEXT for `wrangler d1 execute --file`, while the setup wizard runs inside a
- * Worker where values belong in bound parameters, not interpolated into a
- * string. What must never differ is the ROW IDENTITY: both write
- * `packRowId(prefix, tenantSlug, slug)`, so a tenant seeded by the CLI and then
- * walked through the wizard collides on every primary key and inserts nothing.
- *
- * If those ids ever drift, nothing fails loudly — the wizard simply inserts a
- * complete second copy of the vocabulary under fresh keys. That is the failure
- * these assertions exist to make impossible.
+ * There USED to be two, hand-written: `bin/lib/starter-packs.mjs` emitting SQL
+ * text for `wrangler d1 execute --file`, and the setup wizard binding
+ * parameters inside a Worker. Since migration 0141 both run the statements
+ * `packApplyStatements` (shared/packItems.ts) writes once -- the CLI inlines
+ * them, the portal binds them -- so these assertions now pin that the CLI is
+ * still reading the SAME compiled module (a stale `bin/lib/shared/packItems.js`
+ * is the one way the two can still differ) and that the id a pack gives a row
+ * it inserts has not moved for the organisations that already have those ids.
  */
 describe('starter packs — the CLI and the in-portal applier agree', () => {
   /**

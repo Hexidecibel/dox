@@ -291,8 +291,20 @@ export async function runPackRollForward(
   if (inserts.length > 0) {
     await runBatches(
       db,
-      inserts.map((i) => bind(db, packRowInsert(pack.pack, i.item!, ctx, false))),
+      inserts.map((i) => bind(db, packRowInsert(pack.pack, i.item!, ctx, null))),
     );
+    // An item a person asked for back replaces the entry that said it was gone.
+    const restored = inserts.filter((i) => i.restores);
+    if (restored.length > 0) {
+      await runBatches(
+        db,
+        restored.map((i) =>
+          db
+            .prepare('DELETE FROM pack_applied_items WHERE tenant_id = ? AND pack = ? AND kind = ? AND item_key = ?')
+            .bind(tenantId, pack.pack, i.kind, i.key),
+        ),
+      );
+    }
     await runBatches(
       db,
       inserts.map((i) => bind(db, packLedgerAdopt(pack.pack, pack.version, i.item!, ctx))),

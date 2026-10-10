@@ -1519,6 +1519,84 @@ The request composer's line closure reads the same closures (`loadConfirmedClosu
 
 ---
 
+## Slugs Do Not Change, and a Concept Is Not Created Twice
+
+Document types, requirements and claim types each have a `slug`. It is set once, when the row is created, and it is the same for the same concept in every organisation — which is what lets a starter-pack update find the right row.
+
+| Endpoint | Rule |
+|----------|------|
+| `PUT /api/document-types/:id` | A rename (`name`) no longer changes `slug`. It used to re-derive it on every rename. |
+| `PUT /api/requirements/:id`, `PUT /api/claim-types/:id` | The `slug` field is gone. |
+| all three `PUT`s | Sending a `slug` other than the one the row has is **400** `{ "code": "slug_immutable" }`. Sending the slug it already has is accepted (an editor that posts every field). |
+| `GET /api/document-types/by-slug?name=` | Matches the type's CURRENT name first, then the slug that name would produce. `?slug=` is the stable form. |
+
+**Duplicate concepts.** On `POST` (and on a `PUT` that changes `name`) the name is compared with every row the organisation holds in that vocabulary — active or not, by name and by slug — and with the names, slugs and `aliases` of its starter pack's items. Two names are the same when they are equal after lower-casing and removing everything that is not a letter or a digit (`W-9`, `W 9` and `w9` are one name); nothing fuzzier. `Spec Sheet` is recognised as `Specification Sheet` only because the pack lists it as an alias. A hit is refused:
+
+```json
+409
+{
+  "error": "\"Spec Sheet\" is another name for the document type \"Specification Sheet\" (specification-sheet). The starter pack lists it as the same thing as \"Specification Sheet\". Use that one, or confirm that you really want a separate one.",
+  "code": "duplicate_concept",
+  "duplicate": { "source": "existing", "id": "…", "name": "Specification Sheet", "slug": "specification-sheet", "active": true, "matched_on": "pack_alias", "pack": "fsqa", "pack_item_name": "Specification Sheet" }
+}
+```
+
+- `duplicate.source` is `existing` (the organisation holds the row; `active: false` means it is switched off — reactivate it instead) or `pack` (its starter pack defines the item and it holds no row for it).
+- Repeat the request with **`"allow_duplicate": true`** to create (or rename) anyway. The audit row carries `duplicate_override` with the row it duplicated.
+- For `source: "pack"`, repeat a `POST` with **`"adopt_pack_slug": true`** to create the row under the PACK'S slug (audited as `adopted_pack_slug`), so later pack updates reach it. Typing the pack item's own name in full needs neither flag: its slug is already the pack's.
+- An organisation that has taken no pack is compared with its own rows only.
+- An exact slug collision is still the older 409 (`A … with this slug already exists for this tenant`) and cannot be overridden.
+
+## Starter Pack Versions and Roll-Forward
+
+A starter pack has a `version` (a whole number, in `starter-packs/<name>.json`, returned by `GET /api/starter-packs`). An organisation's ledger records which version it is on and what the pack wrote into each row (migration 0141), so a later version can be rolled forward without undoing what the organisation changed.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/starter-packs/status` | super_admin, org_admin | `{ tenant_id, packs: [{ pack, label, version, available_version, update_available, applied_at, applied_by_name, source, history }], not_ledgered }`. `not_ledgered` is set (`{ pack }`) for an organisation that has pack rows and no ledger. `?tenant_id=` for a super_admin. |
+| `POST /api/starter-packs/roll-forward` | super_admin, org_admin | `{ pack?, dry_run?, accept?, tenant_id? }`. **`dry_run` defaults to true and writes nothing.** `pack` is needed only when the organisation is on more than one. |
+| `POST /api/starter-packs/apply` | super_admin, org_admin | Unchanged in shape; the response gains `version`. Applying never updates a row and never moves an organisation to a new version. |
+
+```bash
+# What would version 2 do? (writes nothing)
+curl -X POST http://localhost:8788/api/starter-packs/roll-forward \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Do it, and take the pack's wording for one description this organisation had changed
+curl -X POST http://localhost:8788/api/starter-packs/roll-forward \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{ "dry_run": false, "accept": [{ "kind": "requirement", "key": "gtin", "field": "description" }] }'
+```
+
+The response is the same shape for a dry run and an apply: `from_version`, `to_version`, `up_to_date`, `summary`, `items[]` and (apply only) `not_applied[]`. Each item has `kind`, `key` (its slug, or `parent__child` for a link), `label`, `outcome`, `news`, and `fields[]` — one entry per column that is not simply in step, with `action`, `reason`, `current`, `target` and, when known, `base` (what the pack wrote).
+
+| What is true of the row | What happens | Reported as |
+|---|---|---|
+| It still holds what the pack wrote | Updated to the new version's value | field `action: "update"` |
+| The organisation changed it, and the new version changes it too | **Kept.** Changed only if named in `accept` | field `action: "keep"`, with `base`, `current`, `target` |
+| The organisation changed it and the pack did not | Kept | field `action: "customised"` |
+| It already differed when the organisation was first recorded (origin unknown) | Kept; never overwritten on a guess | `reason: "unknown"` |
+| The change would loosen a document type's sharing rule | **Never applied here**, accepted or not. A person changes it on the type | field `action: "needs_person"` |
+| A new pack item, nothing holds its slug | Inserted | item `outcome: "insert"` |
+| A new pack item, a row already holds its slug | That row becomes the item; nothing is added | `outcome: "adopt"` |
+| A new pack item the organisation has under another slug (by name or alias) | Not added unless named in `accept` | `outcome: "conflict"`, with `conflict` naming the row |
+| A new link whose other end is not in place | Waits; offered again next time | `outcome: "parent_missing"` |
+| The pack no longer has the item | Flagged. Never deleted, never switched off | `outcome: "removed_from_pack"` |
+| The organisation switched the row off | Stays off; not updated while off | `outcome: "inactive"` |
+| The organisation deleted the row, or never had it | Stays gone. Added only if named in `accept` | `outcome: "deleted"` / `"absent"` |
+
+- **Per column.** An organisation that rewrote a type's description still gets the pack's new default owner. Two settings move whole or not at all: a limit's threshold (`operator`, `value_min`, `value_max`, `unit`) and a type's renewal (`renewal_policy`, `renewal_interval_months`, `renewal_window`).
+- **`accept`** is a list of `{ kind, key }` (every kept column of the item, or "add it" for a conflict or an absent item) or `{ kind, key, field }` (one column, and with it the rest of its setting).
+- **A slug is never changed.** Nothing is deleted or switched off.
+- **A limit's threshold** moves through the same rule as a manual edit: `spec_limits.version` goes up by one and a `spec_limit.updated` audit row is written with `via: "pack_roll_forward"`. Verdicts already recorded keep their frozen snapshot.
+- **An apply recomputes the plan** and guards every update in SQL by the value it was planned against. A row somebody edited in between is left as they set it and listed in `not_applied` with `reason: "changed_since_preview"`.
+- **A second roll-forward is a no-op**: `up_to_date: true`, `summary.writes: 0`, nothing written or audited. What is still open (a conflict, a looser sharing rule) is still listed.
+- Audited as `starter_pack.roll_forward` with the whole plan.
+
+**`409 not_ledgered`.** An organisation set up before migration 0141 has no ledger, and the door refuses it (dry run included): with no record of what the pack wrote, every pack item it lacks would look new, including the ones it removed. `bin/baseline-pack-ledger` (dry run by default; `--tenant`, `--all` report-only, `--pack`, `--remote`, `--persist-to`, `--apply`) compares its rows with the pack and records each item as the pack's, as differing (origin unknown), as switched off, or as absent. It changes none of the organisation's own rows.
+
+---
+
 ## Agentic Integration
 
 The document portal supports an email-to-agent-to-portal pipeline for automated document ingestion. Here is the typical flow:

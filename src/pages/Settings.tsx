@@ -29,6 +29,7 @@ import {
   AlternateEmail as OwnerRoutesIcon,
   ViewModule as ModulesIcon,
   Palette as BrandIcon,
+  SystemUpdateAlt as StarterPackIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useModuleAccess } from '../contexts/ModuleAccessContext';
@@ -54,6 +55,7 @@ import { ProcessingStatus } from './admin/ProcessingStatus';
 import LearningDashboard from './admin/LearningDashboard';
 import TenantExtractionContextBox from './TenantExtractionContextBox';
 import { BrandSettings } from './admin/BrandSettings';
+import { StarterPackSettings } from './admin/StarterPackSettings';
 
 interface SettingsItem {
   // URL-friendly key used as /settings/:section
@@ -135,6 +137,10 @@ const SECTIONS: SettingsSection[] = [
     title: 'Organization',
     items: [
       { key: 'brand', label: 'Brand', icon: <BrandIcon />, roles: ALL_ADMIN, component: BrandSettings },
+      // Which starter pack and version the organisation is on, and the one
+      // place a newer version is previewed and rolled forward (migration 0141).
+      // Ungated by module: a pack writes into several of them.
+      { key: 'starter-pack', label: 'Starter pack', icon: <StarterPackIcon />, roles: ALL_ADMIN, component: StarterPackSettings },
     ],
   },
   {
