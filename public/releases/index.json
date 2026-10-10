@@ -1,6 +1,11 @@
 {
-  "current": "2.34.0",
+  "current": "2.35.0",
   "versions": [
+    {
+      "version": "2.35.0",
+      "date": "2026-10-10",
+      "title": "Names that stay put, packs that can be updated"
+    },
     {
       "version": "2.34.0",
       "date": "2026-10-10",

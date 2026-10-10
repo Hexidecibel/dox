@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.35.0](releases/v2.35.0.md) — 2026-10-10 — Names that stay put, packs that can be updated
 - [v2.34.0](releases/v2.34.0.md) — 2026-10-10 — What an outside page is allowed to show
 - [v2.33.0](releases/v2.33.0.md) — 2026-10-09 — Your name, your colours, on what leaves
 - [v2.32.0](releases/v2.32.0.md) — 2026-10-08 — On hold means it does not leave
