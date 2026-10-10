@@ -84,6 +84,11 @@ tags:
     description: |
       What a supplier owes, derived from the verified supplier list rather than
       guessed uniformly (migration 0112).
+  - name: Records Public Pages
+    description: |
+      The three Records pages an outsider opens with no login: a public form,
+      an update request and a workflow sign-off. Eight routes, each answering
+      with an explicit allow-list (decisions C-120..C-132).
   - name: GraphQL
     description: GraphQL API (alternative to REST)
 
@@ -126,6 +131,142 @@ components:
         support:
           nullable: true
           allOf: [{ $ref: '#/components/schemas/BrandSupportLine' }]
+    RecordsPublicField:
+      type: object
+      additionalProperties: false
+      description: "One field of a Records public page. `config` is a per-column-type projection (dropdown options, number / date formatting, `multiple`), never the stored column config."
+      properties:
+        key: { type: string }
+        type: { type: string }
+        label: { type: string }
+        help_text: { type: string, nullable: true }
+        required: { type: boolean }
+        position: { type: integer }
+        picker: { type: boolean, description: "Present (true) only on a customer / supplier / product field of a public FORM whose builder opted its list in." }
+        config:
+          type: object
+          nullable: true
+          additionalProperties: false
+          properties:
+            options:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  value: { type: string }
+                  label: { type: string }
+                  color: { type: string }
+            allow_custom: { type: boolean }
+            precision: { type: number }
+            format: { type: string }
+            currency_code: { type: string }
+            include_time: { type: boolean }
+            multiple: { type: boolean }
+
+    RecordsPublicValue:
+      description: "One cell as a public page may show it: text, a number, a yes / no or a list of texts. A reference is its name; an id or an object is never sent."
+      nullable: true
+      oneOf:
+        - { type: string }
+        - { type: number }
+        - { type: boolean }
+        - { type: array, items: { type: string } }
+
+    RecordsPublicFormView:
+      type: object
+      additionalProperties: false
+      properties:
+        form:
+          type: object
+          additionalProperties: false
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+            accent_color: { type: string, nullable: true }
+            logo_url: { type: string, nullable: true, description: Always null }
+        fields:
+          type: array
+          items: { $ref: '#/components/schemas/RecordsPublicField' }
+        turnstile_site_key: { type: string }
+        entity_options:
+          type: object
+          additionalProperties: false
+          description: "Only the kinds a field opted in; absent when none did."
+          properties:
+            customer: { type: array, items: { $ref: '#/components/schemas/RecordsPublicEntityOption' } }
+            supplier: { type: array, items: { $ref: '#/components/schemas/RecordsPublicEntityOption' } }
+            product: { type: array, items: { $ref: '#/components/schemas/RecordsPublicEntityOption' } }
+        attachments:
+          type: object
+          additionalProperties: false
+          properties:
+            enabled: { type: boolean }
+            max_attachments: { type: integer }
+            max_file_size_mb: { type: integer }
+            allowed_mime_types: { type: array, items: { type: string } }
+        brand: { $ref: '#/components/schemas/PublicBrand' }
+
+    RecordsPublicEntityOption:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+
+    RecordsPublicUpdateRequestView:
+      type: object
+      additionalProperties: false
+      properties:
+        request:
+          type: object
+          additionalProperties: false
+          properties:
+            sheet_name: { type: string }
+            row_title: { type: string, nullable: true }
+            sender_name: { type: string, description: "The sender's name, else the organisation's. Never an email." }
+            message: { type: string, nullable: true }
+            due_date: { type: string, nullable: true }
+            expires_at: { type: string, nullable: true }
+        fields:
+          type: array
+          items: { $ref: '#/components/schemas/RecordsPublicField' }
+        current_values:
+          type: object
+          description: Keyed by field `key`, for the requested fields only.
+          additionalProperties: { $ref: '#/components/schemas/RecordsPublicValue' }
+        brand: { $ref: '#/components/schemas/PublicBrand' }
+
+    RecordsPublicApprovalView:
+      type: object
+      additionalProperties: false
+      properties:
+        step:
+          type: object
+          additionalProperties: false
+          properties:
+            name: { type: string }
+            message: { type: string, nullable: true }
+            workflow_name: { type: string }
+            sender_name: { type: string, description: "The sender's name, else the organisation's. Never an email." }
+            expires_at: { type: string, nullable: true }
+        row:
+          type: object
+          additionalProperties: false
+          properties:
+            sheet_name: { type: string }
+            title: { type: string, nullable: true }
+            fields:
+              type: array
+              description: "Only the columns the step's `visible_fields` names; empty by default."
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  label: { type: string }
+                  type: { type: string }
+                  value: { $ref: '#/components/schemas/RecordsPublicValue' }
+        brand: { $ref: '#/components/schemas/PublicBrand' }
     TenantBrand:
       type: object
       description: "The tenant brand record as its admins see it (migration 0140)."
@@ -6548,6 +6689,324 @@ paths:
             application/octet-stream:
               schema: { type: string, format: binary }
         '404': { description: Unknown link, or a position not in the export }
+        '429': { description: Rate limited }
+
+  /api/forms/public/{slug}:
+    get:
+      tags: [Records Public Pages]
+      summary: A public form, as the page at /f/:slug draws it (public, slug-gated)
+      description: |
+        The unauthenticated read behind `/f/:slug`. The response is an explicit
+        allow-list built field by field (`functions/lib/records/publicView.ts`,
+        decisions C-120..C-132): the form's name, description and accent, its
+        fields (`key`, `type`, `label`, `help_text`, `required`, `position`, a
+        `config` projected per column type, and `picker: true` where the field
+        opted in), the Turnstile site key, the attachment policy when uploads
+        are on, and `brand` when the organisation has a brand record. No id of
+        the tenant, sheet, form, column or any user is in it.
+
+        `entity_options` -- the organisation's customers, suppliers or products
+        as `{ id, name }` -- is present ONLY for a kind that at least one field
+        opted in (`public_picker` on the form's field config, set per field in
+        the form builder). A form with no opted-in field has no
+        `entity_options` key and reads no such record. Document, record, file
+        and computed columns are never fields of a public form.
+
+        Every unusable state answers the same 404: unknown slug, not public,
+        not live, archived form or sheet, a form and sheet of different
+        tenants, an inactive organisation, the Records module switched off.
+        `Cache-Control: no-store`. Each view is audited (`records_form.view`)
+        and rate limited per (form, IP), 120 an hour.
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The form
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecordsPublicFormView' }
+        '404': { description: Not available (one body for every reason) }
+        '429': { description: Rate limited }
+
+  /api/forms/public/{slug}/submit:
+    post:
+      tags: [Records Public Pages]
+      summary: Submit a public form (public, slug-gated, Turnstile)
+      description: |
+        Only the form's own fields are read; every value is coerced by column
+        type and a value of the wrong shape is a 400. A customer / supplier /
+        product field takes typed text -- stored as
+        `{ name, unmatched: true }` for a person to match, never as a
+        reference. `{ id }` is accepted ONLY on a field that publishes its
+        list (`picker: true`) and only for an id that list offers (this
+        tenant's, active); it is stored with the tenant's own name for it. On
+        a field without the opt-in an id is refused before any lookup, so a
+        real id, a retired one, another tenant's and one that never existed
+        are the same 400. The created row's id is never returned. 10
+        submissions an hour per (form, IP).
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data, turnstile_token]
+              properties:
+                data: { type: object, description: Cell values keyed by field `key` }
+                turnstile_token: { type: string }
+                submitter_email: { type: string, nullable: true }
+                attachment_ids: { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  success: { type: boolean }
+                  thank_you_message: { type: string, nullable: true }
+                  redirect_url: { type: string, nullable: true }
+        '400': { description: A required field is empty, a value has the wrong shape, an id is not valid, or the captcha failed }
+        '404': { description: Not available (the same body as the GET) }
+        '429': { description: Rate limited }
+
+  /api/forms/public/{slug}/upload:
+    post:
+      tags: [Records Public Pages]
+      summary: Upload one file for a public form (public, slug-gated)
+      description: |
+        Multipart, one `file`. The form is resolved FIRST: without a live form
+        that allows uploads, a file that is too large or of the wrong type is
+        the same 404 as anything else. The stored type is decided from the
+        file's BYTES: a file that claims to be a PNG / JPEG / GIF / WebP / PDF
+        and is not, a .docx / .xlsx / .pptx that is not a ZIP container, and
+        anything that is markup or script (SVG, HTML, XHTML, XML, JavaScript,
+        CSS), is a 415 whatever the form allows. Old Office files, CSV, text
+        and HEIC keep their declared type and are only ever downloads. The 415 body does not repeat the type the
+        client declared. The response names no storage key.
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Held for 15 minutes, to be named in the submit
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  attachment_id: { type: string }
+                  pending_token: { type: string }
+                  filename: { type: string }
+                  mime_type: { type: string }
+                  size_bytes: { type: integer }
+                  expires_at: { type: string, format: date-time }
+        '404': { description: Not available, or the form takes no uploads }
+        '413': { description: Larger than the form allows }
+        '415': { description: A type the form does not allow }
+        '429': { description: Rate limited }
+
+  /api/forms/public/{slug}/attachment/{attachmentId}:
+    delete:
+      tags: [Records Public Pages]
+      summary: Remove a pending upload (public; needs the upload's pending_token)
+      description: |
+        `pending_token` in the query string or JSON body. The form must be
+        LIVE, as for every other route under this slug; the attachment must
+        belong to this form and tenant and still be pending. Anything else is
+        the same 404 as an unknown form.
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: pending_token
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  success: { type: boolean }
+        '400': { description: No pending_token }
+        '404': { description: Not available }
+
+  /api/update-requests/public/{token}:
+    get:
+      tags: [Records Public Pages]
+      summary: An update request, as the page at /u/:token draws it (public, token-gated)
+      description: |
+        An allow-list: `request` (`sheet_name`, `row_title`, `sender_name`,
+        `message`, `due_date`, `expires_at`), the requested `fields` (same
+        shape as a public form's, never a pick-list) and `current_values` for
+        those fields only. `sender_name` is the sender's name, else the
+        organisation's -- never an email. A reference in `current_values` is a
+        NAME read from the tenant's own record, never an id. Document, record,
+        contact, file and computed columns are not offered, even on a request
+        created before they were excluded.
+
+        Every unusable state answers the same 404: unknown token, responded,
+        cancelled, expired, archived row or sheet, a request whose row or sheet
+        is not in the request's own tenant, an inactive organisation, the
+        Records module switched off. Each view is audited
+        (`records_update_request.view`) and rate limited per (request, IP), 30
+        an hour.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecordsPublicUpdateRequestView' }
+        '404': { description: Not available (one body for every reason) }
+        '429': { description: Rate limited }
+    post:
+      tags: [Records Public Pages]
+      summary: Answer an update request (public, token-gated)
+      description: |
+        Only requested fields are read. Each value is coerced by column type (a
+        wrong shape is a 400 and the request stays open). A reference field
+        takes typed text only, stored as `{ name, unmatched: true }`: a request
+        never publishes a list, so any `{ id }` is a 400, the same whether or
+        not the id exists. A value sent back exactly as the page showed it is
+        not a change. 5 answers an hour per (request, IP), and a refused
+        answer counts. A request a workflow sent is closed (404) once its run
+        is cancelled or its workflow is paused or archived.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data: { type: object, description: Cell values keyed by field `key` }
+      responses:
+        '200':
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  success: { type: boolean }
+                  fields_updated: { type: integer }
+        '400': { description: A value has the wrong shape or an id is not valid }
+        '404': { description: Not available (the same body as the GET) }
+        '429': { description: Rate limited }
+
+  /api/workflow-approvals/public/{token}:
+    get:
+      tags: [Records Public Pages]
+      summary: A sign-off request, as the page at /a/:token draws it (public, token-gated)
+      description: |
+        An allow-list: `step` (`name`, `message`, `workflow_name`,
+        `sender_name`, `expires_at`) and `row` (`sheet_name`, `title`,
+        `fields`). `row.title` is the title cell as an outsider may read it (a
+        reference is a name, never an id). `row.fields` holds ONLY the columns the step names in its
+        `visible_fields` config -- none by default, so the approver sees the
+        record's title and nothing else -- each as `{ label, type, value }`
+        where a reference is a name, never an id. `sender_name` is never an
+        email.
+
+        One gate for the read and the decision; every unusable state answers
+        the same 404: unknown token, already answered, expired, a run no longer
+        in progress, a workflow archived or not active, an archived row or
+        sheet, a run whose workflow / sheet / row is not in the run's own
+        tenant, an inactive organisation, the Records module switched off. Each
+        view is audited (`records_workflow_step_run.view`) and rate limited per
+        (step, IP), 30 an hour.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The sign-off request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecordsPublicApprovalView' }
+        '404': { description: Not available (one body for every reason) }
+        '429': { description: Rate limited }
+    post:
+      tags: [Records Public Pages]
+      summary: Approve or reject (public, token-gated)
+      description: |
+        Passes through the same gate as the GET: a decision is refused exactly
+        where the page is refused. Of two decisions arriving together one is
+        recorded; the other changes nothing and gets the 404. If the workflow's
+        next step cannot be started, the decision still stands and is answered
+        200; the run is stopped and its owner told. 5 decisions an hour per
+        (step, IP).
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approve, reject] }
+                comment: { type: string, nullable: true, maxLength: 2000 }
+      responses:
+        '200':
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  success: { type: boolean }
+                  decision: { type: string, enum: [approve, reject] }
+        '400': { description: decision is neither approve nor reject }
+        '404': { description: Not available (the same body as the GET) }
         '429': { description: Rate limited }
 
   /api/graphql:

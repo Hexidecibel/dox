@@ -77,7 +77,19 @@ export function CellRenderer({ column, value, dense = true }: CellRendererProps)
         {items.map((item, i) => {
           const label = refLabel(item) ?? '—';
           const itemId = refId(item) ?? undefined;
-          return <EntityChip key={i} type={column.type} label={label} id={itemId} />;
+          // Typed by somebody on a public page (`{ name, unmatched: true }`):
+          // the words, no link, and a note saying nobody has matched it yet.
+          const unmatched =
+            !itemId && !!item && typeof item === 'object' && (item as { unmatched?: unknown }).unmatched === true;
+          return (
+            <EntityChip
+              key={i}
+              type={column.type}
+              label={label}
+              id={itemId}
+              meta={unmatched ? 'Typed on a public page. Not matched to a record yet.' : undefined}
+            />
+          );
         })}
       </Box>
     );

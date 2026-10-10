@@ -140,6 +140,14 @@ export async function rebuildRowRefs(
 /**
  * Compute the display_title for a row from its data + column schema,
  * by reading whichever column has is_title=1 (if any).
+ *
+ * This is the SIGNED-IN grid's title. A title that leaves the portal is
+ * computed by `publicRowTitle` (`publicView.ts`) and never read from here.
+ *
+ * A title cell that is a reference (`{ id, name }`, or a list of them) is
+ * stored as its NAME. It used to be stored as the cell's JSON, which is what
+ * every screen then showed as the row's title. Rows written before this keep
+ * the JSON until their title cell is next written.
  */
 export function computeDisplayTitle(
   columns: RecordColumnRow[],
@@ -151,11 +159,17 @@ export function computeDisplayTitle(
   if (v == null) return null;
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return null;
+  const items = Array.isArray(v) ? v : [v];
+  const labels: string[] = [];
+  for (const item of items) {
+    if (typeof item === 'string' && item) labels.push(item);
+    else if (item && typeof item === 'object') {
+      const o = item as { name?: unknown; label?: unknown };
+      if (typeof o.name === 'string' && o.name) labels.push(o.name);
+      else if (typeof o.label === 'string' && o.label) labels.push(o.label);
+    }
   }
+  return labels.length ? labels.join(', ') : null;
 }
 
 /**

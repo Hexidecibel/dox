@@ -97,6 +97,8 @@ function activityKindLabel(kind: string): string {
     case 'workflow_rejected': return 'rejected a workflow step';
     case 'workflow_completed': return 'completed a workflow';
     case 'workflow_cancelled': return 'cancelled a workflow';
+    case 'workflow_resumed': return 'resumed a stalled workflow';
+    case 'workflow_step_failed': return 'could not start a workflow step, so the workflow was stopped';
     default: return kind.replace(/_/g, ' ');
   }
 }
@@ -529,7 +531,12 @@ export function RowEditPanel({
             </Stack>
             <Stack spacing={3}>
               {workflowRuns.map((run) => (
-                <WorkflowRunVisualization key={run.id} run={run} compact />
+                <WorkflowRunVisualization
+                  key={run.id}
+                  run={run}
+                  compact
+                  onChanged={() => setWorkflowRunsTick((t) => t + 1)}
+                />
               ))}
             </Stack>
           </Box>
@@ -543,9 +550,9 @@ export function RowEditPanel({
           <SendIcon fontSize="small" sx={{ color: 'text.secondary' }} />
           <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
             Update requests
-            {updateRequests.filter((r) => r.status === 'pending').length > 0 && (
+            {updateRequests.filter((r) => r.status === 'pending' && !r.link_closed).length > 0 && (
               <Box component="span" sx={{ ml: 0.75, color: 'text.secondary', fontWeight: 400 }}>
-                ({updateRequests.filter((r) => r.status === 'pending').length} pending)
+                ({updateRequests.filter((r) => r.status === 'pending' && !r.link_closed).length} pending)
               </Box>
             )}
           </Typography>
@@ -649,6 +656,9 @@ function formatRequestRecipient(req: RecordUpdateRequest): string {
 function formatRequestStatus(req: RecordUpdateRequest): { label: string; color: 'default' | 'success' | 'warning' | 'error' } {
   switch (req.status) {
     case 'pending':
+      // Still open in the table, but its workflow is paused or archived, so
+      // the recipient's link does not work until it is reactivated.
+      if (req.link_closed) return { label: 'Paused with its workflow', color: 'default' };
       return { label: 'Pending', color: 'warning' };
     case 'responded':
       return { label: 'Responded', color: 'success' };

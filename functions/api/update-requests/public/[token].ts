@@ -7,25 +7,42 @@
  * semantically (status flips to 'responded' after submit).
  *
  * 404 covers EVERY non-fillable case: missing token, status != pending,
- * expired, archived row/sheet, etc. Same status code so a token can't
- * be probed for lifecycle state.
+ * expired, archived row/sheet, a request whose row or sheet is not in the
+ * request's own tenant, an inactive organisation, Records switched off. Same
+ * status code and body so a token can't be probed for lifecycle state.
  *
- * Rate limit: 5 submits per IP per token per hour. Catches accidental
- * dupes from refresh-after-submit and discourages abuse.
+ * What the page is given is an allow-list built field by field (C-123,
+ * C-124): the sender's NAME (never an email), only the requested columns that
+ * an outsider may fill, and their current values with a reference shown as a
+ * name. What it sends back is coerced by column type and any id is checked
+ * against the tenant (C-125).
+ *
+ * Rate limit: 30 reads and 5 submits per IP per request per hour. Every read
+ * is audited (C-130).
  */
-import { logAudit, getClientIp } from '../../../lib/db';
+import { logAudit } from '../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../lib/ratelimit';
-import { errorToResponse, BadRequestError } from '../../../lib/permissions';
+import { errorToResponse, BadRequestError, NotFoundError } from '../../../lib/permissions';
 import {
   parseFieldsRequested,
   buildRequestFields,
-  pickCurrentValues,
+  publicCurrentValues,
+  cleanUpdateRequestSubmission,
   getUnavailableReason,
   applyUpdateRequestSubmission,
   markRequestResponded,
   parseRowData,
 } from '../../../lib/records/updateRequests';
 import { logRecordsActivity } from '../../../lib/records/helpers';
+import {
+  publicClientIp,
+  publicNotFound,
+  publicRowTitle,
+  publicSenderName,
+  rateLimited,
+  recordsPublicAvailable,
+  takePublicView,
+} from '../../../lib/records/publicView';
 import { handleUpdateRequestResponse } from '../../../lib/records/workflows';
 import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
@@ -39,13 +56,10 @@ import type {
 
 const RATE_LIMIT_PER_HOUR = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 60 * 60;
+/** Generous for a person refreshing the page; tight enough to stop a scraper. */
+const VIEWS_PER_HOUR = 30;
 
-function notFound(): Response {
-  return new Response(JSON.stringify({ error: 'Request not found' }), {
-    status: 404,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
+const notFound = () => publicNotFound('Request not found');
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -55,10 +69,18 @@ function jsonResponse(body: unknown, status: number): Response {
 }
 
 /**
- * Resolve a token to its full request + the surrounding context the
- * GET/POST handlers both need (sheet name, row data, sender info,
- * columns). Returns null when ANY component is missing — the public
- * 404 hides which.
+ * Resolve a token to its request + the surrounding context the GET/POST
+ * handlers both need (sheet name, row data, sender's name, columns). Returns
+ * null when ANY component is missing — the public 404 hides which.
+ *
+ * EVERY JOIN CARRIES THE REQUEST'S TENANT. The sheet must be the request's
+ * tenant's, the row must be on that sheet AND that tenant's, and the sender
+ * is read only as a user of that tenant. A request row that names another
+ * tenant's row or sheet -- however it came to exist -- resolves to nothing,
+ * so a token can never read or write across tenants. Then the organisation
+ * must be active with Records switched on.
+ *
+ * The sender's email is not selected: nothing on this page needs it.
  */
 async function loadRequestContext(
   db: D1Database,
@@ -66,52 +88,92 @@ async function loadRequestContext(
 ): Promise<{
   request: RecordUpdateRequestRow;
   sheetName: string;
-  rowDisplayTitle: string | null;
   rowData: string | null;
-  senderName: string;
-  senderEmail: string;
+  senderName: string | null;
   columns: RecordColumnRow[];
 } | null> {
   const req = await db
     .prepare(
-      `SELECT r.*, s.name AS sheet_name, s.archived AS sheet_archived,
-              rr.display_title AS row_display_title, rr.data AS row_data, rr.archived AS row_archived,
-              u.name AS sender_name, u.email AS sender_email
+      `SELECT r.id, r.tenant_id, r.sheet_id, r.row_id, r.token, r.recipient_email, r.recipient_user_id,
+              r.fields_requested, r.message, r.due_date, r.status, r.responded_at, r.expires_at,
+              r.created_at, r.created_by_user_id,
+              s.name AS sheet_name,
+              rr.data AS row_data,
+              u.name AS sender_name
          FROM records_update_requests r
-         JOIN records_sheets s ON r.sheet_id = s.id
-         JOIN records_rows rr ON r.row_id = rr.id
-         LEFT JOIN users u ON r.created_by_user_id = u.id
-         WHERE r.token = ?`,
+         JOIN records_sheets s
+           ON s.id = r.sheet_id AND s.tenant_id = r.tenant_id AND s.archived = 0
+         JOIN records_rows rr
+           ON rr.id = r.row_id AND rr.sheet_id = r.sheet_id AND rr.tenant_id = r.tenant_id AND rr.archived = 0
+         LEFT JOIN users u
+           ON u.id = r.created_by_user_id AND u.tenant_id = r.tenant_id
+        WHERE r.token = ?`,
     )
     .bind(token)
     .first<
       RecordUpdateRequestRow & {
         sheet_name: string;
-        sheet_archived: number;
-        row_display_title: string | null;
         row_data: string | null;
-        row_archived: number;
         sender_name: string | null;
-        sender_email: string | null;
       }
     >();
   if (!req) return null;
-  if (req.sheet_archived === 1 || req.row_archived === 1) return null;
+  if (!(await recordsPublicAvailable(db, req.tenant_id))) return null;
+
+  // A request a WORKFLOW sent lives and dies with its run (C-137), exactly as
+  // a sign-off link does (C-128): the step must still be waiting, the run in
+  // progress, the workflow active and not archived, all of the request's own
+  // tenant. Cancelling the run or pausing the workflow closes the link for
+  // the read and the write; a request somebody sent by hand has no such row
+  // and is unaffected.
+  const step = await db
+    .prepare(
+      `SELECT sr.status AS step_status, run.status AS run_status, run.tenant_id AS run_tenant_id,
+              wf.status AS workflow_status, wf.archived AS workflow_archived, wf.tenant_id AS workflow_tenant_id
+         FROM records_workflow_step_runs sr
+         LEFT JOIN records_workflow_runs run ON run.id = sr.run_id
+         LEFT JOIN records_workflows wf ON wf.id = run.workflow_id
+        WHERE sr.update_request_id = ?`,
+    )
+    .bind(req.id)
+    .first<{
+      step_status: string;
+      run_status: string | null;
+      run_tenant_id: string | null;
+      workflow_status: string | null;
+      workflow_archived: number | null;
+      workflow_tenant_id: string | null;
+    }>();
+  if (
+    step &&
+    !(
+      step.step_status === 'awaiting_response' &&
+      step.run_status === 'in_progress' &&
+      step.workflow_status === 'active' &&
+      step.workflow_archived === 0 &&
+      step.run_tenant_id === req.tenant_id &&
+      step.workflow_tenant_id === req.tenant_id
+    )
+  ) {
+    return null;
+  }
 
   const cols = await db
     .prepare(
-      'SELECT * FROM records_columns WHERE sheet_id = ? AND archived = 0 ORDER BY display_order ASC',
+      `SELECT id, sheet_id, tenant_id, key, label, type, config, required, is_title,
+              display_order, width, archived, created_at, updated_at
+         FROM records_columns
+        WHERE sheet_id = ? AND tenant_id = ? AND archived = 0
+        ORDER BY display_order ASC`,
     )
-    .bind(req.sheet_id)
+    .bind(req.sheet_id, req.tenant_id)
     .all<RecordColumnRow>();
 
   return {
     request: req,
     sheetName: req.sheet_name,
-    rowDisplayTitle: req.row_display_title,
     rowData: req.row_data,
-    senderName: req.sender_name ?? 'A teammate',
-    senderEmail: req.sender_email ?? '',
+    senderName: req.sender_name,
     columns: cols.results ?? [],
   };
 }
@@ -142,17 +204,30 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return notFound();
     }
 
+    const ip = publicClientIp(context.request);
+    if (!(await takePublicView(context.env.DB, 'records_update_request_view', ctx.request.id, ip, VIEWS_PER_HOUR))) {
+      return rateLimited();
+    }
+
+    const tenantId = ctx.request.tenant_id;
     const requestedKeys = parseFieldsRequested(ctx.request.fields_requested);
     const fields = buildRequestFields(ctx.columns, requestedKeys);
-    const currentData = parseRowData(ctx.rowData);
-    const currentValues = pickCurrentValues(currentData, requestedKeys);
+    const currentValues = await publicCurrentValues(
+      context.env.DB,
+      tenantId,
+      ctx.columns,
+      parseRowData(ctx.rowData),
+      requestedKeys,
+    );
 
     const view: PublicUpdateRequestView = {
       request: {
         sheet_name: ctx.sheetName,
-        row_title: ctx.rowDisplayTitle,
-        sender_name: ctx.senderName,
-        sender_email: ctx.senderEmail,
+        // The title cell through the public projection -- never the stored
+        // display_title, which for a reference title is the cell's JSON (C-133).
+        row_title: await publicRowTitle(context.env.DB, tenantId, ctx.columns, parseRowData(ctx.rowData)),
+        // A name, or the organisation's. Never an address.
+        sender_name: await publicSenderName(context.env.DB, tenantId, ctx.senderName),
         message: ctx.request.message,
         due_date: ctx.request.due_date,
         expires_at: ctx.request.expires_at,
@@ -160,6 +235,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       fields,
       current_values: currentValues,
     };
+
+    // The token is a bearer secret and is not written into the log.
+    await logAudit(
+      context.env.DB,
+      null,
+      tenantId,
+      'records_update_request.view',
+      'records_update_request',
+      ctx.request.id,
+      JSON.stringify({ fields: fields.length, ip }),
+      ip,
+    );
     // The organisation's brand (0140), from the tenant of the request this
     // token resolved to. No brand record: the payload is what it was before.
     const brand = await loadPublicBrand(context.env.DB, ctx.request.tenant_id, 'records_update_request');
@@ -184,7 +271,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const token = context.params.token as string;
     if (!token) return notFound();
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
 
     // Resolve before rate-limiting so we don't burn limiter budget on
     // 404s (those are cheap and not abuse-prone).
@@ -210,21 +297,41 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    let body: PublicUpdateRequestSubmitRequest;
+    // Coerce by column type BEFORE anything is written. A refusal here is a
+    // 400 that leaves the request pending, so the recipient can correct it
+    // and send again -- and it COUNTS against the limit (C-141): a refused
+    // attempt used to cost nothing, so the write path could be probed without
+    // end.
+    let submittedData;
     try {
-      body = (await context.request.json()) as PublicUpdateRequestSubmitRequest;
-    } catch {
-      return jsonResponse({ error: 'Invalid JSON' }, 400);
-    }
-    if (!body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
-      throw new BadRequestError('data must be an object');
+      let body: PublicUpdateRequestSubmitRequest;
+      try {
+        body = (await context.request.json()) as PublicUpdateRequestSubmitRequest;
+      } catch {
+        throw new BadRequestError('Invalid JSON');
+      }
+      if (!body || !body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
+        throw new BadRequestError('data must be an object');
+      }
+      submittedData = await cleanUpdateRequestSubmission(context.env.DB, {
+        tenantId: ctx.request.tenant_id,
+        columns: ctx.columns,
+        requestedKeys: parseFieldsRequested(ctx.request.fields_requested),
+        rawData: body.data,
+        currentData: parseRowData(ctx.rowData),
+      });
+    } catch (err) {
+      if (err instanceof BadRequestError) {
+        await recordAttempt(context.env.DB, rlKey, RATE_LIMIT_WINDOW_SECONDS);
+      }
+      throw err;
     }
 
     // Apply changes (server enforces fields_requested whitelist).
     const { changes } = await applyUpdateRequestSubmission(context.env.DB, {
       request: ctx.request,
       columns: ctx.columns,
-      submittedData: body.data,
+      submittedData,
     });
 
     // Flip the request to responded — even when no fields actually
@@ -311,6 +418,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     };
     return jsonResponse(response, 200);
   } catch (err) {
+    // A row that went away between the lookup and the write is the same 404
+    // as every other unusable state, not a differently worded one.
+    if (err instanceof NotFoundError) return notFound();
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
     console.error('Public update request submit error:', err);

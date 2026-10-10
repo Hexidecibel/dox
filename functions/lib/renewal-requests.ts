@@ -329,7 +329,7 @@ export async function planRenewalLines(
            FROM documents d
            JOIN document_type_requirements dtr
              ON dtr.document_type_id = d.document_type_id AND dtr.tenant_id = d.tenant_id
-           JOIN requirements r ON r.id = dtr.requirement_id
+           JOIN requirements r ON r.id = dtr.requirement_id AND r.tenant_id = d.tenant_id
           WHERE d.id = ? AND d.tenant_id = ? AND r.active = 1
           ORDER BY r.sort_order, r.name`,
       )
@@ -352,7 +352,7 @@ export async function planRenewalLines(
   const type = await db
     .prepare(
       `SELECT dt.name FROM documents d
-         LEFT JOIN document_types dt ON dt.id = d.document_type_id
+         LEFT JOIN document_types dt ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
         WHERE d.id = ? AND d.tenant_id = ?`,
     )
     .bind(documentId, tenantId)
@@ -811,9 +811,9 @@ async function loadAwaitingApproval(db: D1Database, tenantId: string): Promise<A
               d.title AS document_title, sup.name AS supplier_name,
               u.name AS approver_name, u.email AS approver_email, u.active AS approver_active
          FROM renewal_request_sends s
-         JOIN renewal_requests r ON r.id = s.renewal_request_id
-         JOIN documents d ON d.id = r.document_id
-         JOIN suppliers sup ON sup.id = r.supplier_id
+         JOIN renewal_requests r ON r.id = s.renewal_request_id AND r.tenant_id = s.tenant_id
+         JOIN documents d ON d.id = r.document_id AND d.tenant_id = r.tenant_id
+         JOIN suppliers sup ON sup.id = r.supplier_id AND sup.tenant_id = r.tenant_id
          LEFT JOIN users u ON u.id = s.approver_user_id
         WHERE s.tenant_id = ? AND s.status = 'pending' AND s.notified_at IS NULL
           AND r.status = 'open'
@@ -1009,8 +1009,8 @@ export async function listRenewalRequests(
     .prepare(
       `SELECT r.*, d.title AS document_title, sup.name AS supplier_name
          FROM renewal_requests r
-         JOIN documents d ON d.id = r.document_id
-         JOIN suppliers sup ON sup.id = r.supplier_id
+         JOIN documents d ON d.id = r.document_id AND d.tenant_id = r.tenant_id
+         JOIN suppliers sup ON sup.id = r.supplier_id AND sup.tenant_id = r.tenant_id
         WHERE r.tenant_id = ? ${filter.id ? 'AND r.id = ?' : ''}
         ORDER BY CASE r.status WHEN 'open' THEN 0 WHEN 'escalated' THEN 1 ELSE 2 END,
                  r.due_date, r.id

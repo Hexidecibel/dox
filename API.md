@@ -1819,6 +1819,99 @@ Every decision writes an `intake.sender_notice` audit row: `kind` (`ingest_summa
 
 ---
 
+## Records Public Pages
+
+Three pages somebody outside the organization opens with no login. The link is the only gate.
+
+| Page | Routes |
+|---|---|
+| Public form `/f/:slug` | `GET /api/forms/public/:slug`, `POST .../submit`, `POST .../upload`, `DELETE .../attachment/:attachmentId` |
+| Update request `/u/:token` | `GET` and `POST /api/update-requests/public/:token` |
+| Workflow sign-off `/a/:token` | `GET` and `POST /api/workflow-approvals/public/:token` |
+
+**Every response is an allow-list.** No id of the tenant, sheet, form, row, column or any user is
+returned, and no portal user's email. `sender_name` is the sender's name, else the organization's.
+
+**Pick-lists are off unless a field opts in.** A customer / supplier / product field on a public
+form is a text box. The form builder can turn on "Let people pick from your list" per field
+(`public_picker: true` in the form's `field_config`); only then does the form `GET` carry
+`entity_options` for that kind, as `id` and `name` only, and the field carries `picker: true`.
+Anyone holding the form's link can read that list.
+
+```json
+{
+  "form": { "name": "Supplier intake", "description": null, "accent_color": null, "logo_url": null },
+  "fields": [
+    { "key": "supplier", "type": "supplier_ref", "label": "Supplier", "help_text": null,
+      "required": true, "config": null, "position": 0, "picker": true }
+  ],
+  "turnstile_site_key": "...",
+  "entity_options": { "supplier": [{ "id": "sup_1", "name": "Alpha Dairy" }] }
+}
+```
+
+**What can be sent.** Only the page's own fields are read, and each value is coerced by column
+type; a value of the wrong shape is a `400`. In a customer / supplier / product field:
+
+- text (`"Alpha Dairy"`) is stored as text for a person to match. It is never turned into a reference;
+- `{ "id": "..." }` is accepted only on a field that publishes its list (`picker: true`), and only
+  for an id that list offers; it is stored with the organization's own name for it. On any other
+  field, and on every field of an update request, an id is a `400` -- the same answer whether or
+  not the id exists.
+
+**Uploads.** The type stored for a file is decided from its bytes. A file that claims to be a PNG,
+JPEG, GIF, WebP or PDF and is not, a .docx / .xlsx / .pptx that is not a ZIP container, and
+anything that is markup or script (SVG, HTML, XHTML, XML, JavaScript, CSS), is a `415`. Old
+Office files, CSV, text and HEIC keep the type the browser declared and are only ever downloads.
+
+**Titles.** `row_title` / `row.title` is the record's title cell as an outsider may read it: a
+reference is a name, a contact is a name and never an address. It is never an id: a contact cell
+holding a bare user id shows that user's name, and an id that is not a user of the organization
+shows nothing.
+
+**An update request** returns the requested fields and their `current_values`; a reference is
+shown as its name. Document, record, contact, file and computed columns cannot be requested. A
+refused answer counts against the limit of 5 an hour. A request a workflow sent closes when its
+run is cancelled or its workflow is paused or archived.
+
+**A sign-off page** returns the record's title and only the columns the workflow step names in
+`visible_fields` (none by default; never a file or a computed column), each as
+`{ "label", "type", "value" }`. Of two decisions sent together, one is recorded and the other gets
+the page's `404`.
+
+**One `404` for every unusable state** on each page: unknown link, not live, expired, already
+answered, archived, an inactive organization, or the Records module switched off. Each `GET` is
+audited and rate limited (120 an hour per form and address; 30 for a request or a sign-off).
+
+### Records workflow runs: a stalled run
+
+A run whose next step never started (the worker stopped between a decision and the step after it)
+is reported, never repaired by a read. `GET /api/records/sheets/:sheetId/rows/:rowId/workflow-runs`
+and `GET /api/records/workflow-runs/:runId` add three fields to such a run:
+
+```json
+{ "status": "in_progress", "stalled": true, "resumable": true,
+  "stalled_reason": "\"QA sign-off\" was approved, and the workflow did not move on." }
+```
+
+A signed-in person (role `user` or above, not `reader`) then either resumes or cancels it.
+
+| Call | Answer |
+|---|---|
+| `POST /api/records/workflow-runs/:runId/resume` | `200 { "success": true, "action": "started" \| "moved" }` |
+| | `409` with `code` `not_stalled`, `already_resuming` or `not_resumable` (then `can_cancel: true` and `error` says why) |
+| | `422` with `code: "step_failed"`: the step was started, could not be sent, and the run was stopped |
+| `POST /api/records/workflow-runs/:runId/cancel` | `200 { "success": true }`; also finishes a half-cancelled run |
+
+Resume is refused whenever the run's state does not say one thing. A step that was skipped is never
+treated as approved. A run of another organization, and a row that is not on the sheet in the URL,
+are `404`.
+
+Starting a workflow whose first step cannot be started answers `422` with
+`code: "workflow_start_failed"`, the reason, `run_id` and `run_status: "cancelled"`.
+
+---
+
 ## File Storage
 
 ### Allowed File Types

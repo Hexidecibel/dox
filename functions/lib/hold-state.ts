@@ -390,7 +390,7 @@ export async function loadEffectiveHolds(
               l.lot_number, l.sub_lot_code, d.title AS document_title,
               l.lot_key AS lot_key, l.supplier_id AS lot_supplier_id, d.supplier_id AS document_supplier_id,
               (SELECT l2.lot_number || CASE WHEN COALESCE(l2.sub_lot_code, '') != '' THEN ' / ' || l2.sub_lot_code ELSE '' END
-                 FROM document_lots dl JOIN lots l2 ON l2.id = dl.lot_id
+                 FROM document_lots dl JOIN lots l2 ON l2.id = dl.lot_id AND l2.tenant_id = h.tenant_id
                 WHERE dl.document_id = h.document_id
                 ORDER BY l2.lot_number LIMIT 1) AS document_lot_label
          FROM document_holds h

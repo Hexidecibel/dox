@@ -14,9 +14,11 @@
 import { formAccentOrNull, normalizeFormAccent } from '../../../shared/tenantBrand';
 import { generateId } from '../db';
 import { rebuildRowRefs, computeDisplayTitle, logRecordsActivity } from './helpers';
+import { isPublicFormFieldType, projectColumnConfig, recordsPublicAvailable } from './publicView';
 import { BadRequestError } from '../permissions';
 import type {
   RecordColumnRow,
+  RecordColumnType,
   RecordFormFieldConfig,
   RecordFormSettings,
   RecordFormRow,
@@ -69,10 +71,28 @@ export function parseFormSettings(raw: string | null): RecordFormSettings {
   }
 }
 
-/** Validate + normalize an incoming field_config payload. */
+/** The three kinds a public form can publish a list of, when a field opts in. */
+export type PublicEntityKind = 'customer' | 'supplier' | 'product';
+
+export function entityKindForColumnType(type: RecordColumnType | string): PublicEntityKind | null {
+  if (type === 'customer_ref') return 'customer';
+  if (type === 'supplier_ref') return 'supplier';
+  if (type === 'product_ref') return 'product';
+  return null;
+}
+
+/**
+ * Validate + normalize an incoming field_config payload.
+ *
+ * `public_picker` (C-120) is kept only as an explicit `true`, and only on a
+ * column in `pickerColumnIds` (the sheet's customer / supplier / product
+ * columns). Anything else -- a truthy string, the flag on a text column, a
+ * caller that passes no set -- stores nothing, which is "not published".
+ */
 export function normalizeFieldConfig(
   input: unknown,
   validColumnIds: Set<string>,
+  pickerColumnIds: Set<string> = new Set(),
 ): RecordFormFieldConfig[] {
   if (input == null) return [];
   if (!Array.isArray(input)) {
@@ -101,6 +121,7 @@ export function normalizeFieldConfig(
       label_override: typeof e.label_override === 'string' ? e.label_override : null,
       help_text: typeof e.help_text === 'string' ? e.help_text : null,
       position: typeof e.position === 'number' ? e.position : idx,
+      ...(e.public_picker === true && pickerColumnIds.has(e.column_id) ? { public_picker: true } : {}),
     });
   });
   out.sort((a, b) => a.position - b.position);
@@ -192,10 +213,92 @@ export function hydrateForm(row: RecordFormRow & { creator_name?: string; submis
 }
 
 /**
+ * The ONE lookup of a public form by its slug, for all four routes beneath
+ * /api/forms/public/:slug (read, submit, upload, remove an upload).
+ *
+ * Null -- which every caller answers with the same 404 -- unless ALL hold:
+ * the form is public, live and not archived; its sheet is not archived AND
+ * belongs to the form's own tenant (a form row filed under one tenant on
+ * another's sheet resolves to nothing); the organisation is active and has
+ * Records switched on. The columns come back with it, read with the same
+ * tenant predicate, so no caller has a reason to query the sheet by id alone.
+ */
+export async function loadLivePublicForm(
+  db: D1Database,
+  slug: string,
+): Promise<{ form: RecordFormRow; columns: RecordColumnRow[] } | null> {
+  if (!slug) return null;
+  const form = await db
+    .prepare(
+      `SELECT f.id, f.tenant_id, f.sheet_id, f.name, f.description, f.public_slug, f.is_public,
+              f.status, f.field_config, f.settings, f.archived, f.created_at, f.updated_at,
+              f.created_by_user_id
+         FROM records_forms f
+         JOIN records_sheets s ON s.id = f.sheet_id AND s.tenant_id = f.tenant_id
+        WHERE f.public_slug = ?
+          AND f.is_public = 1
+          AND f.status = 'live'
+          AND f.archived = 0
+          AND s.archived = 0`,
+    )
+    .bind(slug)
+    .first<RecordFormRow>();
+  if (!form) return null;
+  if (!(await recordsPublicAvailable(db, form.tenant_id))) return null;
+
+  const cols = await db
+    .prepare(
+      `SELECT id, sheet_id, tenant_id, key, label, type, config, required, is_title,
+              display_order, width, archived, created_at, updated_at
+         FROM records_columns
+        WHERE sheet_id = ? AND tenant_id = ? AND archived = 0
+        ORDER BY display_order ASC`,
+    )
+    .bind(form.sheet_id, form.tenant_id)
+    .all<RecordColumnRow>();
+  return { form, columns: cols.results ?? [] };
+}
+
+/** One field of a public form: its config entry and the column it draws. */
+export interface PublicFormField {
+  config: RecordFormFieldConfig;
+  column: RecordColumnRow;
+  label: string;
+  required: boolean;
+  /** Set when the builder opted this field's list in (C-120). */
+  pickerKind: PublicEntityKind | null;
+}
+
+/**
+ * The fields of a form an outsider is shown and may fill, in order. ONE list
+ * for the page, the submit validator and the id check, so the three cannot
+ * disagree about what is on the form.
+ */
+export function publicFormFields(form: RecordFormRow, columns: RecordColumnRow[]): PublicFormField[] {
+  const colsById = new Map(columns.map((c) => [c.id, c]));
+  const out: PublicFormField[] = [];
+  for (const fc of parseFieldConfig(form.field_config)) {
+    const column = colsById.get(fc.column_id);
+    if (!column || column.archived) continue;
+    if (!isPublicFormFieldType(column.type)) continue;
+    const kind = entityKindForColumnType(column.type);
+    out.push({
+      config: fc,
+      column,
+      label: (typeof fc.label_override === 'string' && fc.label_override.trim()) || column.label,
+      required: !!fc.required || column.required === 1,
+      pickerKind: fc.public_picker === true ? kind : null,
+    });
+  }
+  out.sort((a, b) => (a.config.position ?? 0) - (b.config.position ?? 0));
+  return out;
+}
+
+/**
  * Build the PublicFormView projection from a form + the sheet's column
- * rows. Only columns referenced in field_config are included; everything
- * else (including hidden columns and full sheet metadata) stays
- * server-side. Formula/rollup columns are stripped — they're computed.
+ * rows, field by field. Only columns referenced in field_config are
+ * included; a column's config is projected per type (`projectColumnConfig`);
+ * computed, file, document and record columns are left out.
  */
 export function buildPublicFormView(
   form: RecordFormRow,
@@ -210,35 +313,17 @@ export function buildPublicFormView(
   attachments?: PublicFormAttachmentPolicy;
 } {
   const settings = parseFormSettings(form.settings);
-  const fieldConfig = parseFieldConfig(form.field_config);
-  const colsById = new Map(columns.map((c) => [c.id, c]));
 
-  const fields: PublicFormFieldDef[] = [];
-  for (const fc of fieldConfig) {
-    const col = colsById.get(fc.column_id);
-    if (!col || col.archived) continue;
-    if (col.type === 'formula' || col.type === 'rollup') continue;
-
-    let config = null;
-    if (col.config) {
-      try {
-        config = JSON.parse(col.config);
-      } catch {
-        config = null;
-      }
-    }
-
-    fields.push({
-      key: col.key,
-      type: col.type,
-      label: fc.label_override?.trim() || col.label,
-      help_text: fc.help_text ?? null,
-      required: !!fc.required || col.required === 1,
-      config,
-      position: fc.position,
-    });
-  }
-  fields.sort((a, b) => a.position - b.position);
+  const fields: PublicFormFieldDef[] = publicFormFields(form, columns).map((f) => ({
+    key: f.column.key,
+    type: f.column.type,
+    label: f.label,
+    help_text: typeof f.config.help_text === 'string' ? f.config.help_text : null,
+    required: f.required,
+    config: projectColumnConfig(f.column.type, f.column.config),
+    position: typeof f.config.position === 'number' ? f.config.position : 0,
+    ...(f.pickerKind ? { picker: true as const } : {}),
+  }));
 
   const attachments = resolveAttachmentPolicy(settings);
 
@@ -259,287 +344,254 @@ export function buildPublicFormView(
     fields,
     turnstile_site_key: turnstileSiteKey,
     ...(entityOptions ? { entity_options: entityOptions } : {}),
-    ...(attachments ? { attachments } : {}),
+    ...(attachments
+      ? {
+          attachments: {
+            enabled: true as const,
+            max_attachments: attachments.max_attachments,
+            max_file_size_mb: attachments.max_file_size_mb,
+            allowed_mime_types: attachments.allowed_mime_types.filter((t) => typeof t === 'string'),
+          },
+        }
+      : {}),
   };
 }
 
 /**
  * Maximum number of entity options returned per kind on a public form.
- * Tenants with more entities will see only the first N alphabetically;
- * the renderer falls back to a free-text input gracefully when an id
- * isn't in the list (the submit endpoint still validates against the
- * full table).
+ * Tenants with more entities will see only the first N alphabetically.
  *
- * TODO: search/pagination for >500 deferred — wire up an opt-in
- * /api/forms/public/:slug/entities?type=customer&q=foo lookup if any
- * tenant grows past this threshold.
+ * TODO: search/pagination for >500 deferred.
  */
 const ENTITY_OPTIONS_LIMIT = 500;
 
 /**
- * Resolve the set of entity-ref kinds referenced by the form's visible
- * columns. We use this to scope the entity_options fetch — a form with
- * no customer_ref column shouldn't trigger a customers query at all.
+ * The kinds whose list this form PUBLISHES: those with at least one field the
+ * form builder opted in (`public_picker`, C-120). A form made before the
+ * opt-in existed has none, so it publishes nothing.
  */
 export function entityKindsReferencedByForm(
   form: RecordFormRow,
   columns: RecordColumnRow[],
-): Set<'customer' | 'supplier' | 'product'> {
-  const kinds = new Set<'customer' | 'supplier' | 'product'>();
-  const fieldConfig = parseFieldConfig(form.field_config);
-  const colsById = new Map(columns.map((c) => [c.id, c]));
-  for (const fc of fieldConfig) {
-    const col = colsById.get(fc.column_id);
-    if (!col || col.archived) continue;
-    if (col.type === 'customer_ref') kinds.add('customer');
-    else if (col.type === 'supplier_ref') kinds.add('supplier');
-    else if (col.type === 'product_ref') kinds.add('product');
+): Set<PublicEntityKind> {
+  const kinds = new Set<PublicEntityKind>();
+  for (const f of publicFormFields(form, columns)) {
+    if (f.pickerKind) kinds.add(f.pickerKind);
   }
   return kinds;
 }
 
+const ENTITY_TABLE: Record<PublicEntityKind, 'customers' | 'suppliers' | 'products'> = {
+  customer: 'customers',
+  supplier: 'suppliers',
+  product: 'products',
+};
+
 /**
- * Fetch tenant-scoped entity options for the given kinds. Result is the
- * exact `entity_options` shape attached to PublicFormView. Returns
- * undefined when no kinds are passed, so callers can spread the result
- * directly into the response.
- *
- * Each kind is capped at ENTITY_OPTIONS_LIMIT and ordered by name. We
- * surface only id + name + a single disambiguator — never PII — because
- * this ships over an unauthenticated route.
+ * Fetch tenant-scoped entity options for the given kinds: the tenant's active
+ * rows of that kind, ID AND NAME ONLY. No customer number, no product
+ * description, nothing else off the row -- the SELECT names two columns and
+ * the option is built from those two. Returns undefined when no kind is
+ * passed, so the response has no `entity_options` key at all.
  */
 export async function fetchPublicEntityOptions(
   db: D1Database,
   tenantId: string,
-  kinds: Set<'customer' | 'supplier' | 'product'>,
+  kinds: Set<PublicEntityKind>,
 ): Promise<PublicFormEntityOptions | undefined> {
   if (kinds.size === 0) return undefined;
   const result: PublicFormEntityOptions = {};
-
-  if (kinds.has('customer')) {
+  for (const kind of ['customer', 'supplier', 'product'] as const) {
+    if (!kinds.has(kind)) continue;
     const rows = await db
       .prepare(
-        `SELECT id, name, customer_number
-         FROM customers
-         WHERE tenant_id = ? AND active = 1
-         ORDER BY name COLLATE NOCASE ASC
-         LIMIT ?`,
+        `SELECT id, name
+           FROM ${ENTITY_TABLE[kind]}
+          WHERE tenant_id = ? AND active = 1
+          ORDER BY name COLLATE NOCASE ASC
+          LIMIT ?`,
       )
       .bind(tenantId, ENTITY_OPTIONS_LIMIT + 1)
-      .all<{ id: string; name: string; customer_number: string | null }>();
+      .all<{ id: string; name: string }>();
     const list = rows.results ?? [];
     if (list.length > ENTITY_OPTIONS_LIMIT) {
-      console.warn(
-        `Public form: customers for tenant ${tenantId} exceeds ${ENTITY_OPTIONS_LIMIT}; truncating. Add search/pagination.`,
-      );
+      console.warn(`Public form: ${ENTITY_TABLE[kind]} list exceeds ${ENTITY_OPTIONS_LIMIT}; truncating.`);
     }
-    result.customer = list.slice(0, ENTITY_OPTIONS_LIMIT).map((r) => toOption(r.id, r.name, r.customer_number));
+    result[kind] = list.slice(0, ENTITY_OPTIONS_LIMIT).map((r): PublicEntityOption => ({ id: r.id, name: r.name }));
   }
-
-  if (kinds.has('supplier')) {
-    const rows = await db
-      .prepare(
-        `SELECT id, name, slug
-         FROM suppliers
-         WHERE tenant_id = ? AND active = 1
-         ORDER BY name COLLATE NOCASE ASC
-         LIMIT ?`,
-      )
-      .bind(tenantId, ENTITY_OPTIONS_LIMIT + 1)
-      .all<{ id: string; name: string; slug: string | null }>();
-    const list = rows.results ?? [];
-    if (list.length > ENTITY_OPTIONS_LIMIT) {
-      console.warn(
-        `Public form: suppliers for tenant ${tenantId} exceeds ${ENTITY_OPTIONS_LIMIT}; truncating. Add search/pagination.`,
-      );
-    }
-    // Suppliers have no obvious PII-free disambiguator other than slug,
-    // and slug is a derived URL form of the name — skip secondary so we
-    // don't render a redundant "Acme — acme" subtitle.
-    result.supplier = list.slice(0, ENTITY_OPTIONS_LIMIT).map((r) => toOption(r.id, r.name, null));
-  }
-
-  if (kinds.has('product')) {
-    // products has no SKU column in the current schema (see migration
-    // 0017). Use description as a soft secondary if present; otherwise
-    // emit name only.
-    const rows = await db
-      .prepare(
-        `SELECT id, name, description
-         FROM products
-         WHERE tenant_id = ? AND active = 1
-         ORDER BY name COLLATE NOCASE ASC
-         LIMIT ?`,
-      )
-      .bind(tenantId, ENTITY_OPTIONS_LIMIT + 1)
-      .all<{ id: string; name: string; description: string | null }>();
-    const list = rows.results ?? [];
-    if (list.length > ENTITY_OPTIONS_LIMIT) {
-      console.warn(
-        `Public form: products for tenant ${tenantId} exceeds ${ENTITY_OPTIONS_LIMIT}; truncating. Add search/pagination.`,
-      );
-    }
-    result.product = list.slice(0, ENTITY_OPTIONS_LIMIT).map((r) => toOption(r.id, r.name, r.description));
-  }
-
   return result;
 }
 
-function toOption(id: string, name: string, secondary: string | null | undefined): PublicEntityOption {
-  const opt: PublicEntityOption = { id, name };
-  if (typeof secondary === 'string' && secondary.trim()) {
-    opt.secondary = secondary.trim();
-  }
-  return opt;
+/** A column an outsider may write through a public page, with the label to name it by. */
+export interface PublicFillField {
+  column: RecordColumnRow;
+  label: string;
+  required: boolean;
+  /**
+   * The kind whose list this field PUBLISHES, when its form builder opted it
+   * in (C-120). Only such a field accepts an id, and only an id that list
+   * offers. Null / absent -- every field without the opt-in, and every field
+   * of an update request -- is typed text only (C-136).
+   */
+  pickerKind?: PublicEntityKind | null;
+}
+
+function isEmptyValue(value: unknown): boolean {
+  return (
+    value == null ||
+    (typeof value === 'string' && value.trim() === '') ||
+    (Array.isArray(value) && value.length === 0)
+  );
 }
 
 /**
- * Coerce + validate a public submission payload against the form's
- * visible fields. Returns the cleaned RecordRowData ready to persist.
+ * Coerce + validate what an outsider sent against a list of fillable fields.
+ * Shared by the public form submit and the update-request submit (C-125).
  *
- * Rules:
- *   - Only keys present in field_config are accepted; everything else
- *     is silently dropped (prevents form-bypass writes to hidden cols).
- *   - Required fields must have a non-empty value.
- *   - number / checkbox are coerced; date is left as ISO string.
- *   - record_ref / document_ref / contact / attachment are rejected if
- *     present in field_config — they require auth-side pickers and are
- *     deferred per the Phase 2 Slice 1 spec.
+ *   - Only the listed fields are read; every other key is dropped, so nothing
+ *     reaches a column that is not on the page.
+ *   - Each value is coerced BY COLUMN TYPE (`coercePublicValue`); a value of
+ *     the wrong shape is a 400, never stored as sent.
+ *   - `onlyPresent: false` (a form): every field is considered, an empty
+ *     required one is a 400, an empty optional one is left out.
+ *   - `onlyPresent: true` (an update request): only keys actually sent are
+ *     considered; an empty value clears the cell (null) unless required.
  */
-export function validateSubmission(
+export function validatePublicValues(
   rawData: unknown,
-  form: RecordFormRow,
-  columns: RecordColumnRow[],
+  fields: PublicFillField[],
+  opts: { onlyPresent: boolean },
 ): RecordRowData {
   if (!rawData || typeof rawData !== 'object' || Array.isArray(rawData)) {
     throw new BadRequestError('data must be an object');
   }
   const data = rawData as Record<string, unknown>;
-  const fieldConfig = parseFieldConfig(form.field_config);
-  const colsById = new Map(columns.map((c) => [c.id, c]));
-
   const out: RecordRowData = {};
-  for (const fc of fieldConfig) {
-    const col = colsById.get(fc.column_id);
-    if (!col || col.archived) continue;
-    if (col.type === 'formula' || col.type === 'rollup') continue;
-    if (col.type === 'record_ref' || col.type === 'document_ref' || col.type === 'attachment') {
-      // Deferred for v1 of public forms — see spec.
+  for (const field of fields) {
+    const key = field.column.key;
+    if (opts.onlyPresent && !Object.prototype.hasOwnProperty.call(data, key)) continue;
+    const value = data[key];
+    if (isEmptyValue(value)) {
+      if (field.required) throw new BadRequestError(`Field "${field.label}" is required`);
+      if (opts.onlyPresent) out[key] = null;
       continue;
     }
-
-    const required = !!fc.required || col.required === 1;
-    const value = data[col.key];
-    const isEmpty =
-      value == null ||
-      (typeof value === 'string' && value.trim() === '') ||
-      (Array.isArray(value) && value.length === 0);
-
-    if (isEmpty) {
-      if (required) {
-        throw new BadRequestError(`Field "${fc.label_override?.trim() || col.label}" is required`);
-      }
-      continue;
-    }
-
-    out[col.key] = coerceValue(col.type, value, fc.label_override?.trim() || col.label);
+    out[key] = coercePublicValue(field.column, value, field.label, { acceptIds: !!field.pickerKind });
   }
   return out;
 }
 
 /**
- * Verify that any entity-ref values in a submission point at rows that
- * actually live in the form's tenant. Prevents drive-by submission of a
- * known-good id from another tenant.
+ * Verify every reference id in cleaned public data is one THE PUBLISHED LIST
+ * OFFERS, and replace what the outsider sent beside it with the tenant's own
+ * row (C-136, which tightens C-125 / C-126).
  *
- * - Iterates the form's visible entity-ref fields (customer/supplier/
- *   product).
- * - Extracts ids using the same shape rules as the grid (string id or
- *   `{id}`).
- * - Cross-checks `tenant_id` on the target table.
+ * An id can only be in the data for a field that opted its list in
+ * (`coercePublicValue` refuses one everywhere else, before any lookup). For
+ * such a field the id must be in the very list the form GET published --
+ * `fetchPublicEntityOptions`, the same query and the same cap -- so an id is
+ * accepted exactly when the page could have offered it: this tenant's, ACTIVE,
+ * and within the first 500 by name. A deactivated supplier, another tenant's
+ * id and an id that never existed are the same 400, which does not say which
+ * id or why. The stored cell is `{ id, name }` with the name from the list,
+ * so an outsider cannot attach a label of their choosing to a real id.
  *
- * Throws `BadRequestError` for the first invalid id encountered with a
- * generic message (we don't echo back which id was invalid — keeps
- * cross-tenant id existence un-enumerable).
- *
- * Cost: at most one query per ref field per submission. Negligible for
- * the form-submit hot path.
+ * Text an outsider typed (`{ name, unmatched: true }`, no id) is left as it
+ * is: it references nothing, and nothing is matched for them.
  */
 export async function verifyEntityRefIds(
   db: D1Database,
   tenantId: string,
-  form: RecordFormRow,
-  columns: RecordColumnRow[],
+  fields: PublicFillField[],
   data: RecordRowData,
 ): Promise<void> {
-  const fieldConfig = parseFieldConfig(form.field_config);
-  const colsById = new Map(columns.map((c) => [c.id, c]));
-  for (const fc of fieldConfig) {
-    const col = colsById.get(fc.column_id);
-    if (!col || col.archived) continue;
-    const table = entityRefTable(col.type);
-    if (!table) continue;
-    const value = data[col.key];
+  const offered = new Map<PublicEntityKind, Map<string, string>>();
+  for (const field of fields) {
+    const kind = field.pickerKind;
+    if (!kind) continue;
+    const value = data[field.column.key];
     if (value == null) continue;
-    const ids = extractEntityRefIds(value);
-    if (ids.length === 0) continue;
-    for (const id of ids) {
-      const row = await db
-        .prepare(`SELECT id FROM ${table} WHERE id = ? AND tenant_id = ?`)
-        .bind(id, tenantId)
-        .first<{ id: string }>();
-      if (!row) {
-        throw new BadRequestError(
-          `Field "${fc.label_override?.trim() || col.label}" has an invalid selection`,
-        );
+    const items = Array.isArray(value) ? value : [value];
+    const verified: unknown[] = [];
+    for (const item of items) {
+      const id = item && typeof item === 'object' ? (item as { id?: unknown }).id : undefined;
+      if (typeof id !== 'string' || !id) {
+        verified.push(item);
+        continue;
       }
+      let list = offered.get(kind);
+      if (!list) {
+        const options = await fetchPublicEntityOptions(db, tenantId, new Set([kind]));
+        list = new Map((options?.[kind] ?? []).map((o) => [o.id, o.name]));
+        offered.set(kind, list);
+      }
+      const name = list.get(id);
+      if (name === undefined) {
+        throw new BadRequestError(`Field "${field.label}" has an invalid selection`);
+      }
+      verified.push({ id, name });
     }
+    data[field.column.key] = Array.isArray(value) ? verified : verified[0];
   }
 }
 
-/** Map a column type to its tenant-scoped table for ref verification. */
-function entityRefTable(columnType: string): 'customers' | 'suppliers' | 'products' | null {
-  switch (columnType) {
-    case 'customer_ref':
-      return 'customers';
-    case 'supplier_ref':
-      return 'suppliers';
-    case 'product_ref':
-      return 'products';
-    default:
-      return null;
-  }
+const PUBLIC_TEXT_MAX = 20000;
+const PUBLIC_NAME_MAX = 200;
+const PUBLIC_LIST_MAX = 50;
+
+/**
+ * Text an outsider typed where the grid holds a reference. Stored as
+ * `{ name, unmatched: true }` -- NO id, so nothing is linked, no
+ * `records_row_refs` row is written, and the grid shows the words with no
+ * link. A person decides what it matches; the portal does not guess.
+ */
+function typedReference(text: string): { name: string; unmatched: true } {
+  return { name: text.trim().slice(0, PUBLIC_NAME_MAX), unmatched: true };
 }
 
-/** Extract ids from an entity-ref cell value. Mirrors helpers.extractRefIds. */
-function extractEntityRefIds(value: unknown): string[] {
-  if (value == null) return [];
-  const items = Array.isArray(value) ? value : [value];
-  const ids: string[] = [];
-  for (const item of items) {
-    if (typeof item === 'string' && item) {
-      ids.push(item);
-    } else if (item && typeof item === 'object' && 'id' in item) {
-      const id = (item as { id?: unknown }).id;
-      if (typeof id === 'string' && id) ids.push(id);
-    }
+function coerceReferenceItem(item: unknown, acceptIds: boolean, label: string): unknown {
+  if (typeof item === 'string' && item.trim()) return typedReference(item);
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
+    const o = item as { id?: unknown; name?: unknown };
+    // An id is kept as an id ONLY, and only on a field that publishes its
+    // list -- `verifyEntityRefIds` then checks it against that list and
+    // supplies the name. Whatever else was in the object is dropped here.
+    // On any other field an id is refused RIGHT HERE, with no lookup, so the
+    // answer is the same whether or not the id exists.
+    if (acceptIds && typeof o.id === 'string' && o.id) return { id: o.id };
+    if (o.id == null && typeof o.name === 'string' && o.name.trim()) return typedReference(o.name);
   }
-  return ids;
+  throw new BadRequestError(`Field "${label}" has an invalid selection`);
 }
 
-function coerceValue(type: string, value: unknown, label: string): unknown {
+/**
+ * One submitted value, coerced by its column's type. Anything that is not the
+ * shape the type allows is refused with the field's label; nothing an
+ * outsider sends is stored as sent.
+ */
+export function coercePublicValue(
+  column: RecordColumnRow,
+  value: unknown,
+  label: string,
+  opts: { acceptIds?: boolean } = {},
+): unknown {
+  const type = column.type;
   switch (type) {
     case 'number':
     case 'currency':
     case 'percent': {
-      const n = typeof value === 'number' ? value : Number(value);
-      if (Number.isNaN(n)) {
+      const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : NaN;
+      if (!Number.isFinite(n)) {
         throw new BadRequestError(`Field "${label}" must be a number`);
       }
       return n;
     }
-    case 'checkbox':
-      return !!value;
+    case 'checkbox': {
+      if (typeof value === 'boolean') return value;
+      if (value === 'true' || value === 1) return true;
+      if (value === 'false' || value === 0) return false;
+      throw new BadRequestError(`Field "${label}" must be yes or no`);
+    }
     case 'text':
     case 'long_text':
     case 'email':
@@ -547,21 +599,46 @@ function coerceValue(type: string, value: unknown, label: string): unknown {
     case 'phone':
     case 'date':
     case 'datetime':
-    case 'duration':
-      return typeof value === 'string' ? value : String(value);
+    case 'duration': {
+      if (typeof value !== 'string' && typeof value !== 'number') {
+        throw new BadRequestError(`Field "${label}" must be text`);
+      }
+      const text = String(value);
+      if (text.length > PUBLIC_TEXT_MAX) throw new BadRequestError(`Field "${label}" is too long`);
+      return text;
+    }
     case 'dropdown_single':
-      return typeof value === 'string' ? value : String(value);
-    case 'dropdown_multi':
-      if (Array.isArray(value)) return value.map((v) => String(v));
-      return [String(value)];
+    case 'dropdown_multi': {
+      const cfg = projectColumnConfig(type, column.config);
+      const allowed = cfg?.options?.length && cfg.allow_custom !== true ? new Set(cfg.options.map((o) => o.value)) : null;
+      const check = (v: unknown): string => {
+        if (typeof v !== 'string' || v.length > PUBLIC_NAME_MAX || (allowed && !allowed.has(v))) {
+          throw new BadRequestError(`Field "${label}" has an invalid selection`);
+        }
+        return v;
+      };
+      if (type === 'dropdown_single') return check(value);
+      const list = Array.isArray(value) ? value : [value];
+      if (list.length > PUBLIC_LIST_MAX) throw new BadRequestError(`Field "${label}" has an invalid selection`);
+      return list.map(check);
+    }
     case 'supplier_ref':
     case 'product_ref':
     case 'customer_ref':
-    case 'contact':
-      // Accept {id} or string id — same shape the admin row endpoints accept.
-      return value;
+    case 'contact': {
+      // An id only where the field's own list is published (never a contact,
+      // which has no list; never an update request, which publishes none).
+      const acceptIds = type !== 'contact' && opts.acceptIds === true;
+      if (Array.isArray(value)) {
+        if (value.length > PUBLIC_LIST_MAX) throw new BadRequestError(`Field "${label}" has an invalid selection`);
+        return value.map((item) => coerceReferenceItem(item, acceptIds, label));
+      }
+      return coerceReferenceItem(value, acceptIds, label);
+    }
     default:
-      return value;
+      // Computed, file, document and record columns are never fillable from
+      // outside; a type added later is refused until it is given a rule here.
+      throw new BadRequestError(`Field "${label}" cannot be filled in here`);
   }
 }
 

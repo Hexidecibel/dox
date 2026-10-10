@@ -351,6 +351,12 @@ export const recordsApi = {
         method: 'POST',
       });
     },
+    /** POST /api/records/workflow-runs/:runId/resume -- a stalled run only. */
+    resume(runId: string): Promise<{ success: true; action: 'started' | 'moved' }> {
+      return fetchRecords<{ success: true; action: 'started' | 'moved' }>(`/records/workflow-runs/${runId}/resume`, {
+        method: 'POST',
+      });
+    },
   },
 
   workflowApprovals: {

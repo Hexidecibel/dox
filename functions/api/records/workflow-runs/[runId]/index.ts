@@ -13,6 +13,8 @@ import { loadSheetForUser } from '../../../../lib/records/helpers';
 import {
   hydrateStepRun,
   parseWorkflowSteps,
+  readRunStall,
+  stallForView,
   type WorkflowStepRunDbRow,
 } from '../../../../lib/records/workflows';
 import type { Env, User } from '../../../../lib/types';
@@ -65,6 +67,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(runId)
       .all<WorkflowStepRunDbRow>();
 
+    const workflowSteps = run.workflow_steps ? parseWorkflowSteps(run.workflow_steps) : [];
     const out: RecordWorkflowRun = {
       id: run.id,
       tenant_id: run.tenant_id,
@@ -78,9 +81,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       completed_at: run.completed_at,
       created_at: run.created_at,
       workflow_name: run.workflow_name,
-      workflow_steps: run.workflow_steps ? parseWorkflowSteps(run.workflow_steps) : [],
+      workflow_steps: workflowSteps,
       triggered_by_name: run.triggered_by_name,
       step_runs: (stepRunsResult.results ?? []).map((sr) => hydrateStepRun(sr)),
+      // Reported, never repaired by a read (C-151).
+      ...stallForView(await readRunStall(context.env.DB, run, workflowSteps)),
     };
 
     return new Response(JSON.stringify({ run: out }), {

@@ -2,6 +2,28 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## Found while fixing the Records public pages (2026-10-10)
+
+- **Signed-in joins to `suppliers` / `document_types` by id with no tenant predicate.** The outward
+  ones were fixed (C-142: export, order lines, alert landing). The same shape is still in
+  `functions/api/spec-unmatched/index.ts`, `spec-checks/index.ts`, `spec-gaps/index.ts`,
+  `functions/lib/intake/already-have.ts`, `functions/lib/search/sample.ts`,
+  `functions/lib/search-coverage.ts`, `functions/lib/holds.ts` (the Holds page: products, lots,
+  users), `functions/api/bundles/` (bundle screens: products, document types, users),
+  `functions/api/orders/[id].ts` and `index.ts` (customers, users, lots) and the `users` joins that
+  name who did something on a signed-in list (order sends, export links, arrivals, renewal sends,
+  brand). Reachable only if a document already carries another
+  tenant's `supplier_id`, which no route writes; then a signed-in user would read that supplier's
+  name. One pass: add `AND s.tenant_id = d.tenant_id` and a test that points a document next door.
+- **A workflow run has no `failed` status.** A step that cannot be started ends its run `cancelled`
+  with the reason on the step, the activity feed, the audit log and a mail to the owner (C-135).
+  A real `failed` / needs-attention status with a "fix and resume" action needs a migration (the
+  two status columns are CHECKed enums from 0045).
+- **Records attachments uploaded by a signed-in person keep the browser's declared type.** The
+  download route no longer draws anything but PNG / JPEG / GIF / WebP / PDF inline (C-140), so
+  this is not exploitable; sniffing on that upload too would make the stored type true.
+- **Pending public-form uploads still have no sweeper.**
+
 ## Found while building holds (2026-10-08): a reviewer's table edit changes nothing on the single-document approve
 
 Checked for the holds review, consistent, and left. On the single-document flat approve

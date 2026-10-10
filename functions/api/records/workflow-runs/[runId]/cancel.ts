@@ -11,7 +11,7 @@ import {
   errorToResponse,
 } from '../../../../lib/permissions';
 import { loadSheetForUser, logRecordsActivity } from '../../../../lib/records/helpers';
-import { markRunComplete } from '../../../../lib/records/workflows';
+import { cancelRunUpdateRequests, markRunComplete } from '../../../../lib/records/workflows';
 import type { Env, User } from '../../../../lib/types';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -52,6 +52,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       )
       .bind(runId)
       .run();
+
+    // A request this run sent closes with it: the link already answers 404
+    // (C-137), and the list must not go on calling it pending (C-148).
+    await cancelRunUpdateRequests(context.env.DB, runId);
 
     await markRunComplete(context.env.DB, runId, 'cancelled');
 

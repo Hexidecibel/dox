@@ -881,10 +881,14 @@ export function FieldStep({ field, value, onChange, onSubmit, isMobile, accent, 
 }
 
 // ---------------------------------------------------------------------
-// Entity-ref Autocomplete — searchable dropdown for customer/supplier/
-// product columns. Falls back to a free-text input when the form
-// payload didn't include matching entity_options (older forms, empty
-// tenant catalog, etc.) so the renderer never traps users.
+// Customer / supplier / product field.
+//
+// A pick-list ONLY when the form builder opted this field in
+// (`field.picker`, C-120) and the form came with a list of that kind.
+// Otherwise -- which is every form made before the opt-in existed, and
+// every update request -- it is a plain text box. What is typed there is
+// sent as text and stored as text for a person in the organisation to
+// match; nothing is matched for the outsider.
 // ---------------------------------------------------------------------
 
 interface EntityRefFieldProps {
@@ -916,7 +920,7 @@ function EntityRefField({
         : field.type === 'product_ref'
           ? 'product'
           : null;
-  const options = (kind && entityOptions ? entityOptions[kind] : undefined) ?? [];
+  const options = (field.picker && kind && entityOptions ? entityOptions[kind] : undefined) ?? [];
   const haveOptions = options.length > 0;
 
   // Resolve current value back to a PublicEntityOption shape so the
@@ -943,8 +947,8 @@ function EntityRefField({
     return null;
   }, [value, options]);
 
-  // Graceful fallback: if the server didn't ship entity_options for
-  // this kind (older form, empty catalog), drop back to a text input.
+  // No published list for this field: a text box. The typed words are the
+  // value; the server stores them as text, never as a reference.
   if (!haveOptions) {
     return (
       <TextField
@@ -995,22 +999,13 @@ function EntityRefField({
       filterOptions={(opts, state) => {
         const q = state.inputValue.trim().toLowerCase();
         if (!q) return opts.slice(0, 50);
-        return opts
-          .filter((o) =>
-            (o.name + ' ' + (o.secondary ?? '')).toLowerCase().includes(q),
-          )
-          .slice(0, 50);
+        return opts.filter((o) => o.name.toLowerCase().includes(q)).slice(0, 50);
       }}
       renderOption={(props, opt) => (
         <Box component="li" {...props} key={opt.id} sx={{ display: 'block !important', py: 1.25 }}>
           <Typography sx={{ fontSize: 16, fontWeight: 500, color: 'text.primary' }}>
             {opt.name}
           </Typography>
-          {opt.secondary && (
-            <Typography sx={{ fontSize: 13, color: 'text.secondary' }}>
-              {opt.secondary}
-            </Typography>
-          )}
         </Box>
       )}
       // Mobile-friendly popper: full-width, take up to half the viewport
