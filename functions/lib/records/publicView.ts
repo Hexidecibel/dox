@@ -233,15 +233,24 @@ async function referenceNames(
  * Does a bare string in a contact cell have the SHAPE of an id rather than
  * of a name a person typed? Generated ids here are hex strings, UUIDs and
  * slugs like `user-org-admin`: no spaces, and either a digit, an underscore,
- * two or more hyphens, or twenty or more characters. "Dana", "Jean-Luc" and
- * "Dana Typed" are names; `3f2a...`, `user_17` and `user-org-admin` are not
- * shown. When this is wrong about a real name the cost is a dash on a page;
- * when it is wrong the other way the cost is an internal id outside.
+ * a hyphen in an all-lower-case word, two or more hyphens, or twenty or more
+ * characters. "Dana", "Jean-Luc" and "Dana Typed" are names; `3f2a...`,
+ * `user_17`, `user-regular` and `user-org-admin` are not shown. When this is
+ * wrong about a real name the cost is a dash on a page; when it is wrong the
+ * other way the cost is an internal id outside.
+ *
+ * KNOWN LIMIT: a heuristic. An id that is one lower-case word with no digit
+ * and no hyphen ("superadmin") reads as a name, and is shown if it is not a
+ * user of the tenant; it is reached only when the string did NOT resolve to
+ * one of this tenant's users, so what could show is a string that names
+ * nothing here. A name typed all in lower case with a hyphen ("jean-luc") is
+ * hidden.
  */
 export function looksLikeId(text: string): boolean {
   const s = text.trim();
   if (!s || /\s/.test(s)) return false;
-  return /[0-9_]/.test(s) || s.length >= 20 || (s.match(/-/g)?.length ?? 0) >= 2;
+  const hyphens = s.match(/-/g)?.length ?? 0;
+  return /[0-9_]/.test(s) || s.length >= 20 || hyphens >= 2 || (hyphens === 1 && s === s.toLowerCase());
 }
 
 /** How many records deep a title may be followed (a record titled by a record). */

@@ -150,11 +150,35 @@ export function mayServeInline(storedMime: string | null | undefined): boolean {
  * string or the header; the real name travels percent-encoded beside it.
  */
 export function attachmentDisposition(fileName: string | null | undefined): string {
-  const name = (fileName || '').replace(/[\u0000-\u001f\u007f]/g, '').trim() || 'download';
-  const ascii = name.replace(/[^A-Za-z0-9._ -]/g, '_').slice(0, 150) || 'download';
-  const encoded = encodeURIComponent(name.slice(0, 150)).replace(
-    /['()*]/g,
-    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
+  // BY CODE POINT, AND WELL-FORMED (C-153). A JavaScript string is UTF-16:
+  // `slice(0, 150)` can cut an emoji in half, and a name can hold a lone
+  // surrogate to begin with; `encodeURIComponent` throws on either, which
+  // made the download a 500. Iterating the string yields whole code points;
+  // a lone surrogate comes out as a single unit in the surrogate range and is
+  // dropped. This function must never throw, for any string.
+  const points: string[] = [];
+  for (const ch of typeof fileName === 'string' ? fileName : '') {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code <= 0x1f || code === 0x7f) continue; // control characters
+    if (code >= 0xd800 && code <= 0xdfff) continue; // a lone surrogate
+    points.push(ch);
+  }
+  const name = points.join('').trim();
+  const kept = [...(name || 'download')].slice(0, DISPOSITION_NAME_MAX);
+  const ascii = kept.map((ch) => (/^[A-Za-z0-9._ -]$/.test(ch) ? ch : '_')).join('') || 'download';
+  let encoded: string;
+  try {
+    encoded = encodeURIComponent(kept.join('')).replace(
+      /['()*]/g,
+      (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+  } catch {
+    // Unreachable once lone surrogates are gone; kept so "never throws" does
+    // not rest on that reasoning alone.
+    encoded = encodeURIComponent(ascii);
+  }
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
+
+/** Code points of a file name carried in the header. */
+const DISPOSITION_NAME_MAX = 150;

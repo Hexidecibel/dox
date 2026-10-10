@@ -18,6 +18,7 @@
  */
 
 import { generateId, logAudit } from '../db';
+import { takeAttempt } from '../ratelimit';
 import { logRecordsActivity, parseRowData, computeDisplayTitle, rebuildRowRefs, refTypeForColumn } from './helpers';
 import {
   sendEmail,
@@ -699,7 +700,7 @@ export async function executeStep(
  *     makes the UPDATE change nothing, and nothing is started: no step, and
  *     no mail carrying a link to a run that is already cancelled;
  *   - two callers trying to move the same run from the same step (a decision
- *     and the self-heal below, or two heals) cannot both do it.
+ *     and a resume, or two resumes) cannot both do it.
  *
  * Returns whether THIS call moved the run.
  */
@@ -790,92 +791,222 @@ export async function cancelRunUpdateRequests(db: D1Database, runId: string): Pr
     .run();
 }
 
-/** How long a run may sit with nothing waiting before it is taken to be stalled. */
-const STALLED_AFTER_MINUTES = 2;
+/** How long a run may sit with nothing waiting before it is reported as stalled. */
+export const STALLED_AFTER_MINUTES = 2;
+
+/** What a stalled run is, as the signed-in run view reports it. */
+export interface RunStall {
+  /** One plain sentence: what state the run is in. */
+  reason: string;
+  /** May "Resume" be offered? False means only "Cancel" is. */
+  resumable: boolean;
+  /** Internal: what a resume would do. Not serialised. */
+  plan: { kind: 'start'; stepIndex: number } | { kind: 'move'; fromStepIndex: number; outcome: 'approve' | 'reject' } | null;
+  /** Internal: the exact state the judgement was made on, for the resume's claim. */
+  stateKey: string;
+}
+
+function parseDbTime(value: string | null | undefined): number {
+  if (!value) return NaN;
+  return Date.parse(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
+}
 
 /**
- * SELF-HEAL for a run whose worker died between recording a decision and
- * starting the next step (C-146).
+ * Is this run STALLED -- in progress, with no step waiting on anybody, and
+ * nothing having happened for `STALLED_AFTER_MINUTES` -- and if so, can it be
+ * resumed without guessing? (C-151, which supersedes C-146's heal-on-read.)
  *
- * The decision and the advance cannot be one `db.batch()`: starting a step
- * reads the sheet's columns, may write a cell and its references, mints a
- * token, and sends mail, with reads between the writes. So the claim is
- * committed first and the advance follows -- and if the process dies in
- * between, the run is `in_progress` with no step waiting on anybody.
+ * READS ONLY. The first version repaired such a run from inside the run-list
+ * GET: a read that started steps and sent mail, on a row id the route had not
+ * checked, treating a skipped step as an approval, and starting a step twice
+ * for two readers. Now the read REPORTS, and a person presses Resume or
+ * Cancel.
  *
- * Such a run is found when its record's runs are next listed (the row's
- * workflow panel) and is resumed: from the decided step it is still pointing
- * at, or by starting the step it was already moved to but never began. A run
- * is only touched after `STALLED_AFTER_MINUTES` of nothing happening, so a
- * decision that is being processed right now is left alone, and the move is
- * the same compare-and-swap, so a resume racing a live advance cannot start a
- * step twice. A run that cannot be resumed is failed with a reason (C-135).
+ * A run stalls when the worker dies between recording a decision and starting
+ * the next step. RESUMABLE means the evidence says exactly one thing:
+ *
+ *   - the run has no step run at all and points at its first step: that step
+ *     was never started -> start it;
+ *   - the NEWEST step run of the whole run is on the step the run points at,
+ *     and it is approved / rejected / completed: the move did not happen ->
+ *     move by that step's own approve / reject target;
+ *   - the newest step run is on ANOTHER step, it is approved / rejected /
+ *     completed, and its target IS the step the run points at: the move
+ *     happened and the step never began -> start it.
+ *
+ * "Newest" is insertion order (rowid), which is what tells a LOOP's current
+ * visit from an earlier one without a migration: a step visited before has an
+ * older step run, but the newest row of the run is always the visit the run
+ * is actually on or has just left. Anything else is NOT resumable and says
+ * why: a newest step run that is `skipped` (a cancel or a failure that died
+ * half way -- A SKIPPED STEP IS NEVER AN APPROVAL), a pointer at a step the
+ * workflow no longer has, a newest decision that does not lead to where the
+ * run points.
  */
-export async function healStalledRuns(env: EngineEnv, rowId: string): Promise<number> {
-  const stalled = await env.DB
+export async function readRunStall(
+  db: D1Database,
+  run: { id: string; status: string; current_step_id: string | null; started_at: string | null; created_at: string | null },
+  steps: RecordWorkflowStep[],
+): Promise<RunStall | null> {
+  if (run.status !== 'in_progress') return null;
+  const res = await db
     .prepare(
-      `SELECT r.id, r.workflow_id, r.row_id, r.current_step_id
-         FROM records_workflow_runs r
-        WHERE r.row_id = ? AND r.status = 'in_progress'
-          AND NOT EXISTS (SELECT 1 FROM records_workflow_step_runs s
-                           WHERE s.run_id = r.id AND s.status IN ('pending', 'awaiting_response'))
-          AND COALESCE(
-                (SELECT MAX(COALESCE(s.completed_at, s.started_at)) FROM records_workflow_step_runs s WHERE s.run_id = r.id),
-                r.started_at, r.created_at
-              ) < datetime('now', ?)`,
+      `SELECT id, step_id, status, COALESCE(completed_at, started_at) AS at
+         FROM records_workflow_step_runs WHERE run_id = ? ORDER BY rowid DESC`,
     )
-    .bind(rowId, `-${STALLED_AFTER_MINUTES} minutes`)
-    .all<{ id: string; workflow_id: string; row_id: string; current_step_id: string | null }>();
+    .bind(run.id)
+    .all<{ id: string; step_id: string; status: string; at: string | null }>();
+  const stepRuns = res.results ?? [];
+  if (stepRuns.some((s) => s.status === 'pending' || s.status === 'awaiting_response')) return null;
 
-  let healed = 0;
-  for (const run of stalled.results ?? []) {
-    const wfRow = await env.DB
-      .prepare('SELECT * FROM records_workflows WHERE id = ?')
-      .bind(run.workflow_id)
-      .first<WorkflowDbRow>();
-    if (!wfRow) continue;
-    const workflow = hydrateWorkflow(wfRow);
-    const pointerIdx = run.current_step_id ? indexOfStep(workflow.steps, run.current_step_id) : -1;
-    const onPointer = run.current_step_id
-      ? await env.DB
-          .prepare(
-            `SELECT status FROM records_workflow_step_runs
-              WHERE run_id = ? AND step_id = ? ORDER BY completed_at DESC, rowid DESC LIMIT 1`,
-          )
-          .bind(run.id, run.current_step_id)
-          .first<{ status: string }>()
-      : null;
+  // The last thing that happened: the newest step-run time when there is
+  // one, otherwise when the run started (else when its row was made).
+  const stepTimes = stepRuns.map((s) => parseDbTime(s.at)).filter((t) => Number.isFinite(t));
+  const began = Number.isFinite(parseDbTime(run.started_at)) ? parseDbTime(run.started_at) : parseDbTime(run.created_at);
+  const lastActivity = stepTimes.length ? Math.max(...stepTimes) : began;
+  // No readable time at all is not evidence of anything recent.
+  if (Number.isFinite(lastActivity) && Date.now() - lastActivity < STALLED_AFTER_MINUTES * 60_000) return null;
 
-    try {
-      if (pointerIdx >= 0 && !onPointer) {
-        // Moved to this step and never began it.
-        await startStep(env, { workflow, runId: run.id, stepIndex: pointerIdx, rowId: run.row_id });
-      } else if (pointerIdx >= 0 && onPointer) {
-        // Decided (or done) and never moved on.
-        await advanceWorkflow(env, {
-          workflow,
-          runId: run.id,
-          fromStepIndex: pointerIdx,
-          outcome: onPointer.status === 'rejected' ? 'reject' : 'approve',
-          rowId: run.row_id,
-        });
-      } else {
-        // Pointing at a step the workflow no longer has.
-        await failRun(env, {
-          workflow,
-          runId: run.id,
-          stepIndex: -1,
-          rowId: run.row_id,
-          error: new BadRequestError('The workflow was changed while this run was under way, and the step it had reached no longer exists.'),
-        });
-      }
-      healed += 1;
-    } catch (err) {
-      await failRun(env, { workflow, runId: run.id, stepIndex: pointerIdx, rowId: run.row_id, error: err });
-    }
+  const newest = stepRuns[0] ?? null;
+  const pointer = run.current_step_id;
+  const pointerIdx = pointer ? indexOfStep(steps, pointer) : -1;
+  const stateKey = `${run.id}:${pointer ?? 'none'}:${newest?.id ?? 'none'}`;
+  const nameOf = (idx: number) => `"${steps[idx]?.name ?? 'a step'}"`;
+  const decided = (status: string) => status === 'approved' || status === 'rejected' || status === 'completed';
+  const cannot = (reason: string): RunStall => ({
+    reason: `${reason} It cannot be resumed safely; cancel it and start the workflow again.`,
+    resumable: false,
+    plan: null,
+    stateKey,
+  });
+
+  if (pointerIdx < 0) return cannot('This run is on a step the workflow no longer has.');
+
+  if (!newest) {
+    if (pointerIdx !== 0) return cannot(`This run points at ${nameOf(pointerIdx)} with no record of any step before it.`);
+    return { reason: `The first step, ${nameOf(0)}, was never started.`, resumable: true, plan: { kind: 'start', stepIndex: 0 }, stateKey };
   }
-  return healed;
+
+  const newestIdx = indexOfStep(steps, newest.step_id);
+  if (newest.step_id === pointer) {
+    if (newest.status === 'skipped') {
+      return cannot(`${nameOf(pointerIdx)} was skipped, not decided, and the run was left in progress. A skipped step is never treated as an approval.`);
+    }
+    if (!decided(newest.status)) return cannot(`${nameOf(pointerIdx)} is in a state this run cannot continue from.`);
+    const outcome = newest.status === 'rejected' ? 'reject' : 'approve';
+    const verb = newest.status === 'approved' ? 'approved' : newest.status === 'rejected' ? 'rejected' : 'finished';
+    return {
+      reason: `${nameOf(pointerIdx)} was ${verb}, and the workflow did not move on.`,
+      resumable: true,
+      plan: { kind: 'move', fromStepIndex: pointerIdx, outcome },
+      stateKey,
+    };
+  }
+
+  // The run points somewhere other than its newest step run.
+  if (newestIdx < 0 || !decided(newest.status)) {
+    return cannot(`This run points at ${nameOf(pointerIdx)}, but the last step recorded before it was not decided.`);
+  }
+  const leadsTo = targetStepIndex(steps, newestIdx, newest.status === 'rejected' ? 'reject' : 'approve');
+  if (leadsTo !== pointerIdx) {
+    return cannot(`This run points at ${nameOf(pointerIdx)}, which is not where its last decision leads.`);
+  }
+  return {
+    reason: `The workflow moved on to ${nameOf(pointerIdx)}, and that step was never started.`,
+    resumable: true,
+    plan: { kind: 'start', stepIndex: pointerIdx },
+    stateKey,
+  };
 }
+
+/** The two fields a run carries for the signed-in view; absent when it is not stalled. */
+export function stallForView(stall: RunStall | null): { stalled: true; stalled_reason: string; resumable: boolean } | Record<string, never> {
+  return stall ? { stalled: true, stalled_reason: stall.reason, resumable: stall.resumable } : {};
+}
+
+export type ResumeOutcome =
+  | { ok: true; action: 'started' | 'moved' }
+  | { ok: false; code: 'not_stalled' | 'not_resumable' | 'already_resuming' | 'step_failed'; reason: string };
+
+/**
+ * RESUME a stalled run, because a signed-in person asked (C-151).
+ *
+ * One claim, then one action. The claim is an atomic counter keyed on the
+ * EXACT state the judgement was made on (run, the step it points at, its
+ * newest step run): of any number of resumes pressed together, one gets the
+ * count 1 and acts; the rest are told one is already under way. Once the
+ * step starts the state is a different one, so the key can never be claimed
+ * for it again. The run is then checked once more, in one statement, to be
+ * still in progress and still on that step -- a cancel that landed in between
+ * wins -- and the step is started, or the run moved by `advanceWorkflow`'s
+ * own compare-and-swap.
+ */
+export async function resumeStalledRun(env: EngineEnv, runId: string): Promise<ResumeOutcome> {
+  const run = await env.DB
+    .prepare('SELECT id, workflow_id, row_id, status, current_step_id, started_at, created_at FROM records_workflow_runs WHERE id = ?')
+    .bind(runId)
+    .first<{ id: string; workflow_id: string; row_id: string; status: string; current_step_id: string | null; started_at: string | null; created_at: string | null }>();
+  const wfRow = run
+    ? await env.DB.prepare('SELECT * FROM records_workflows WHERE id = ?').bind(run.workflow_id).first<WorkflowDbRow>()
+    : null;
+  if (!run || !wfRow) return { ok: false, code: 'not_stalled', reason: 'This run is not stalled.' };
+  const workflow = hydrateWorkflow(wfRow);
+
+  const stall = await readRunStall(env.DB, run, workflow.steps);
+  if (!stall) return { ok: false, code: 'not_stalled', reason: 'This run is not stalled: it has finished, is waiting on somebody, or is being processed right now.' };
+  if (!stall.resumable || !stall.plan) return { ok: false, code: 'not_resumable', reason: stall.reason };
+
+  // The claim. `takeAttempt` increments and returns in one statement.
+  const claims = await takeAttempt(env.DB, `workflow_resume:${stall.stateKey}`, RESUME_CLAIM_SECONDS);
+  if (claims > 1) {
+    return { ok: false, code: 'already_resuming', reason: 'Somebody is already resuming this run. Look again in a moment.' };
+  }
+
+  if (stall.plan.kind === 'move') {
+    const moved = await advanceWorkflow(env, {
+      workflow,
+      runId,
+      fromStepIndex: stall.plan.fromStepIndex,
+      outcome: stall.plan.outcome,
+      rowId: run.row_id,
+    });
+    if (!moved) return { ok: false, code: 'not_stalled', reason: 'This run changed while it was being resumed. Look again.' };
+    // The move may have led to a step that could not be started, in which
+    // case the run was stopped with a reason (C-135). Say that, not "moved".
+    const after = await env.DB
+      .prepare(
+        `SELECT r.status,
+                (SELECT s.response_comment FROM records_workflow_step_runs s
+                  WHERE s.run_id = r.id AND s.status = 'skipped' ORDER BY s.rowid DESC LIMIT 1) AS note
+           FROM records_workflow_runs r WHERE r.id = ?`,
+      )
+      .bind(runId)
+      .first<{ status: string; note: string | null }>();
+    if (after?.status === 'cancelled') {
+      return { ok: false, code: 'step_failed', reason: (after.note ?? '').replace(/^Could not be started: /, '') || 'The next step could not be started.' };
+    }
+    return { ok: true, action: 'moved' };
+  }
+
+  // Start the step the run already points at -- only if, at this instant, it
+  // still is in progress and still points there.
+  const still = await env.DB
+    .prepare(
+      `UPDATE records_workflow_runs SET current_step_id = current_step_id
+        WHERE id = ? AND status = 'in_progress' AND current_step_id = ?`,
+    )
+    .bind(runId, run.current_step_id)
+    .run();
+  if ((still.meta?.changes ?? 0) < 1) {
+    return { ok: false, code: 'not_stalled', reason: 'This run changed while it was being resumed. Look again.' };
+  }
+  const failed = await startStep(env, { workflow, runId, stepIndex: stall.plan.stepIndex, rowId: run.row_id });
+  if (failed) return { ok: false, code: 'step_failed', reason: failed };
+  return { ok: true, action: 'started' };
+}
+
+/** How long one resume's claim on a stalled state holds. */
+const RESUME_CLAIM_SECONDS = 10 * 60;
 
 /** Mark the run terminal (completed/rejected/cancelled). */
 export async function markRunComplete(

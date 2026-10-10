@@ -15,7 +15,9 @@
 
 import { useState } from 'react';
 import {
+  Alert,
   Box,
+  Button,
   Chip,
   Popover,
   Stack,
@@ -36,6 +38,7 @@ import {
   PersonOutline as PersonIcon,
   CheckOutlined as CheckIcon,
 } from '@mui/icons-material';
+import { recordsApi } from '../../lib/recordsApi';
 import type {
   RecordWorkflowRun,
   RecordWorkflowStep,
@@ -54,9 +57,62 @@ interface Props {
   run: RecordWorkflowRun;
   /** Compact mode shrinks margins; used when stacked under the drawer header. */
   compact?: boolean;
+  /** Called after a stalled run was resumed or cancelled, to read it again. */
+  onChanged?: () => void;
 }
 
-export function WorkflowRunVisualization({ run, compact = false }: Props) {
+/**
+ * A run that is in progress with nobody to wait for (C-151). The server only
+ * REPORTS it; a person decides here. Resume is offered only when the server
+ * says the run can be continued without guessing; Cancel always is.
+ */
+export function StalledRunNotice({ run, onChanged }: { run: RecordWorkflowRun; onChanged?: () => void }) {
+  const [busy, setBusy] = useState<'resume' | 'cancel' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!run.stalled) return null;
+  const act = async (which: 'resume' | 'cancel') => {
+    setBusy(which);
+    setError(null);
+    try {
+      if (which === 'resume') await recordsApi.workflowRuns.resume(run.id);
+      else await recordsApi.workflowRuns.cancel(run.id);
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That did not work. Try again.');
+      // The run may have been stopped by the attempt; show its real state.
+      onChanged?.();
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Alert
+      severity="warning"
+      data-testid="stalled-run-notice"
+      sx={{ py: 0.5, '& .MuiAlert-message': { width: '100%', fontSize: 13 } }}
+    >
+      <Typography sx={{ fontSize: 13, fontWeight: 600 }}>This workflow has stopped moving.</Typography>
+      <Typography sx={{ fontSize: 13 }}>{run.stalled_reason}</Typography>
+      <Stack direction="row" spacing={1} sx={{ mt: 0.75 }}>
+        {run.resumable && (
+          <Button size="small" variant="contained" disableElevation disabled={busy !== null} onClick={() => void act('resume')}>
+            {busy === 'resume' ? 'Resuming…' : 'Resume'}
+          </Button>
+        )}
+        <Button size="small" variant="outlined" color="inherit" disabled={busy !== null} onClick={() => void act('cancel')}>
+          {busy === 'cancel' ? 'Cancelling…' : 'Cancel this run'}
+        </Button>
+      </Stack>
+      {error && (
+        <Typography data-testid="stalled-run-error" sx={{ fontSize: 13, mt: 0.75, color: 'error.main' }}>
+          {error}
+        </Typography>
+      )}
+    </Alert>
+  );
+}
+
+export function WorkflowRunVisualization({ run, compact = false, onChanged }: Props) {
   const steps = run.workflow_steps ?? [];
   const stepRuns = run.step_runs ?? [];
   const stepRunByStepId = new Map<string, RecordWorkflowStepRun>();
@@ -98,6 +154,8 @@ export function WorkflowRunVisualization({ run, compact = false }: Props) {
           </Typography>
         )}
       </Stack>
+
+      <StalledRunNotice run={run} onChanged={onChanged} />
 
       {/* Flow chart */}
       <Box

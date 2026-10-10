@@ -13,13 +13,14 @@ import {
 } from '../../../../../../../lib/permissions';
 import { loadSheetForUser } from '../../../../../../../lib/records/helpers';
 import {
-  healStalledRuns,
   hydrateWorkflow,
+  readRunStall,
+  stallForView,
   startWorkflowRun,
   type WorkflowDbRow,
 } from '../../../../../../../lib/records/workflows';
 import type { Env, User } from '../../../../../../../lib/types';
-import type { StartWorkflowRunRequest } from '../../../../../../../../shared/types';
+import type { RecordWorkflowStep, StartWorkflowRunRequest } from '../../../../../../../../shared/types';
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -27,34 +28,31 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const sheetId = context.params.sheetId as string;
     const rowId = context.params.rowId as string;
 
-    await loadSheetForUser(context.env.DB, sheetId, user);
+    const sheet = await loadSheetForUser(context.env.DB, sheetId, user);
 
-    // A run whose worker died between a decision and the next step is resumed
-    // (or failed with a reason) when its record's runs are next read (C-146).
-    // Never allowed to fail the list.
-    try {
-      await healStalledRuns(
-        {
-          DB: context.env.DB,
-          RESEND_API_KEY: context.env.RESEND_API_KEY ?? null,
-          appOrigin: new URL(context.request.url).origin,
-        },
-        rowId,
-      );
-    } catch (err) {
-      console.error('Healing stalled workflow runs failed:', err);
-    }
+    // THE ROW MUST BE ON THIS SHEET, IN THE SHEET'S TENANT, before anything
+    // is read by its id (C-152). The sheet is the caller's; the row id is
+    // whatever was typed into the URL. Without this a row id of another
+    // tenant, under one's own sheet id, listed that tenant's runs.
+    const row = await context.env.DB.prepare(
+      'SELECT id FROM records_rows WHERE id = ? AND sheet_id = ? AND tenant_id = ?',
+    )
+      .bind(rowId, sheet.id, sheet.tenant_id)
+      .first<{ id: string }>();
+    if (!row) throw new NotFoundError('Row not found');
 
+    // A GET READS (C-151). A stalled run is reported below, never repaired
+    // here: no step is started and no mail is sent by listing runs.
     const result = await context.env.DB.prepare(
       `SELECT r.*, w.name AS workflow_name, w.steps AS workflow_steps,
               u.name AS triggered_by_name
          FROM records_workflow_runs r
-         LEFT JOIN records_workflows w ON r.workflow_id = w.id
+         LEFT JOIN records_workflows w ON r.workflow_id = w.id AND w.tenant_id = r.tenant_id
          LEFT JOIN users u ON r.triggered_by_user_id = u.id
-         WHERE r.row_id = ?
+         WHERE r.row_id = ? AND r.sheet_id = ? AND r.tenant_id = ?
          ORDER BY r.created_at DESC`,
     )
-      .bind(rowId)
+      .bind(rowId, sheet.id, sheet.tenant_id)
       .all<{
         id: string;
         tenant_id: string;
@@ -72,7 +70,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         triggered_by_name: string | null;
       }>();
 
-    const runs = (result.results ?? []).map((r) => ({
+    const runs = [];
+    for (const r of result.results ?? []) {
+      const steps = (r.workflow_steps ? safeParseSteps(r.workflow_steps) : []) as RecordWorkflowStep[];
+      // `stalled` / `stalled_reason` / `resumable`, present only on a run
+      // that is in progress with nothing waiting and nothing happening.
+      const stall = stallForView(await readRunStall(context.env.DB, r, steps));
+      runs.push({
       id: r.id,
       tenant_id: r.tenant_id,
       workflow_id: r.workflow_id,
@@ -85,9 +89,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       completed_at: r.completed_at,
       created_at: r.created_at,
       workflow_name: r.workflow_name,
-      workflow_steps: r.workflow_steps ? safeParseSteps(r.workflow_steps) : [],
+      workflow_steps: steps,
       triggered_by_name: r.triggered_by_name,
-    }));
+      ...stall,
+      });
+    }
 
     return new Response(JSON.stringify({ runs, total: runs.length }), {
       headers: { 'Content-Type': 'application/json' },
@@ -114,9 +120,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sheet = await loadSheetForUser(context.env.DB, sheetId, user);
 
     const row = await context.env.DB.prepare(
-      'SELECT id FROM records_rows WHERE id = ? AND sheet_id = ? AND archived = 0',
+      'SELECT id FROM records_rows WHERE id = ? AND sheet_id = ? AND tenant_id = ? AND archived = 0',
     )
-      .bind(rowId, sheetId)
+      .bind(rowId, sheet.id, sheet.tenant_id)
       .first<{ id: string }>();
     if (!row) throw new NotFoundError('Row not found');
 
@@ -127,9 +133,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       `SELECT w.*, u.name as creator_name
          FROM records_workflows w
          LEFT JOIN users u ON w.created_by_user_id = u.id
-         WHERE w.id = ? AND w.sheet_id = ? AND w.archived = 0`,
+         WHERE w.id = ? AND w.sheet_id = ? AND w.tenant_id = ? AND w.archived = 0`,
     )
-      .bind(body.workflow_id, sheetId)
+      .bind(body.workflow_id, sheet.id, sheet.tenant_id)
       .first<WorkflowDbRow>();
     if (!wfRow) throw new NotFoundError('Workflow not found');
     const workflow = hydrateWorkflow(wfRow);

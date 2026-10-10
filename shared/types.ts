@@ -5449,6 +5449,18 @@ export interface RecordWorkflowRun {
   workflow_steps?: RecordWorkflowStep[];
   /** Triggered-by user display name (LEFT JOIN). */
   triggered_by_name?: string | null;
+  /**
+   * Present (true) when the run is in progress with no step waiting on
+   * anybody and nothing has happened for a couple of minutes: the worker died
+   * between a decision and the next step (C-151). DERIVED AT READ; reading a
+   * run never changes it. A person then resumes it
+   * (`POST /api/records/workflow-runs/:runId/resume`) or cancels it.
+   */
+  stalled?: true;
+  /** One plain sentence saying what state the stalled run is in. */
+  stalled_reason?: string;
+  /** False: the run cannot be resumed without guessing; only Cancel is offered. */
+  resumable?: boolean;
 }
 
 /** Mirror of the records_workflow_step_runs row. */

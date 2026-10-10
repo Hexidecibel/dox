@@ -1883,6 +1883,33 @@ the page's `404`.
 answered, archived, an inactive organization, or the Records module switched off. Each `GET` is
 audited and rate limited (120 an hour per form and address; 30 for a request or a sign-off).
 
+### Records workflow runs: a stalled run
+
+A run whose next step never started (the worker stopped between a decision and the step after it)
+is reported, never repaired by a read. `GET /api/records/sheets/:sheetId/rows/:rowId/workflow-runs`
+and `GET /api/records/workflow-runs/:runId` add three fields to such a run:
+
+```json
+{ "status": "in_progress", "stalled": true, "resumable": true,
+  "stalled_reason": "\"QA sign-off\" was approved, and the workflow did not move on." }
+```
+
+A signed-in person (role `user` or above, not `reader`) then either resumes or cancels it.
+
+| Call | Answer |
+|---|---|
+| `POST /api/records/workflow-runs/:runId/resume` | `200 { "success": true, "action": "started" \| "moved" }` |
+| | `409` with `code` `not_stalled`, `already_resuming` or `not_resumable` (then `can_cancel: true` and `error` says why) |
+| | `422` with `code: "step_failed"`: the step was started, could not be sent, and the run was stopped |
+| `POST /api/records/workflow-runs/:runId/cancel` | `200 { "success": true }`; also finishes a half-cancelled run |
+
+Resume is refused whenever the run's state does not say one thing. A step that was skipped is never
+treated as approved. A run of another organization, and a row that is not on the sheet in the URL,
+are `404`.
+
+Starting a workflow whose first step cannot be started answers `422` with
+`code: "workflow_start_failed"`, the reason, `run_id` and `run_status: "cancelled"`.
+
 ---
 
 ## File Storage

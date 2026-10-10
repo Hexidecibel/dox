@@ -40,6 +40,8 @@ import {
   onRequestPost as approvalPost,
 } from '../../functions/api/workflow-approvals/public/[token]';
 import { onRequestPost as runCancel } from '../../functions/api/records/workflow-runs/[runId]/cancel';
+import { onRequestPost as runResume } from '../../functions/api/records/workflow-runs/[runId]/resume';
+import { onRequestGet as runView } from '../../functions/api/records/workflow-runs/[runId]/index';
 import { onRequestGet as attachmentDownload } from '../../functions/api/records/attachments/[attachmentId]/download';
 import {
   onRequestGet as runsList,
@@ -55,7 +57,7 @@ import {
   startWorkflowRun,
   targetStepIndex,
 } from '../../functions/lib/records/workflows';
-import { attachmentDisposition, sniffFileType, storedTypeForUpload } from '../../functions/lib/records/fileType';
+import { attachmentDisposition, mayServeInline, sniffFileType, storedTypeForUpload } from '../../functions/lib/records/fileType';
 import { looksLikeId } from '../../functions/lib/records/publicView';
 import { planRenewalLines } from '../../functions/lib/renewal-requests';
 import { loadOrderLines } from '../../functions/lib/order-items';
@@ -1127,7 +1129,7 @@ describe('ROUND 2, FINDING 3: no join by id leaves its tenant on an outside surf
   });
 });
 
-describe('ROUND 2: an interrupted or cancelled run (C-146)', () => {
+describe('ROUND 2: an interrupted or cancelled run (C-146, C-151)', () => {
   const engine = { DB: db, RESEND_API_KEY: 'test-resend-key', appOrigin: 'http://portal.test' };
   async function decidedButNotAdvanced(steps: unknown[]) {
     const t = seed.tenantId;
@@ -1173,47 +1175,31 @@ describe('ROUND 2: an interrupted or cancelled run (C-146)', () => {
     expect((await stepRuns(r.run)).filter((s) => s.step_id === 's2')).toHaveLength(1);
   });
 
-  it('a run left decided-but-not-advanced is RESUMED the next time its record\'s runs are read', async () => {
+  // What used to be "resumed when the runs are next read" (C-146) is now
+  // REPORTED on read and resumed by a person (C-151); see ROUND 3 below.
+  it('a run left decided-but-not-advanced is REPORTED as stalled, and reading it changes nothing', async () => {
     const r = await decidedButNotAdvanced(TWO);
-    expect((await stepRuns(r.run)).map((s) => s.step_id)).toEqual(['s1']);
-    expect((await listRuns(r.sheetId, r.rowId)).status).toBe(200);
-    expect(await stepRuns(r.run)).toEqual([
-      { step_id: 's1', status: 'approved' },
-      { step_id: 's2', status: 'awaiting_response' },
-    ]);
-    expect(await runStatus(r.run)).toBe('in_progress');
-    // Reading again does not start it twice.
+    const before = await stepRuns(r.run);
+    const res = await read(await listRuns(r.sheetId, r.rowId));
+    expect(res.status).toBe(200);
+    expect(res.body.runs[0]).toMatchObject({ id: r.run, status: 'in_progress', stalled: true, resumable: true });
+    expect(res.body.runs[0].stalled_reason).toContain('"QA" was approved, and the workflow did not move on.');
+    // A GET reads. No step, no mail, however often it is read.
     await listRuns(r.sheetId, r.rowId);
-    expect((await stepRuns(r.run)).filter((s) => s.step_id === 's2')).toHaveLength(1);
+    expect(await stepRuns(r.run)).toEqual(before);
+    expect(await runStatus(r.run)).toBe('in_progress');
+    expect(mails).toEqual([]);
   });
 
-  it('a run moved to a step it never began is resumed too; a last decision that ends the workflow completes it', async () => {
-    const moved = await decidedButNotAdvanced(TWO);
-    await db.prepare(`UPDATE records_workflow_runs SET current_step_id = 's2' WHERE id = ?`).bind(moved.run).run();
-    await listRuns(moved.sheetId, moved.rowId);
-    expect((await stepRuns(moved.run)).map((s) => [s.step_id, s.status])).toEqual([['s1', 'approved'], ['s2', 'awaiting_response']]);
-
-    const last = await decidedButNotAdvanced([TWO[0]]);
-    await listRuns(last.sheetId, last.rowId);
-    expect(await runStatus(last.run)).toBe('completed');
-  });
-
-  it('a decision recorded a moment ago is being processed and is left alone', async () => {
+  it('a decision recorded a moment ago is being processed: not stalled, and not resumable', async () => {
     const r = await decidedButNotAdvanced(TWO);
     await db.prepare(`UPDATE records_workflow_step_runs SET completed_at = datetime('now'), responded_at = datetime('now') WHERE id = ?`).bind(r.stepRunId).run();
-    await listRuns(r.sheetId, r.rowId);
+    const res = await read(await listRuns(r.sheetId, r.rowId));
+    expect(res.body.runs[0].stalled).toBeUndefined();
+    const resumed = await resumeRun(r.run);
+    expect(resumed.status).toBe(409);
+    expect(resumed.body.code).toBe('not_stalled');
     expect((await stepRuns(r.run)).map((s) => s.step_id)).toEqual(['s1']);
-  });
-
-  it('a stalled run that cannot be resumed is FAILED with a reason, not left in progress', async () => {
-    const r = await decidedButNotAdvanced([
-      TWO[0],
-      { id: 's2', type: 'update_request', name: 'Ask', config: { recipient_email: 'x@out.example', fields_requested: ['gone'] } },
-    ]);
-    await listRuns(r.sheetId, r.rowId);
-    expect(await runStatus(r.run)).toBe('cancelled');
-    const audit = await db.prepare(`SELECT details FROM audit_log WHERE action = 'records_workflow_run.step_failed' AND resource_id = ?`).bind(r.run).all<{ details: string }>();
-    expect(audit.results).toHaveLength(1);
   });
 });
 
@@ -1360,5 +1346,369 @@ describe('ROUND 2: a file name in any script downloads (C-150)', () => {
     expect(disposition).toContain("filename*=UTF-8''%E6%A3%80%E9%AA%8C");
     expect(disposition).toMatch(/filename="[\x20-\x7e]*"/);
     expect(await res.text()).toBe('bytes');
+  });
+});
+
+// ===========================================================================
+// ROUND 3 of the adversarial review (723b6d0): the self-heal was wrong three
+// ways and is gone. A stalled run is REPORTED on read; a signed-in person
+// resumes or cancels it (C-151..C-153).
+// ===========================================================================
+
+const resumeRun = async (runId: string, user: unknown = admin(), init: Init = {}) =>
+  read(await runResume(ctx(`/api/records/workflow-runs/${runId}/resume`, { ...init, method: 'POST', params: { runId }, user })));
+const viewRun = async (runId: string, user: unknown = admin()) =>
+  read(await runView(ctx(`/api/records/workflow-runs/${runId}`, { params: { runId }, user })));
+const cancelRun = async (runId: string, user: unknown = admin()) =>
+  read(await runCancel(ctx(`/api/records/workflow-runs/${runId}/cancel`, { method: 'POST', params: { runId }, user })));
+
+interface StepRunSeed {
+  step_id: string;
+  idx: number;
+  type?: string;
+  status: string;
+}
+/** A run left exactly as described, idle for ten minutes (the reviewer's fixture). */
+async function stalledWorld(
+  tenantId: string,
+  creator: string,
+  steps: unknown[],
+  opts: { currentStep: string; stepRuns: StepRunSeed[] },
+) {
+  const { sheetId } = await makeSheet(tenantId, [{ key: 'title', type: 'text', is_title: true }, { key: 'owner', type: 'contact' }]);
+  const rowId = generateTestId();
+  await db.prepare('INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data) VALUES (?, ?, ?, ?, ?)').bind(rowId, sheetId, tenantId, 'R', '{"title":"R"}').run();
+  const wf = generateTestId();
+  await db
+    .prepare(`INSERT INTO records_workflows (id, tenant_id, sheet_id, name, steps, status, created_by_user_id) VALUES (?, ?, ?, 'WF', ?, 'active', ?)`)
+    .bind(wf, tenantId, sheetId, JSON.stringify(steps), creator)
+    .run();
+  const run = generateTestId();
+  await db
+    .prepare(`INSERT INTO records_workflow_runs (id, tenant_id, workflow_id, sheet_id, row_id, status, current_step_id, started_at) VALUES (?, ?, ?, ?, ?, 'in_progress', ?, datetime('now', '-10 minutes'))`)
+    .bind(run, tenantId, wf, sheetId, rowId, opts.currentStep)
+    .run();
+  for (const s of opts.stepRuns) {
+    await db
+      .prepare(`INSERT INTO records_workflow_step_runs (id, run_id, step_id, step_index, step_type, status, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'))`)
+      .bind(generateTestId(), run, s.step_id, s.idx, s.type ?? 'approval', s.status)
+      .run();
+  }
+  return { sheetId, rowId, run, wf };
+}
+const TWO_APPROVALS = [
+  { id: 's1', type: 'approval', name: 'First', config: { assignee_email: 'one@out.example' }, on_approve: 's2' },
+  { id: 's2', type: 'approval', name: 'Second', config: { assignee_email: 'two@out.example' } },
+];
+const stepRunsOf = async (run: string) =>
+  (await db.prepare('SELECT step_id, status FROM records_workflow_step_runs WHERE run_id = ? ORDER BY rowid').bind(run).all<{ step_id: string; status: string }>()).results;
+const statusOf = async (run: string) => (await db.prepare('SELECT status FROM records_workflow_runs WHERE id = ?').bind(run).first<{ status: string }>())!.status;
+const user2 = () => ({ id: seed.orgAdmin2Id, email: 'orgadmin2@test.com', name: 'Org Admin 2', role: 'org_admin', tenant_id: seed.tenantId2 });
+const readerUser = () => ({ id: seed.readerId, email: 'reader@test.com', name: 'Reader User', role: 'reader', tenant_id: seed.tenantId });
+
+describe('ROUND 3, FINDING 1: a SKIPPED step is never an approval (C-151)', () => {
+  it('a run whose sign-off was skipped (a cancel that died half way) is not resumable, by read or by Resume', async () => {
+    const w = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's1', stepRuns: [{ step_id: 's1', idx: 0, status: 'skipped' }] });
+    const before = await stepRunsOf(w.run);
+
+    const view = await viewRun(w.run);
+    expect(view.body.run).toMatchObject({ stalled: true, resumable: false });
+    expect(view.body.run.stalled_reason).toContain('was skipped, not decided');
+    expect(view.body.run.stalled_reason).toContain('never treated as an approval');
+
+    const resumed = await resumeRun(w.run);
+    expect(resumed.status).toBe(409);
+    expect(resumed.body).toMatchObject({ code: 'not_resumable', can_cancel: true });
+    // Nobody approved step 1. Step 2 is not waiting on anybody.
+    expect(await stepRunsOf(w.run)).toEqual(before);
+    expect(await statusOf(w.run)).toBe('in_progress');
+    expect(mails).toEqual([]);
+  });
+
+  it('Cancel FINISHES a half-cancelled run: its steps already skipped, the run still in progress', async () => {
+    const w = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's1', stepRuns: [{ step_id: 's1', idx: 0, status: 'skipped' }] });
+    const res = await cancelRun(w.run);
+    expect(res.status).toBe(200);
+    expect(await statusOf(w.run)).toBe('cancelled');
+    expect((await viewRun(w.run)).body.run.stalled).toBeUndefined();
+    // And again: idempotent.
+    expect((await cancelRun(w.run)).status).toBe(200);
+  });
+
+  it('every state that is not unambiguous is not resumable and says why', async () => {
+    const cases: Array<{ name: string; currentStep: string; stepRuns: StepRunSeed[]; steps?: unknown[]; says: string }> = [
+      { name: 'the pointer names a step the workflow no longer has', currentStep: 'gone', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }], says: 'no longer has' },
+      { name: 'the pointer is past the first step with no step recorded', currentStep: 's2', stepRuns: [], says: 'no record of any step before it' },
+      { name: 'the newest step run is on another step and was skipped', currentStep: 's2', stepRuns: [{ step_id: 's1', idx: 0, status: 'skipped' }], says: 'was not decided' },
+      {
+        name: 'the newest decision does not lead to where the run points',
+        currentStep: 's3',
+        steps: [...TWO_APPROVALS, { id: 's3', type: 'approval', name: 'Third', config: { assignee_email: 'three@out.example' } }],
+        stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }],
+        says: 'not where its last decision leads',
+      },
+    ];
+    for (const c of cases) {
+      const w = await stalledWorld(seed.tenantId, seed.orgAdminId, c.steps ?? TWO_APPROVALS, c);
+      const before = await stepRunsOf(w.run);
+      const view = await viewRun(w.run);
+      expect(view.body.run, c.name).toMatchObject({ stalled: true, resumable: false });
+      expect(view.body.run.stalled_reason, c.name).toContain(c.says);
+      expect((await resumeRun(w.run)).status, c.name).toBe(409);
+      expect(await stepRunsOf(w.run), c.name).toEqual(before);
+    }
+  });
+});
+
+describe('ROUND 3, FINDING 2: Resume is one claim, so two at once start one step (C-151)', () => {
+  it('"moved to this step and never began it": two concurrent resumes, one step run, one mail', async () => {
+    const w = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's2', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    expect((await viewRun(w.run)).body.run).toMatchObject({ stalled: true, resumable: true });
+    const results = await Promise.all([
+      resumeRun(w.run, admin(), { resend: true }),
+      resumeRun(w.run, admin(), { resend: true }),
+      resumeRun(w.run, admin(), { resend: true }),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409, 409]);
+    expect(results.find((r) => r.status === 200)!.body).toEqual({ success: true, action: 'started' });
+    const after = await stepRunsOf(w.run);
+    expect(after.filter((s) => s.step_id === 's2')).toEqual([{ step_id: 's2', status: 'awaiting_response' }]);
+    expect(mails.filter((m) => [m.to].flat().includes('two@out.example'))).toHaveLength(1);
+    // It is waiting on somebody again: not stalled, and a late Resume is refused.
+    expect((await viewRun(w.run)).body.run.stalled).toBeUndefined();
+    expect((await resumeRun(w.run)).status).toBe(409);
+    expect((await stepRunsOf(w.run)).filter((s) => s.step_id === 's2')).toHaveLength(1);
+  });
+
+  it('"decided and never moved on": two concurrent resumes move the run once, by the step\'s own target', async () => {
+    const BRANCH = [
+      { id: 's1', type: 'approval', name: 'QA', config: { assignee_email: 'qa@out.example' }, on_approve_next: 's3', on_reject_next: 's2' },
+      { id: 's2', type: 'approval', name: 'Rework', config: { assignee_email: 'rework@out.example' } },
+      { id: 's3', type: 'approval', name: 'Release', config: { assignee_email: 'release@out.example' } },
+    ];
+    const approved = await stalledWorld(seed.tenantId, seed.orgAdminId, BRANCH, { currentStep: 's1', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    const results = await Promise.all([resumeRun(approved.run), resumeRun(approved.run)]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(results.find((r) => r.status === 200)!.body).toEqual({ success: true, action: 'moved' });
+    // Approve leads to s3, not to "the next one".
+    expect(await stepRunsOf(approved.run)).toEqual([{ step_id: 's1', status: 'approved' }, { step_id: 's3', status: 'awaiting_response' }]);
+
+    const rejected = await stalledWorld(seed.tenantId, seed.orgAdminId, BRANCH, { currentStep: 's1', stepRuns: [{ step_id: 's1', idx: 0, status: 'rejected' }] });
+    expect((await resumeRun(rejected.run)).status).toBe(200);
+    expect(await stepRunsOf(rejected.run)).toEqual([{ step_id: 's1', status: 'rejected' }, { step_id: 's2', status: 'awaiting_response' }]);
+  });
+
+  it('a first step that never started, and a last decision that ends the workflow, resume too', async () => {
+    const first = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's1', stepRuns: [] });
+    expect((await viewRun(first.run)).body.run.stalled_reason).toContain('was never started');
+    expect((await resumeRun(first.run)).body).toEqual({ success: true, action: 'started' });
+    expect(await stepRunsOf(first.run)).toEqual([{ step_id: 's1', status: 'awaiting_response' }]);
+
+    const last = await stalledWorld(seed.tenantId, seed.orgAdminId, [TWO_APPROVALS[0]], { currentStep: 's1', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    expect((await resumeRun(last.run)).body).toEqual({ success: true, action: 'moved' });
+    expect(await statusOf(last.run)).toBe('completed');
+  });
+
+  it('a LOOP: the current visit is told from an earlier one by the order the step runs were written', async () => {
+    const LOOP = [
+      { id: 's1', type: 'approval', name: 'Draft review', config: { assignee_email: 'draft@out.example' } },
+      { id: 's2', type: 'approval', name: 'Final review', config: { assignee_email: 'final@out.example' }, on_reject_next: 's1' },
+    ];
+    // s1 approved (first visit), s2 rejected -> back to s1, and s1 never began again.
+    const back = await stalledWorld(seed.tenantId, seed.orgAdminId, LOOP, {
+      currentStep: 's1',
+      stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }, { step_id: 's2', idx: 1, status: 'rejected' }],
+    });
+    const view = await viewRun(back.run);
+    expect(view.body.run).toMatchObject({ stalled: true, resumable: true });
+    expect(view.body.run.stalled_reason).toContain('moved on to "Draft review", and that step was never started');
+    expect((await resumeRun(back.run)).body).toEqual({ success: true, action: 'started' });
+    // A NEW visit of s1 is waiting; the old approval was not read as this visit's.
+    expect(await stepRunsOf(back.run)).toEqual([
+      { step_id: 's1', status: 'approved' },
+      { step_id: 's2', status: 'rejected' },
+      { step_id: 's1', status: 'awaiting_response' },
+    ]);
+
+    // The other half of the loop: s2 was rejected and the run still points at s2.
+    const stuck = await stalledWorld(seed.tenantId, seed.orgAdminId, LOOP, {
+      currentStep: 's2',
+      stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }, { step_id: 's2', idx: 1, status: 'rejected' }],
+    });
+    expect((await resumeRun(stuck.run)).body).toEqual({ success: true, action: 'moved' });
+    expect((await stepRunsOf(stuck.run)).at(-1)).toEqual({ step_id: 's1', status: 'awaiting_response' });
+  });
+
+  it('a resumed step that cannot be sent stops the run and says so (422), like any other', async () => {
+    const w = await stalledWorld(
+      seed.tenantId,
+      seed.orgAdminId,
+      [TWO_APPROVALS[0], { id: 's2', type: 'update_request', name: 'Ask', config: { recipient_email: 'x@out.example', fields_requested: ['owner'] } }],
+      { currentStep: 's1', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] },
+    );
+    // The move succeeds; starting s2 fails inside it and the run is stopped.
+    // The answer says that, not "moved".
+    const moved = await resumeRun(w.run);
+    expect(moved.status).toBe(422);
+    expect(moved.body).toMatchObject({ code: 'step_failed', run_status: 'cancelled' });
+    expect(moved.body.error).toContain('None of the fields this step asks for can be requested');
+    expect(await statusOf(w.run)).toBe('cancelled');
+    const audit = await db.prepare(`SELECT details FROM audit_log WHERE action = 'records_workflow_run.step_failed' AND resource_id = ?`).bind(w.run).all();
+    expect(audit.results).toHaveLength(1);
+
+    const direct = await stalledWorld(
+      seed.tenantId,
+      seed.orgAdminId,
+      [{ id: 's1', type: 'update_request', name: 'Ask first', config: { recipient_email: 'x@out.example', fields_requested: ['owner'] } }],
+      { currentStep: 's1', stepRuns: [] },
+    );
+    const res = await resumeRun(direct.run);
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ code: 'step_failed', run_status: 'cancelled' });
+    expect(res.body.error).toContain('None of the fields this step asks for can be requested');
+  });
+
+  it('Resume is audited, with who', async () => {
+    const w = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's2', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    await resumeRun(w.run);
+    const rows = await db.prepare(`SELECT user_id, details FROM audit_log WHERE action = 'records_workflow_run.resumed' AND resource_id = ?`).bind(w.run).all<{ user_id: string; details: string }>();
+    expect(rows.results).toHaveLength(1);
+    expect(rows.results[0].user_id).toBe(seed.orgAdminId);
+    expect(JSON.parse(rows.results[0].details)).toEqual({ action: 'started' });
+  });
+});
+
+describe('ROUND 3, FINDING 3: the routes are scoped before anything is read or done (C-152)', () => {
+  it("a READER of tenant 1 listing tenant 2's row id under their own sheet gets a 404, and nothing is written", async () => {
+    const mine = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's1', stepRuns: [] });
+    const theirs = await stalledWorld(seed.tenantId2, seed.orgAdmin2Id, TWO_APPROVALS, { currentStep: 's2', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    const before = await stepRunsOf(theirs.run);
+    const res = await read(
+      await runsList(ctx(`/api/records/sheets/${mine.sheetId}/rows/${theirs.rowId}/workflow-runs`, { params: { sheetId: mine.sheetId, rowId: theirs.rowId }, user: readerUser() })),
+    );
+    expect(res.status).toBe(404);
+    expect(res.text).not.toContain(theirs.run);
+    expect(await stepRunsOf(theirs.run)).toEqual(before);
+    expect(await statusOf(theirs.run)).toBe('in_progress');
+  });
+
+  it("a row of the caller's OWN tenant on another of their sheets is a 404 too, for the list and for starting a run", async () => {
+    const a = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's1', stepRuns: [] });
+    const b = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's1', stepRuns: [] });
+    const list = await runsList(ctx(`/api/records/sheets/${a.sheetId}/rows/${b.rowId}/workflow-runs`, { params: { sheetId: a.sheetId, rowId: b.rowId }, user: admin() }));
+    expect(list.status).toBe(404);
+    const start = await runStart(
+      ctx(`/api/records/sheets/${a.sheetId}/rows/${b.rowId}/workflow-runs`, { method: 'POST', params: { sheetId: a.sheetId, rowId: b.rowId }, user: admin(), json: { workflow_id: a.wf } }),
+    );
+    expect(start.status).toBe(404);
+  });
+
+  it('a reader READS their own stalled run (and reading changes nothing) but may not resume or cancel it', async () => {
+    const w = await stalledWorld(seed.tenantId, seed.orgAdminId, TWO_APPROVALS, { currentStep: 's2', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    const before = await stepRunsOf(w.run);
+    const list = await read(await runsList(ctx(`/api/records/sheets/${w.sheetId}/rows/${w.rowId}/workflow-runs`, { params: { sheetId: w.sheetId, rowId: w.rowId }, user: readerUser() })));
+    expect(list.status).toBe(200);
+    expect(list.body.runs[0]).toMatchObject({ stalled: true, resumable: true });
+    expect((await resumeRun(w.run, readerUser())).status).toBe(403);
+    expect((await cancelRun(w.run, readerUser())).status).toBe(403);
+    expect(await stepRunsOf(w.run)).toEqual(before);
+    expect(await statusOf(w.run)).toBe('in_progress');
+  });
+
+  it("another tenant's run cannot be seen, resumed or cancelled: 404 each, and it is untouched", async () => {
+    const theirs = await stalledWorld(seed.tenantId2, seed.orgAdmin2Id, TWO_APPROVALS, { currentStep: 's2', stepRuns: [{ step_id: 's1', idx: 0, status: 'approved' }] });
+    const before = await stepRunsOf(theirs.run);
+    expect((await viewRun(theirs.run)).status).toBe(404);
+    expect((await resumeRun(theirs.run)).status).toBe(404);
+    expect((await cancelRun(theirs.run)).status).toBe(404);
+    expect(await stepRunsOf(theirs.run)).toEqual(before);
+    expect(await statusOf(theirs.run)).toBe('in_progress');
+    // Its own admin can.
+    expect((await resumeRun(theirs.run, user2())).status).toBe(200);
+  });
+});
+
+describe('ROUND 3, FINDING 4: attachmentDisposition never throws (C-153)', () => {
+  const SHAPE = /^attachment; filename="[A-Za-z0-9._ -]+"; filename\*=UTF-8''[A-Za-z0-9%._~!-]+$/;
+
+  it('a name cut through a surrogate pair: 149 letters then an emoji', () => {
+    const out = attachmentDisposition('a'.repeat(149) + '\u{1F4F7}.jpg');
+    expect(out).toMatch(SHAPE);
+    // Cut by code point: the 150th is the whole emoji, not half of it.
+    expect(out).toContain('%F0%9F%93%B7');
+    expect(out).not.toContain('.jpg');
+  });
+
+  it('lone surrogates are dropped, wherever they sit', () => {
+    expect(attachmentDisposition('\uD83Dphoto.jpg')).toBe("attachment; filename=\"photo.jpg\"; filename*=UTF-8''photo.jpg");
+    expect(attachmentDisposition('photo\uDC00.jpg')).toBe("attachment; filename=\"photo.jpg\"; filename*=UTF-8''photo.jpg");
+    expect(attachmentDisposition('\uDC00\uD83D')).toBe("attachment; filename=\"download\"; filename*=UTF-8''download");
+    // A real pair survives whole.
+    expect(attachmentDisposition('\u{1F4F7}')).toBe("attachment; filename=\"_\"; filename*=UTF-8''%F0%9F%93%B7");
+  });
+
+  it('HELD: quotes, CRLF, only-stripped names, long names', () => {
+    for (const n of ['a"; filename="x.html', 'x\r\nSet-Cookie: a=b', '\u0000\u0001', '""""', 'фото.jpg', 'z'.repeat(5000), null, undefined, '']) {
+      const h = attachmentDisposition(n as string);
+      expect(h).toMatch(SHAPE);
+      expect(() => new Headers({ 'Content-Disposition': h })).not.toThrow();
+    }
+  });
+
+  it('PROPERTY: any UTF-16 string at all, lone surrogates included, yields a header that can be set', () => {
+    // A small deterministic generator, so a failure can be reproduced.
+    let state = 0x2545f491;
+    const next = () => {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return (state >>> 0) / 0x100000000;
+    };
+    const unit = (): number => {
+      const r = next();
+      if (r < 0.25) return 0xd800 + Math.floor(next() * 0x400); // a high surrogate, often alone
+      if (r < 0.5) return 0xdc00 + Math.floor(next() * 0x400); // a low surrogate, often alone
+      if (r < 0.6) return Math.floor(next() * 0x20); // a control character
+      if (r < 0.7) return [0x22, 0x5c, 0x0d, 0x0a, 0x27, 0x25, 0x3b, 0x2a][Math.floor(next() * 8)]; // " \ CR LF ' % ; *
+      if (r < 0.85) return 0x20 + Math.floor(next() * 0x5f); // printable ASCII
+      return Math.floor(next() * 0x10000); // anything in the BMP
+    };
+    for (let i = 0; i < 3000; i++) {
+      const length = Math.floor(next() * 320);
+      const name = String.fromCharCode(...Array.from({ length }, unit));
+      let header = '';
+      expect(() => {
+        header = attachmentDisposition(name);
+      }, `threw for ${JSON.stringify(name)}`).not.toThrow();
+      expect(header, JSON.stringify(name)).toMatch(SHAPE);
+      expect(() => new Headers({ 'Content-Disposition': header })).not.toThrow();
+      // And the encoded name decodes back to well-formed text.
+      const encoded = header.slice(header.indexOf("UTF-8''") + 7);
+      expect(() => decodeURIComponent(encoded)).not.toThrow();
+    }
+  });
+});
+
+describe('ROUND 3: upload types and id shapes (HELD, and the nit)', () => {
+  const head = (s: string) => new TextEncoder().encode(s).slice(0, 16);
+
+  it('HELD: declared-type tricks never yield an inline type, and markup declarations are refused', () => {
+    for (const d of ['image/svg+xml; charset=utf-8', 'IMAGE/SVG+XML', ' text/html ', 'Text/HTML;x=1', 'application/xhtml+xml', 'application/atom+xml', 'text/xml']) {
+      expect(storedTypeForUpload(d, head('<svg onload=1>')), d).toBeNull();
+    }
+    for (const d of ['text/csv', 'text/plain', 'application/msword', 'application/vnd.ms-excel', '', 'application/octet-stream', 'text/x-html', 'image/heic']) {
+      const stored = storedTypeForUpload(d, head('<html><script>1</script>'));
+      expect(stored === null || !mayServeInline(stored), d).toBe(true);
+    }
+    expect(storedTypeForUpload(DOCX, ZIP_BYTES)).toBe(DOCX);
+    expect(storedTypeForUpload(DOCX, head('<html>'))).toBeNull();
+  });
+
+  it('a one-hyphen lower-case id has the shape of an id; the known limit is a single lower-case word', () => {
+    for (const id of ['user-regular', 'user-reader', 'user-org-admin', 'abcdefabcdefabcdefab']) expect(looksLikeId(id), id).toBe(true);
+    for (const name of ['Jean-Luc', 'Dana', 'Anne-Marie']) expect(looksLikeId(name), name).toBe(false);
+    // The limit, stated: a bare lower-case word with no digit reads as a name.
+    // It is only ever shown when it is NOT a user of the tenant.
+    expect(looksLikeId('superadmin')).toBe(false);
   });
 });
