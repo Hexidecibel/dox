@@ -120,6 +120,8 @@ export type PackFieldReason =
   | 'unknown'
   /** Another column of the same setting is kept, so this one is too. */
   | 'setting'
+  /** The pack renames this to a name another row already has. Held for a person. */
+  | 'duplicate_name'
   /** The change would make documents easier to send out. */
   | 'loosens';
 
@@ -181,8 +183,12 @@ export interface PackPlanItem {
   news: boolean;
   /** Every column that is not simply in step, with all three values. */
   fields: PackPlanField[];
-  /** For `conflict`: the row the organisation already has. */
-  conflict?: { id: string; name: string; slug: string; active: boolean };
+  /**
+   * The row the organisation already has: for `conflict`, the one that is the
+   * same concept (or, with `supplier_scoped`, one supplier's own type holding
+   * the pack's slug); beside a `duplicate_name` field, the row with that name.
+   */
+  conflict?: { id: string; name: string; slug: string; active: boolean; supplier_scoped?: boolean };
   /** For `parent_missing` / `absent`: what is not there. */
   missing?: string;
   /** For `insert`: the item itself, so the executor does not look it up again. */
@@ -283,8 +289,34 @@ export interface PackRollForwardInput {
   accept?: readonly PackAccept[];
 }
 
+/**
+ * The organisation is on a NEWER version of the pack than the one being rolled
+ * to. A version never goes backwards: "roll forward to an older pack" would
+ * revert every row the newer version had moved and then repeat on every run,
+ * because the recorded version (the highest ever stamped) would never come down.
+ * Thrown by the planner itself, so no caller can plan a downgrade -- a dry run
+ * included.
+ */
+export class PackVersionBehindError extends Error {
+  readonly code = 'pack_version_behind';
+  constructor(
+    readonly pack: string,
+    readonly onVersion: number,
+    readonly offeredVersion: number,
+  ) {
+    super(
+      `This organisation is on version ${onVersion} of the "${pack}" pack, and this build ships version ${offeredVersion}. ` +
+        'A pack version never goes backwards, so there is nothing to roll forward to: nothing was changed.',
+    );
+    this.name = 'PackVersionBehindError';
+  }
+}
+
 export function planPackRollForward(input: PackRollForwardInput): PackRollForwardPlan {
   const { pack } = input;
+  if (input.fromVersion !== null && pack.version < input.fromVersion) {
+    throw new PackVersionBehindError(pack.pack, input.fromVersion, pack.version);
+  }
   const items = packItems(pack);
   const itemIndex = new Map(items.map((i) => [`${i.kind}\u0000${i.key}`, i]));
 
@@ -338,9 +370,12 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
     const id = `${item.kind}\u0000${item.key}`;
     const spec = PACK_KIND_SPECS[item.kind];
     const entry = ledger.get(id);
-    const row =
-      (entry?.row_id ? byId.get(item.kind)!.get(entry.row_id) : undefined) ??
-      byNatural.get(item.kind)!.get(item.natural);
+    const ledgeredRow = entry?.row_id ? byId.get(item.kind)!.get(entry.row_id) : undefined;
+    const row = ledgeredRow ?? byNatural.get(item.kind)!.get(item.natural);
+    // The row the ledger named is gone and ANOTHER row sits at the same key:
+    // somebody deleted the pack's row and made their own. It is not the row the
+    // pack wrote, so nothing about it is assumed to be the pack's.
+    const replaced = !!entry && entry.row_id !== null && !ledgeredRow && !!row;
     const base: PackPlanItem = {
       kind: item.kind,
       key: item.key,
@@ -453,15 +488,39 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
     }
 
     // ---- a row exists ----------------------------------------------------
+    // A SUPPLIER'S OWN document type holding the pack's slug is not the pack's
+    // organisation-wide type. It is never adopted and never written: a rename
+    // or a sharing rule meant for every supplier must not land on one
+    // supplier's type. The slug is taken, so the pack's type cannot be added
+    // beside it either; a person decides (retire the supplier's type, or not).
+    if (item.kind === 'document_type' && row.supplier_id !== null && row.supplier_id !== undefined) {
+      out.push({
+        ...base,
+        row_id: null,
+        outcome: 'conflict',
+        news: true,
+        conflict: {
+          id: String(row.row_id),
+          name: String(row.name ?? ''),
+          slug: String(row.natural_key),
+          active: row.active !== 0,
+          supplier_scoped: true,
+        },
+      });
+      resolved.set(id, 'waiting');
+      continue;
+    }
+
     resolved.set(id, 'present');
     if (byNatural.get(item.kind)!.get(item.natural) === row) atNaturalKey.add(id);
     const rowId = String(row.row_id);
     const active = spec.activeColumn === null || row.active !== 0;
 
-    // Not in the ledger (or ledgered as gone and since put back by hand): the
-    // row is ADOPTED. Whatever it holds that is not the pack's is of unknown
-    // origin and is the organisation's.
-    const adopting = !entry || GONE_STATES.has(entry.state);
+    // Not in the ledger, or ledgered as gone and since put back by hand, or
+    // ledgered against a row that is no longer there (`replaced`): the row is
+    // ADOPTED. Whatever it holds that is not the pack's is of unknown origin
+    // and is the organisation's.
+    const adopting = !entry || GONE_STATES.has(entry.state) || replaced;
 
     if (!active) {
       // Switched off. It stays off and is not updated while it is off; its
@@ -514,6 +573,27 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
           current,
           target,
         });
+      }
+    }
+
+    // A RENAME MUST NOT LAND ON A NAME ANOTHER ROW HAS. The routes refuse a
+    // person renaming into another concept's name; a pack doing it would leave
+    // two active rows with one name. Held for a person, who may still say yes.
+    let nameTwin: PackCurrentRow | undefined;
+    if (VOCABULARY_KINDS.includes(item.kind)) {
+      const rename = fields.find((f) => f.field === 'name' && f.action === 'update');
+      if (rename) {
+        const wanted = conceptKey(String(rename.target ?? ''));
+        nameTwin = (input.rows[item.kind] ?? []).find(
+          (r) =>
+            String(r.row_id) !== rowId &&
+            wanted !== '' &&
+            (conceptKey(String(r.name ?? '')) === wanted || conceptKey(String(r.natural_key)) === wanted),
+        );
+        if (nameTwin) {
+          rename.action = 'keep';
+          rename.reason = 'duplicate_name';
+        }
       }
     }
 
@@ -575,7 +655,7 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
     const differing: Record<string, PackDifferenceOrigin> = {};
     for (const f of fields) {
       if (f.action === 'update') continue;
-      if (f.action === 'needs_person') {
+      if (f.action === 'needs_person' || f.reason === 'duplicate_name') {
         if (f.base !== undefined) written[f.field] = f.base;
         else differing[f.field] = 'unknown';
         continue;
@@ -603,6 +683,16 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
       news: outcome !== 'unchanged',
       fields,
       ...(updates.length > 0 ? { row_update: { set, guard } } : {}),
+      ...(nameTwin
+        ? {
+            conflict: {
+              id: String(nameTwin.row_id),
+              name: String(nameTwin.name ?? ''),
+              slug: String(nameTwin.natural_key),
+              active: nameTwin.active !== 0,
+            },
+          }
+        : {}),
       ledger: changed ? next : null,
     });
   }

@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 154 tables, 2 views, 281 indexes, 54 triggers.
+Objects: 154 tables, 2 views, 282 indexes, 54 triggers.
 
 ## Core documents & versions
 
@@ -2396,7 +2396,7 @@ Triggers: `trg_tenant_brands_logo_not_withdrawn_insert`, `trg_tenant_brands_logo
   summary TEXT CHECK (summary IS NULL OR json_valid(summary))
 ```
 
-Indexes: `idx_tenant_packs_tenant`
+Indexes: `idx_tenant_packs_step`, `idx_tenant_packs_tenant`
 
 ### `tenant_setup_runs`
 

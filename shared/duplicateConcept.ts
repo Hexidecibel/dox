@@ -27,6 +27,9 @@
  *       twin beside it is how "we deactivated the old one and made a new one"
  *       turns into two slugs for one thing. The answer says it is inactive, so
  *       the screen can say "reactivate it instead".
+ *   On a CREATE the proposed SLUG is compared the same way as the name
+ *   (`compareSlug`): requirements and claim types accept a caller's slug, and a
+ *   second `specsheet` is a second spec sheet whatever name it travels under.
  *   (b) every item of the organisation's starter pack(s): name, slug, aliases.
  *       If the organisation already holds that item (a row with its slug), the
  *       answer names THAT ROW. If it does not, the answer names the pack item,
@@ -88,29 +91,39 @@ export interface DuplicateConceptInput {
   packItems: readonly ConceptPackItem[];
   /** A rename: the row itself, which is never its own duplicate. */
   excludeId?: string | null;
+  /**
+   * A CREATE whose slug the caller may have chosen (requirements and claim
+   * types accept one). The slug is then compared as well as the name:
+   * otherwise `{ name: "Zed thing", slug: "specsheet" }` is a second
+   * `spec-sheet` under a name nobody would recognise. Not set on a rename,
+   * where the slug is the row's own and has been there all along.
+   */
+  compareSlug?: boolean;
 }
 
 export function findDuplicateConcept(input: DuplicateConceptInput): DuplicateConcept | null {
-  const key = conceptKey(input.name);
-  if (!key) return null;
+  const nameKey = conceptKey(input.name);
+  const slugKey = input.compareSlug ? conceptKey(input.slug) : '';
+  const keys = new Set([nameKey, slugKey].filter(Boolean));
+  if (keys.size === 0) return null;
   const others = input.rows.filter((r) => r.id !== input.excludeId);
 
   for (const row of others) {
-    if (conceptKey(row.name) === key) {
+    if (keys.has(conceptKey(row.name))) {
       return { source: 'existing', id: row.id, name: row.name, slug: row.slug, active: row.active, matched_on: 'name' };
     }
   }
   for (const row of others) {
-    if (conceptKey(row.slug) === key) {
+    if (keys.has(conceptKey(row.slug))) {
       return { source: 'existing', id: row.id, name: row.name, slug: row.slug, active: row.active, matched_on: 'slug' };
     }
   }
 
   for (const item of input.packItems) {
     let matchedOn: 'name' | 'slug' | 'alias' | null = null;
-    if (conceptKey(item.name) === key) matchedOn = 'name';
-    else if (conceptKey(item.slug) === key) matchedOn = 'slug';
-    else if (item.aliases.some((a) => conceptKey(a) === key)) matchedOn = 'alias';
+    if (keys.has(conceptKey(item.name))) matchedOn = 'name';
+    else if (keys.has(conceptKey(item.slug))) matchedOn = 'slug';
+    else if (item.aliases.some((a) => keys.has(conceptKey(a)))) matchedOn = 'alias';
     if (!matchedOn) continue;
 
     // The row's own concept (a rename back toward the pack's wording), or the

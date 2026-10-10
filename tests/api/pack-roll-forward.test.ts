@@ -88,15 +88,20 @@ async function auditCount(action: string): Promise<number> {
   return Number(r?.n ?? 0);
 }
 
-function roll(pack: StarterPack, opts: { dryRun: boolean; accept?: Array<{ kind: string; key: string; field?: string }> }) {
+/**
+ * A dry run, or an apply OF A PREVIEW: an apply is refused without the
+ * fingerprint of the plan that was read, so the helper reads it first, exactly
+ * as the screen does.
+ */
+async function roll(pack: StarterPack, opts: { dryRun: boolean; accept?: Array<{ kind: string; key: string; field?: string }> }) {
+  const base = { tenantId, tenantSlug, pack, actorId: seed.superAdminId, ip: null };
+  if (opts.dryRun) return runPackRollForward(db, { ...base, dryRun: true, accept: opts.accept ?? [] });
+  const preview = await runPackRollForward(db, { ...base, dryRun: true, accept: [] });
   return runPackRollForward(db, {
-    tenantId,
-    tenantSlug,
-    pack,
-    dryRun: opts.dryRun,
+    ...base,
+    dryRun: false,
     accept: opts.accept ?? [],
-    actorId: seed.superAdminId,
-    ip: null,
+    fingerprint: preview.plan_fingerprint,
   });
 }
 
@@ -562,8 +567,9 @@ describe('the story: v1, the organisation lives in it, v2 arrives', () => {
       scope: 'supplier',
     });
     const before = await snapshot();
-    const res = await applyStarterPack(db, v3, tenantId, tenantSlug, seed.superAdminId);
-    expect(res.inserted).toBe(0);
+    await expect(applyStarterPack(db, v3, tenantId, tenantSlug, seed.superAdminId)).rejects.toMatchObject({
+      code: 'roll_forward_required',
+    });
     expect(await snapshot()).toBe(before);
     expect(await currentPackVersion(db, tenantId, 'fsqa')).toBe(2);
   });
@@ -594,15 +600,16 @@ describe('the story: v1, the organisation lives in it, v2 arrives', () => {
     const plan = await roll(v3, { dryRun: true });
     expect(find(plan, 'requirement', 'pack-size')!.outcome).toBe('update');
 
-    // The guard is in SQL, so the race is staged at the statement: the apply's
-    // FIRST batch is its read of the organisation's rows; the edit lands just
-    // before its second, which is the UPDATEs planned from that read.
+    // The guard is in SQL, so the race is staged at the statement. The helper
+    // previews first (batch 1, a read); the apply then reads the rows again
+    // (batch 2) and finds the plan unchanged; the edit lands just before batch
+    // 3, which is the UPDATEs planned from that read.
     const original = db.batch.bind(db);
     const patched = db as unknown as { batch: typeof db.batch };
     let calls = 0;
     patched.batch = (async (stmts: D1PreparedStatement[]) => {
       calls += 1;
-      if (calls === 2) {
+      if (calls === 3) {
         await db
           .prepare(`UPDATE requirements SET description = 'edited in between' WHERE tenant_id = ? AND slug = 'pack-size'`)
           .bind(tenantId)
@@ -616,7 +623,7 @@ describe('the story: v1, the organisation lives in it, v2 arrives', () => {
     } finally {
       patched.batch = original;
     }
-    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(calls).toBeGreaterThanOrEqual(3);
     expect(res.not_applied).toEqual([
       expect.objectContaining({ kind: 'requirement', key: 'pack-size', reason: 'changed_since_preview' }),
     ]);

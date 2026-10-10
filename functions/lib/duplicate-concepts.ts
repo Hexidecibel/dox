@@ -82,6 +82,8 @@ export async function checkDuplicateConcept(
     /** A rename: the row being renamed. */
     excludeId?: string | null;
   },
+  // A create compares the slug as well as the name; a rename does not (the
+  // slug is the row's own). Derived, so no route can forget to ask.
 ): Promise<DuplicateConceptHit | null> {
   const rows = await db
     .prepare(`SELECT id, name, slug, active FROM ${opts.vocabulary} WHERE tenant_id = ?`)
@@ -92,6 +94,7 @@ export async function checkDuplicateConcept(
     name: opts.name,
     slug: opts.slug,
     excludeId: opts.excludeId ?? null,
+    compareSlug: !opts.excludeId,
     rows: (rows.results ?? []).map((r) => ({ id: r.id, name: r.name, slug: r.slug, active: r.active !== 0 })),
     packItems: packConceptItems(packs, opts.vocabulary),
   });

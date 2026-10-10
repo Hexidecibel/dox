@@ -181,8 +181,11 @@ describe('what a baseline records', () => {
     v2.requirements.find((r) => r.slug === 'pack-size')!.description = 'v2 pack size wording';
     v2.requirements.find((r) => r.slug === 'shelf-life')!.description = 'v2 shelf life wording';
 
-    const roll = (accept: Array<{ kind: string; key: string; field?: string }> = []) =>
-      runPackRollForward(db, { tenantId, tenantSlug, pack: v2, dryRun: false, accept, actorId: seed.superAdminId, ip: null });
+    const roll = async (accept: Array<{ kind: string; key: string; field?: string }> = []) => {
+      const base = { tenantId, tenantSlug, pack: v2, actorId: seed.superAdminId, ip: null };
+      const preview = await runPackRollForward(db, { ...base, dryRun: true, accept: [] });
+      return runPackRollForward(db, { ...base, dryRun: false, accept, fingerprint: preview.plan_fingerprint });
+    };
     const read = async (slug: string) =>
       db.prepare(`SELECT description, active FROM requirements WHERE tenant_id = ? AND slug = ?`).bind(tenantId, slug).first<{
         description: string;

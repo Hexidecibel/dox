@@ -53,6 +53,7 @@ function planBaseline(pack, rows, existing = []) {
   const have = new Set(existing.map((e) => `${e.kind}\u0000${e.item_key}`));
   const entries = [];
   const already = [];
+  const scoped = [];
   const counts = {};
   for (const kind of PACK_ITEM_KINDS) {
     counts[kind] = { pack: 0, differs: 0, absent: 0, inactive: 0, already: 0, total: 0, extra: 0 };
@@ -75,7 +76,14 @@ function planBaseline(pack, rows, existing = []) {
       already.push({ kind: item.kind, key: item.key, label: item.label });
       continue;
     }
-    const row = byNatural[item.kind].get(item.natural);
+    let row = byNatural[item.kind].get(item.natural);
+    // A SUPPLIER'S OWN document type at the pack's slug is not the pack's
+    // organisation-wide type (rule 4 in shared/packItems.ts): it is never
+    // ledgered as the pack's. The item is absent, and the report says why.
+    if (row && item.kind === 'document_type' && row.supplier_id !== null && row.supplier_id !== undefined) {
+      scoped.push({ kind: item.kind, key: item.key, label: item.label, row_id: String(row.row_id), name: row.name });
+      row = undefined;
+    }
     if (!row) {
       c.absent += 1;
       entries.push({ kind: item.kind, key: item.key, label: item.label, row_id: null, state: 'absent', differing: {}, written: item.fields });
@@ -105,7 +113,7 @@ function planBaseline(pack, rows, existing = []) {
     counts[kind].extra = (rows[kind] || []).filter((r) => !claimed[kind].has(String(r.natural_key))).length;
   }
 
-  return { pack: pack.pack, version: pack.version, entries, already, counts };
+  return { pack: pack.pack, version: pack.version, entries, already, scoped, counts };
 }
 
 /**

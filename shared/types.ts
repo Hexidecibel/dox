@@ -8071,6 +8071,12 @@ export interface PackRollForwardRequest {
   /** Default TRUE: a request that does not say `false` writes nothing. */
   dry_run?: boolean;
   /**
+   * Required when `dry_run` is false: the `plan_fingerprint` of the preview
+   * that was read. 409 `preview_required` without it, 409 `plan_changed` when
+   * the plan has moved since.
+   */
+  fingerprint?: string;
+  /**
    * Items where the organisation's own value is to be replaced by the pack's.
    * `{ kind, key }` takes every kept column of the item; `{ kind, key, field }`
    * one column. A looser sharing rule is never applied, accepted or not.
@@ -8089,7 +8095,7 @@ export interface PackRollForwardItem {
   /** False when an earlier run already recorded this outcome. */
   news: boolean;
   fields: PackPlanField[];
-  conflict?: { id: string; name: string; slug: string; active: boolean };
+  conflict?: { id: string; name: string; slug: string; active: boolean; supplier_scoped?: boolean };
   missing?: string;
 }
 
@@ -8112,6 +8118,11 @@ export interface PackRollForwardResponse {
    * edit won.
    */
   not_applied: Array<{ kind: string; key: string; label: string; reason: string; detail?: string }>;
+  /**
+   * The fingerprint of this plan as it stands WITHOUT `accept`. Send it back as
+   * `fingerprint` to apply what was previewed.
+   */
+  plan_fingerprint: string;
 }
 
 /**

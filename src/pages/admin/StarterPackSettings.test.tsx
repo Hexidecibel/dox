@@ -80,6 +80,7 @@ function plan(over: Partial<PackRollForwardResponse> = {}): PackRollForwardRespo
     up_to_date: false,
     summary: SUMMARY,
     not_applied: [],
+    plan_fingerprint: 'fp-of-this-plan',
     items: [
       {
         kind: 'requirement',
@@ -201,6 +202,8 @@ describe('StarterPackSettings', () => {
         pack: 'fsqa',
         dryRun: false,
         accept: [{ kind: 'requirement', key: 'gtin', field: 'description' }],
+        // The apply names the plan that was on the screen.
+        fingerprint: 'fp-of-this-plan',
       }),
     );
     const done = within(await screen.findByTestId('pack-applied'));

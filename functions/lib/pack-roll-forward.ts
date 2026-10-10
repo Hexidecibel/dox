@@ -49,7 +49,9 @@ import type { StarterPack } from './starterPacks.generated';
 import {
   PACK_ITEM_KINDS,
   PACK_KIND_SPECS,
+  canonicalJson,
   isPackItemKind,
+  packItems,
   packLedgerAdopt,
   packRowInsert,
   type PackApplyContext,
@@ -225,6 +227,52 @@ function reportable(plan: PackRollForwardPlan): PackPlanItem[] {
   return plan.items.filter((i) => i.outcome !== 'unchanged' || i.fields.length > 0);
 }
 
+/**
+ * A roll-forward that must not happen, with the reason in words. `status` is
+ * the HTTP answer the route gives it; the library throws it for every caller.
+ */
+export class PackRollForwardRefused extends Error {
+  constructor(
+    readonly code: 'not_ledgered' | 'preview_required' | 'plan_changed',
+    message: string,
+    readonly status = 409,
+  ) {
+    super(message);
+    this.name = 'PackRollForwardRefused';
+  }
+}
+
+/**
+ * The fingerprint of a plan: a hash of the version it rolls to and of
+ * everything it would write. A preview returns it; an apply must send it back,
+ * and is refused if the plan computed at that moment hashes differently -- the
+ * pack moved, or somebody changed a row, since the person looked. It is taken
+ * over the plan WITHOUT `accept`: that is the plan the person read, and their
+ * ticks are choices made from it.
+ */
+async function planFingerprint(plan: PackRollForwardPlan): Promise<string> {
+  const text = canonicalJson({
+    pack: plan.pack,
+    from: plan.from_version,
+    to: plan.to_version,
+    items: plan.items
+      .filter((i) => i.outcome !== 'unchanged' || i.fields.length > 0 || i.ledger !== null)
+      .map((i) => ({
+        kind: i.kind,
+        key: i.key,
+        outcome: i.outcome,
+        row_id: i.row_id,
+        fields: i.fields.map((f) => ({ field: f.field, action: f.action, current: f.current, target: f.target })),
+        update: i.row_update ?? null,
+        ledger: i.ledger,
+      })),
+  });
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 export interface PackRollForwardOptions {
   tenantId: string;
   /** Seeds the id of a row this inserts. Never used to look one up. */
@@ -232,6 +280,12 @@ export interface PackRollForwardOptions {
   pack: StarterPack;
   dryRun: boolean;
   accept: readonly PackAccept[];
+  /**
+   * Required for an apply: the `plan_fingerprint` of the preview the person
+   * read. An apply with none is refused (`preview_required`), and one whose
+   * plan has since moved is refused (`plan_changed`).
+   */
+  fingerprint?: string | null;
   actorId: string;
   ip: string | null;
 }
@@ -256,7 +310,59 @@ export async function runPackRollForward(
     loadPackRows(db, tenantId),
     currentPackVersion(db, tenantId, pack.pack),
   ]);
-  const plan = planPackRollForward({ pack, fromVersion, ledger, rows, accept: opts.accept });
+  // An organisation with no record cannot be rolled forward by ANY caller:
+  // with nothing to say what the pack wrote, every item it lacks would look
+  // new, including the ones it removed. (The planner refuses a downgrade the
+  // same way, by throwing `PackVersionBehindError`.)
+  if (fromVersion === null) {
+    throw new PackRollForwardRefused(
+      'not_ledgered',
+      `This organisation has no starter-pack record for "${pack.pack}". It was set up before pack versions existed, ` +
+        'or never took this pack. Without a record of what the pack wrote, an update cannot tell a new item from one ' +
+        'this organisation removed, so nothing is rolled forward until it has been baselined (bin/baseline-pack-ledger).',
+    );
+  }
+
+  // The plan the person reads (no `accept`), and its fingerprint.
+  const basePlan = planPackRollForward({ pack, fromVersion, ledger, rows, accept: [] });
+  const fingerprint = await planFingerprint(basePlan);
+
+  // `accept` names items and columns OF THAT PLAN. An entry that names nothing
+  // is a mistake the caller should hear about, not a silent no-op.
+  const packFields = new Map(packItems(pack).map((i) => [`${i.kind}\u0000${i.key}`, i.fields]));
+  const planned = new Set(basePlan.items.map((i) => `${i.kind}\u0000${i.key}`));
+  const unknown: string[] = [];
+  for (const a of opts.accept) {
+    const id = `${a.kind}\u0000${a.key}`;
+    if (!planned.has(id)) unknown.push(`${a.kind} ${a.key}`);
+    else if (a.field && !Object.prototype.hasOwnProperty.call(packFields.get(id) ?? {}, a.field)) {
+      unknown.push(`${a.kind} ${a.key} (${a.field})`);
+    }
+  }
+  if (unknown.length > 0) {
+    throw new BadRequestError(
+      `accept names ${unknown.length === 1 ? 'something' : 'things'} that ${unknown.length === 1 ? 'is' : 'are'} not in this pack's plan: ${unknown.join('; ')}`,
+    );
+  }
+
+  if (!opts.dryRun) {
+    if (!opts.fingerprint) {
+      throw new PackRollForwardRefused(
+        'preview_required',
+        'An update is applied from a preview. Run the dry run first and send its plan_fingerprint back as "fingerprint".',
+      );
+    }
+    if (opts.fingerprint !== fingerprint) {
+      throw new PackRollForwardRefused(
+        'plan_changed',
+        'What this update would do has changed since it was previewed (the pack, or a row it touches, is different now). ' +
+          'Nothing was changed. Preview it again.',
+      );
+    }
+  }
+
+  const plan =
+    opts.accept.length === 0 ? basePlan : planPackRollForward({ pack, fromVersion, ledger, rows, accept: opts.accept });
 
   const response: PackRollForwardResponse = {
     dry_run: opts.dryRun,
@@ -270,6 +376,7 @@ export async function runPackRollForward(
     summary: plan.summary,
     items: reportable(plan).map(viewOf),
     not_applied: [],
+    plan_fingerprint: fingerprint,
   };
   if (opts.dryRun) return response;
 
@@ -504,11 +611,14 @@ export async function runPackRollForward(
   }
 
   // ---- 4. the version ----------------------------------------------------
-  const versionMoved = plan.from_version !== plan.to_version;
+  // Only ever UP (the planner refuses a downgrade), and only once: the unique
+  // index on (tenant, pack, version, from_version) makes a second stamp of the
+  // same step a no-op even if two requests got this far together.
+  const versionMoved = plan.from_version !== null && plan.to_version > plan.from_version;
   if (versionMoved) {
     await db
       .prepare(
-        `INSERT INTO tenant_packs (id, tenant_id, pack, version, from_version, source, applied_by, summary)
+        `INSERT OR IGNORE INTO tenant_packs (id, tenant_id, pack, version, from_version, source, applied_by, summary)
          VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, 'roll_forward', ?, ?)`,
       )
       .bind(tenantId, pack.pack, plan.to_version, plan.from_version, opts.actorId, JSON.stringify(plan.summary))

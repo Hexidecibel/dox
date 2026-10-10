@@ -41,6 +41,11 @@
  *     VERSION of the pack is not written to at all: a new version reaches it
  *     through the roll-forward, which previews first.
  *
+ *  4. A SUPPLIER'S OWN document type (`supplier_id` set) is never the pack's
+ *     row, even at the pack's slug. Nothing is hung off it, it is not
+ *     ledgered, and a roll-forward reports it to a person instead of writing
+ *     to it. The pack's type is organisation-wide.
+ *
  * Dependency-free apart from the two name-match helpers, because this file is
  * compiled to `bin/lib/shared/packItems.js` for the CLI
  * (`npm run build:worker-shared`).
@@ -218,7 +223,9 @@ export const PACK_KIND_SPECS: Record<PackItemKind, KindSpec> = {
     hasUpdatedAt: true,
     hasUpdatedBy: false,
     groups: [['renewal_policy', 'renewal_interval_months', 'renewal_window']],
-    readSql: `SELECT slug AS natural_key, id AS row_id, active AS active, name, description, default_owner,
+    // `supplier_id` is read so a supplier's OWN type at a pack slug can be told
+    // from the pack's organisation-wide one: it is reported, never adopted.
+    readSql: `SELECT slug AS natural_key, id AS row_id, active AS active, supplier_id, name, description, default_owner,
                      renewal_policy, renewal_interval_months, renewal_window, sharing_rule
                 FROM document_types WHERE tenant_id = ?`,
   },
@@ -276,7 +283,7 @@ export const PACK_KIND_SPECS: Record<PackItemKind, KindSpec> = {
                 FROM document_type_requirements j
                 JOIN document_types dt ON dt.id = j.document_type_id
                 JOIN requirements r ON r.id = j.requirement_id
-               WHERE j.tenant_id = ?`,
+               WHERE j.tenant_id = ? AND dt.supplier_id IS NULL`,
   },
   extraction_instructions: {
     section: 'extraction_instructions',
@@ -290,7 +297,7 @@ export const PACK_KIND_SPECS: Record<PackItemKind, KindSpec> = {
     readSql: `SELECT dt.slug AS natural_key, e.id AS row_id, 1 AS active, e.instructions
                 FROM document_type_extraction_instructions e
                 JOIN document_types dt ON dt.id = e.document_type_id
-               WHERE e.tenant_id = ?`,
+               WHERE e.tenant_id = ? AND dt.supplier_id IS NULL`,
   },
   spec_test: {
     section: 'spec_tests',
@@ -593,22 +600,27 @@ function idExpr(q: Sql, table: string, id: string, tenantId: string): void {
 }
 
 /**
- * True when the organisation has no version on record for the pack, or is on
- * exactly this one. `tenant_packs` is append-only history, so "the version it
- * is on" is the HIGHEST row, not any row. Parameters: tenant, pack, version, version.
+ * True when the organisation is ON RECORD as being on exactly this version of
+ * the pack. `tenant_packs` is append-only history, so "the version it is on" is
+ * the HIGHEST row, not any row. No row at all is NULL = ?, which is not true:
+ * an apply writes nothing for an organisation with no stamp, and the stamp
+ * (`packTenantStamp`, the FIRST statement of an apply) is only ever given to an
+ * organisation that is not already seeded. Parameters: tenant, pack, version.
  */
-const SAME_VERSION = `COALESCE((SELECT MAX(version) FROM tenant_packs WHERE tenant_id = ? AND pack = ?), ?) = ?`;
+const SAME_VERSION = `(SELECT MAX(version) FROM tenant_packs WHERE tenant_id = ? AND pack = ?) = ?`;
 
 /**
  * The two things that stop an APPLY from writing:
  *
  *   the ledger already knows this item (rule 3), or
- *   the organisation is on ANOTHER VERSION of this pack.
+ *   the organisation is not on record as being on THIS VERSION of this pack.
  *
- * The second is what keeps a newer pack from reaching an existing organisation
- * through the side door: without it, applying v2 over a v1 organisation would
- * quietly insert every item v2 added -- no preview, no conflict check -- and
- * leave the version saying 1. A new version comes through the roll-forward.
+ * The second covers two organisations. One is on another version: without the
+ * guard, applying v2 over a v1 organisation would quietly insert every item v2
+ * added -- no preview, no conflict check -- and leave the version saying 1. The
+ * other has the pack's rows and no record at all (seeded before the ledger
+ * existed): it never gets a stamp from an apply (see `packTenantStamp`), so
+ * nothing here writes for it, and what it deleted on purpose is not put back.
  */
 function ledgerGuard(q: Sql, pack: string, version: number, item: PackItem, tenantId: string): void {
   q.add(
@@ -621,7 +633,6 @@ function ledgerGuard(q: Sql, pack: string, version: number, item: PackItem, tena
     item.key,
     tenantId,
     pack,
-    version,
     version,
   );
 }
@@ -708,7 +719,7 @@ export function packRowInsert(
       q.add(`INSERT OR IGNORE INTO document_type_requirements (id, tenant_id, document_type_id, requirement_id, source) SELECT `);
       idExpr(q, spec.table, id!, t);
       q.add(
-        `, ?, dt.id, r.id, 'pack' FROM document_types dt JOIN requirements r ON r.tenant_id = dt.tenant_id WHERE dt.tenant_id = ? AND dt.slug = ? AND r.slug = ?`,
+        `, ?, dt.id, r.id, 'pack' FROM document_types dt JOIN requirements r ON r.tenant_id = dt.tenant_id WHERE dt.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ? AND r.slug = ?`,
         t,
         t,
         item.refs!.document_type!,
@@ -721,7 +732,7 @@ export function packRowInsert(
       q.add(`INSERT OR IGNORE INTO document_type_extraction_instructions (id, tenant_id, document_type_id, instructions) SELECT `);
       idExpr(q, spec.table, id!, t);
       q.add(
-        `, ?, dt.id, ? FROM document_types dt WHERE dt.tenant_id = ? AND dt.slug = ?`,
+        `, ?, dt.id, ? FROM document_types dt WHERE dt.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ?`,
         t,
         f.instructions,
         t,
@@ -777,6 +788,9 @@ function rowLocator(q: Sql, item: PackItem, tenantId: string): void {
       q.add(`FROM owner_labels x WHERE x.tenant_id = ? AND x.owner_key = ?`, tenantId, item.key);
       break;
     case 'document_type':
+      // A supplier's own type holding the slug is not the pack's row (rule 4).
+      q.add(`FROM document_types x WHERE x.tenant_id = ? AND x.supplier_id IS NULL AND x.slug = ?`, tenantId, item.slug!);
+      break;
     case 'requirement':
     case 'claim_type':
       q.add(`FROM ${PACK_KIND_SPECS[item.kind].table} x WHERE x.tenant_id = ? AND x.slug = ?`, tenantId, item.slug!);
@@ -791,7 +805,7 @@ function rowLocator(q: Sql, item: PackItem, tenantId: string): void {
       break;
     case 'type_requirement':
       q.add(
-        `FROM document_type_requirements x JOIN document_types dt ON dt.id = x.document_type_id JOIN requirements r ON r.id = x.requirement_id WHERE x.tenant_id = ? AND dt.slug = ? AND r.slug = ?`,
+        `FROM document_type_requirements x JOIN document_types dt ON dt.id = x.document_type_id JOIN requirements r ON r.id = x.requirement_id WHERE x.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ? AND r.slug = ?`,
         tenantId,
         item.refs!.document_type!,
         item.refs!.requirement!,
@@ -799,7 +813,7 @@ function rowLocator(q: Sql, item: PackItem, tenantId: string): void {
       break;
     case 'extraction_instructions':
       q.add(
-        `FROM document_type_extraction_instructions x JOIN document_types dt ON dt.id = x.document_type_id WHERE x.tenant_id = ? AND dt.slug = ?`,
+        `FROM document_type_extraction_instructions x JOIN document_types dt ON dt.id = x.document_type_id WHERE x.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ?`,
         tenantId,
         item.refs!.document_type!,
       );
@@ -877,35 +891,109 @@ export function packLedgerAdopt(
   rowLocator(q, item, ctx.tenantId);
   q.add(`) y`);
   if (guarded) {
-    q.add(` WHERE ${SAME_VERSION}`, ctx.tenantId, packName, packVersion, packVersion);
+    q.add(` WHERE ${SAME_VERSION}`, ctx.tenantId, packName, packVersion);
   }
   return { section: 'ledger', sql: q.text, params: q.params };
 }
 
-/**
- * Records which pack and version an organisation is on -- the FIRST time only.
- * A later roll-forward appends its own row; a re-apply does not, so applying a
- * newer build of the portal to an organisation never claims it rolled forward.
- */
-export function packTenantStamp(packName: string, packVersion: number, ctx: PackApplyContext): PackStatement {
-  return {
-    section: 'ledger',
-    sql:
-      `INSERT OR IGNORE INTO tenant_packs (id, tenant_id, pack, version, from_version, source, applied_by) ` +
-      `SELECT lower(hex(randomblob(16))), ?, ?, ?, NULL, ?, ? ` +
-      `WHERE NOT EXISTS (SELECT 1 FROM tenant_packs WHERE tenant_id = ? AND pack = ?)`,
-    params: [ctx.tenantId, packName, packVersion, ctx.source, ctx.appliedBy, ctx.tenantId, packName],
-  };
+/** The slugs an organisation is recognised as "seeded from this pack" by. */
+export function packVocabularySlugs(pack: PackLike): {
+  document_types: string[];
+  requirements: string[];
+  claim_types: string[];
+  total: number;
+} {
+  const document_types = pack.document_types.map((d) => d.slug);
+  const requirements = pack.requirements.map((r) => r.slug);
+  const claim_types = pack.claim_types.map((c) => c.slug);
+  return { document_types, requirements, claim_types, total: document_types.length + requirements.length + claim_types.length };
 }
 
 /**
- * Everything applying a pack runs, in order: every row insert (dependency
- * order), then every ledger entry, then the version stamp.
+ * How many of the pack's document types, requirements and claim types the
+ * organisation holds BY SLUG. One scalar subquery, three parameters per
+ * vocabulary (the slugs travel as ONE JSON array each, so a large pack cannot
+ * run into D1's bound-parameter limit). A supplier's own document type does not
+ * count: it is not the pack's row.
+ */
+function heldVocabulary(q: Sql, pack: PackLike, tenantId: string): void {
+  const v = packVocabularySlugs(pack);
+  q.add(
+    `((SELECT COUNT(*) FROM document_types WHERE tenant_id = ? AND supplier_id IS NULL AND slug IN (SELECT value FROM json_each(?)))` +
+      ` + (SELECT COUNT(*) FROM requirements WHERE tenant_id = ? AND slug IN (SELECT value FROM json_each(?)))` +
+      ` + (SELECT COUNT(*) FROM claim_types WHERE tenant_id = ? AND slug IN (SELECT value FROM json_each(?))))`,
+    tenantId,
+    JSON.stringify(v.document_types),
+    tenantId,
+    JSON.stringify(v.requirements),
+    tenantId,
+    JSON.stringify(v.claim_types),
+  );
+}
+
+/** `SELECT <held> AS held` -- for the callers that explain a refusal in words. */
+export function packHeldVocabularyQuery(pack: PackLike, tenantId: string): { sql: string; params: PackValue[] } {
+  const q = new Sql();
+  q.add('SELECT ');
+  heldVocabulary(q, pack, tenantId);
+  q.add(' AS held');
+  return { sql: q.text, params: q.params };
+}
+
+/**
+ * Is an organisation with NO stamp already seeded from this pack? Yes when it
+ * holds at least half of the pack's vocabulary by slug -- the same bar
+ * `bin/baseline-pack-ledger` uses to infer a pack. Below it, the organisation
+ * has a few rows of its own that happen to share a slug, and those are adopted.
+ */
+export function packLooksSeeded(held: number, total: number): boolean {
+  return total > 0 && held * 2 >= total;
+}
+
+/**
+ * THE GATE. Records which pack and version an organisation is on -- the first
+ * time only, and ONLY FOR AN ORGANISATION THAT IS NOT ALREADY SEEDED.
+ *
+ * It is the first statement of an apply and every other statement requires it
+ * (`SAME_VERSION`). So an organisation that holds the pack's rows and has no
+ * record -- one seeded before migration 0141 and never baselined -- gets no
+ * stamp, and therefore NOTHING: no row, no ledger entry. Without this, applying
+ * to such an organisation re-inserted what it had deleted on purpose and
+ * ledgered every row as if the apply had just written it, which is exactly the
+ * guess a baseline exists to avoid. `bin/baseline-pack-ledger` is its way in.
+ *
+ * A later roll-forward appends its own row; a re-apply does not, so applying a
+ * newer build of the portal to an organisation never claims it rolled forward.
+ */
+export function packTenantStamp(pack: PackLike, ctx: PackApplyContext): PackStatement {
+  const q = new Sql();
+  q.add(
+    `INSERT OR IGNORE INTO tenant_packs (id, tenant_id, pack, version, from_version, source, applied_by) ` +
+      `SELECT lower(hex(randomblob(16))), ?, ?, ?, NULL, ?, ? ` +
+      `WHERE NOT EXISTS (SELECT 1 FROM tenant_packs WHERE tenant_id = ? AND pack = ?) AND `,
+    ctx.tenantId,
+    pack.pack,
+    pack.version,
+    ctx.source,
+    ctx.appliedBy,
+    ctx.tenantId,
+    pack.pack,
+  );
+  heldVocabulary(q, pack, ctx.tenantId);
+  // Integer form of `packLooksSeeded`: stamped only while held * 2 < total.
+  q.add(` * 2 < ?`, Math.max(packVocabularySlugs(pack).total, 1));
+  return { section: 'ledger', sql: q.text, params: q.params };
+}
+
+/**
+ * Everything applying a pack runs, in order: THE STAMP (the gate above), every
+ * row insert (dependency order), then every ledger entry.
  *
  * The two halves are separate so a caller may run them as two transactions:
  * the rows are what the organisation needs, the ledger is what a LATER version
  * needs, and a ledger that failed is repaired by applying again (the row
- * inserts are then all ignored and the ledger entries all written).
+ * inserts are then all ignored and the ledger entries all written). The stamp
+ * travels with the rows: if they fail it rolls back with them.
  */
 export function packApplyStatements(
   pack: PackLike,
@@ -913,11 +1001,8 @@ export function packApplyStatements(
 ): { rows: PackStatement[]; ledger: PackStatement[] } {
   const items = packItems(pack);
   return {
-    rows: items.map((item) => packRowInsert(pack.pack, item, ctx, pack.version)),
-    ledger: [
-      ...items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx, true)),
-      packTenantStamp(pack.pack, pack.version, ctx),
-    ],
+    rows: [packTenantStamp(pack, ctx), ...items.map((item) => packRowInsert(pack.pack, item, ctx, pack.version))],
+    ledger: items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx, true)),
   };
 }
 

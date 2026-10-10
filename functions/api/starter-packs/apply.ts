@@ -6,8 +6,7 @@ import {
   NotFoundError,
   errorToResponse,
 } from '../../lib/permissions';
-import { applyStarterPack } from '../../lib/starter-packs';
-import { currentPackVersion } from '../../lib/pack-roll-forward';
+import { applyStarterPack, starterPackApplyRefusal } from '../../lib/starter-packs';
 import { getStarterPack } from '../../lib/starterPacks.generated';
 import { getRunById, stampApplied } from '../../lib/tenant-setup';
 import type { Env, User } from '../../lib/types';
@@ -84,24 +83,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    // A NEWER VERSION DOES NOT COME THROUGH THIS DOOR. An organisation already
-    // on another version of this pack is told where the update is previewed;
-    // the statements below would write nothing for it anyway (the same guard is
-    // in the SQL, for the CLI), and "0 rows added" would read as "up to date".
-    const onVersion = await currentPackVersion(context.env.DB, tenantId, pack.pack);
-    if (onVersion !== null && onVersion !== pack.version) {
-      return json(
-        {
-          error:
-            `This organisation is on version ${onVersion} of the ${pack.label} pack, and this is version ${pack.version}. ` +
-            'A new version is not applied here: preview it and roll forward on Settings > Starter pack, ' +
-            'which shows what would change and keeps what you have changed.',
-          code: 'roll_forward_required',
-          version: onVersion,
-          available_version: pack.version,
-        },
-        409,
-      );
+    // Two organisations are refused, with the reason: one on ANOTHER VERSION
+    // of this pack (a new version is previewed and rolled forward), and one
+    // that holds the pack's rows with no record of taking it (seeded before the
+    // ledger; it is baselined first). See `starterPackApplyRefusal`.
+    const refusal = await starterPackApplyRefusal(context.env.DB, pack, tenantId);
+    if (refusal) {
+      return json({ error: refusal.message, code: refusal.code, ...refusal.detail }, refusal.status);
     }
 
     const result = await applyStarterPack(context.env.DB, pack, tenantId, tenant.slug, user.id);

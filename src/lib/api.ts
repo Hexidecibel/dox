@@ -2464,6 +2464,8 @@ export const api = {
       pack?: string;
       dryRun?: boolean;
       accept?: PackAccept[];
+      /** The `plan_fingerprint` of the preview being applied. Required for an apply. */
+      fingerprint?: string;
     }): Promise<PackRollForwardResponse> =>
       fetchApi<PackRollForwardResponse>('/starter-packs/roll-forward', {
         method: 'POST',
@@ -2472,6 +2474,7 @@ export const api = {
           pack: params.pack,
           dry_run: params.dryRun !== false,
           accept: params.accept ?? [],
+          ...(params.fingerprint ? { fingerprint: params.fingerprint } : {}),
         }),
       }),
 

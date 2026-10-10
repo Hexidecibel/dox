@@ -57,6 +57,9 @@
 import type { StarterPack } from './starterPacks.generated';
 import {
   packApplyStatements,
+  packHeldVocabularyQuery,
+  packLooksSeeded,
+  packVocabularySlugs,
   packRowId as sharedPackRowId,
   packSlugify,
   type PackSection,
@@ -181,14 +184,85 @@ export async function sectionCensus(
   return counts;
 }
 
+/**
+ * An apply that must not happen, with the reason in words. `status` is the
+ * HTTP answer the route gives it.
+ */
+export class StarterPackApplyRefused extends Error {
+  readonly status = 409;
+  constructor(
+    readonly code: 'roll_forward_required' | 'baseline_required',
+    message: string,
+    readonly detail: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'StarterPackApplyRefused';
+  }
+}
+
+/**
+ * WHO AN APPLY IS REFUSED FOR. Two organisations, and nobody else:
+ *
+ *   on ANOTHER VERSION of this pack (`roll_forward_required`). A new version
+ *       is previewed and rolled forward; applying it would insert every item it
+ *       added with no preview and no conflict check.
+ *
+ *   SEEDED, AND NEVER RECORDED (`baseline_required`): no `tenant_packs` row,
+ *       yet it holds at least half of the pack's document types, requirements
+ *       and claim types by slug. It was set up before the ledger existed. An
+ *       apply would put back whatever it had deleted on purpose and ledger
+ *       every row as though the apply had written it -- the guess
+ *       `bin/baseline-pack-ledger` exists to avoid. That script is its way in.
+ *
+ * An organisation with nothing, or with a few rows of its own that happen to
+ * share a pack slug, applies: its rows are adopted.
+ */
+export async function starterPackApplyRefusal(
+  db: D1Database,
+  pack: StarterPack,
+  tenantId: string,
+): Promise<StarterPackApplyRefused | null> {
+  const stamp = await db
+    .prepare('SELECT MAX(version) AS version FROM tenant_packs WHERE tenant_id = ? AND pack = ?')
+    .bind(tenantId, pack.pack)
+    .first<{ version: number | null }>();
+  const onVersion = stamp?.version === null || stamp?.version === undefined ? null : Number(stamp.version);
+
+  if (onVersion !== null) {
+    if (onVersion === pack.version) return null;
+    return new StarterPackApplyRefused(
+      'roll_forward_required',
+      `This organisation is on version ${onVersion} of the ${pack.label} pack, and this is version ${pack.version}. ` +
+        'A new version is not applied here: preview it and roll forward on Settings > Starter pack, ' +
+        'which shows what would change and keeps what you have changed.',
+      { version: onVersion, available_version: pack.version },
+    );
+  }
+
+  const q = packHeldVocabularyQuery(pack, tenantId);
+  const held = Number((await db.prepare(q.sql).bind(...q.params).first<{ held: number }>())?.held ?? 0);
+  const total = packVocabularySlugs(pack).total;
+  if (!packLooksSeeded(held, total)) return null;
+  return new StarterPackApplyRefused(
+    'baseline_required',
+    `This organisation already holds ${held} of the ${total} document types, requirements and claims of the ${pack.label} pack, ` +
+      'and has no record of having taken it: it was set up before pack versions existed. ' +
+      'Applying the pack now would put back anything it removed on purpose and record every row as freshly written. ' +
+      'Nothing was changed. An operator records what is there first, with bin/baseline-pack-ledger (it changes none of your rows); ' +
+      'updates then come through Settings > Starter pack.',
+    { held, total },
+  );
+}
+
 function bindStatement(db: D1Database, statement: PackStatement): Tagged {
   return { section: statement.section, stmt: db.prepare(statement.sql).bind(...statement.params) };
 }
 
 /**
- * The statements a pack contributes for one tenant: every row insert in
- * dependency order (departments, the vocabularies, then every junction that
- * needs two of them), then one ledger entry per item, then the version stamp.
+ * The statements a pack contributes for one tenant: the version stamp (the
+ * gate every other statement requires), every row insert in dependency order
+ * (departments, the vocabularies, then every junction that needs two of them),
+ * then one ledger entry per item.
  *
  * `appliedBy` is recorded on the ledger; null when nobody is signed in.
  */
@@ -222,8 +296,12 @@ export async function applyStarterPack(
   tenantSlug: string,
   appliedBy: string | null = null,
 ): Promise<StarterPackApplyResult> {
+  // The same two refusals the SQL enforces (for the CLI, which cannot ask
+  // first), asked here so a caller gets a REASON instead of "0 rows added".
+  const refusal = await starterPackApplyRefusal(db, pack, tenantId);
+  if (refusal) throw refusal;
+
   const { rows, ledger } = packApplyStatements(pack, { tenantId, tenantSlug, source: 'apply', appliedBy });
-  if (rows.length === 0) return { pack: pack.pack, counts: emptyCounts(), inserted: 0 };
 
   const before = await sectionCensus(db, tenantId);
   await db.batch(rows.map((s) => bindStatement(db, s).stmt));

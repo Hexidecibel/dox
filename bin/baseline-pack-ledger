@@ -272,6 +272,11 @@ function printTenant(result, detail) {
     for (const e of absent.slice(0, cap)) console.log(`    ${PACK_KIND_SPECS[e.kind].noun} "${e.label}" [${e.key}]`);
     if (absent.length > cap) console.log(`    ... and ${absent.length - cap} more (--tenant ${tenant.id} lists them all)`);
   }
+  if (plan.scoped.length > 0) {
+    console.log('');
+    console.log(`  ONE SUPPLIER'S OWN TYPE AT A PACK SLUG (${plan.scoped.length}) - not the pack's type, recorded as absent, never written by an update:`);
+    for (const e of plan.scoped) console.log(`    document type "${e.name}" [${e.key}] belongs to one supplier`);
+  }
   if (plan.entries.length === 0) {
     console.log('');
     console.log('  Nothing to record: every item of the pack is already in this organisation\'s ledger.');

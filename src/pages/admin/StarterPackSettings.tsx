@@ -253,6 +253,9 @@ export function StarterPackSettings() {
         pack: preview.pack,
         dryRun: false,
         accept: [...accept.values()],
+        // The plan that is on the screen. If it has moved since (the pack, or
+        // a row somebody edited), the server refuses and says to look again.
+        fingerprint: preview.plan_fingerprint,
       });
       setApplied(result);
       setPreview(null);
@@ -470,7 +473,9 @@ export function StarterPackSettings() {
                             ? `You changed it. The pack had written: ${showValue(field.base)}`
                             : field.reason === 'setting'
                               ? 'Part of a setting you changed; it moves whole or not at all.'
-                              : 'It already differed when this organisation was recorded.'}
+                              : field.reason === 'duplicate_name'
+                                ? `You already have "${item.conflict?.name}" (${item.conflict?.slug}) under that name. Tick to rename this one anyway.`
+                                : 'It already differed when this organisation was recorded.'}
                         </Typography>
                       </TableCell>
                       <TableCell><Value value={field.current} /></TableCell>
@@ -545,20 +550,25 @@ export function StarterPackSettings() {
               <TableBody>
                 {groups.conflicts.map((item) => {
                   const a: PackAccept = { kind: item.kind, key: item.key };
+                  const scoped = item.conflict?.supplier_scoped === true;
                   return (
                     <TableRow key={`${item.kind}:${item.key}`}>
                       <TableCell><ItemName item={item} /></TableCell>
                       <TableCell>
                         <Typography variant="body2">
-                          You have "{item.conflict?.name}" ({item.conflict?.slug})
-                          {item.conflict && !item.conflict.active ? ', switched off' : ''}.
+                          {scoped
+                            ? `"${item.conflict?.name}" (${item.conflict?.slug}) belongs to one supplier and holds this slug. ` +
+                              "It is not the pack's type, so an update never writes to it and cannot add the pack's beside it."
+                            : `You have "${item.conflict?.name}" (${item.conflict?.slug})${item.conflict && !item.conflict.active ? ', switched off' : ''}.`}
                         </Typography>
                       </TableCell>
                       <TableCell>
-                        <FormControlLabel
-                          control={<Checkbox checked={accept.has(acceptKey(a))} onChange={() => toggle(a)} disabled={busy} />}
-                          label="Add the pack's as well"
-                        />
+                        {!scoped && (
+                          <FormControlLabel
+                            control={<Checkbox checked={accept.has(acceptKey(a))} onChange={() => toggle(a)} disabled={busy} />}
+                            label="Add the pack's as well"
+                          />
+                        )}
                       </TableCell>
                     </TableRow>
                   );

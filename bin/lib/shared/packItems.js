@@ -27,13 +27,16 @@ __export(packItems_exports, {
   isPackItemKind: () => isPackItemKind,
   packApplyStatements: () => packApplyStatements,
   packContentForHash: () => packContentForHash,
+  packHeldVocabularyQuery: () => packHeldVocabularyQuery,
   packItemRowId: () => packItemRowId,
   packItems: () => packItems,
   packLedgerAdopt: () => packLedgerAdopt,
+  packLooksSeeded: () => packLooksSeeded,
   packRowId: () => packRowId,
   packRowInsert: () => packRowInsert,
   packSlugify: () => packSlugify,
   packTenantStamp: () => packTenantStamp,
+  packVocabularySlugs: () => packVocabularySlugs,
   sqlLiteral: () => sqlLiteral
 });
 module.exports = __toCommonJS(packItems_exports);
@@ -160,7 +163,9 @@ var PACK_KIND_SPECS = {
     hasUpdatedAt: true,
     hasUpdatedBy: false,
     groups: [["renewal_policy", "renewal_interval_months", "renewal_window"]],
-    readSql: `SELECT slug AS natural_key, id AS row_id, active AS active, name, description, default_owner,
+    // `supplier_id` is read so a supplier's OWN type at a pack slug can be told
+    // from the pack's organisation-wide one: it is reported, never adopted.
+    readSql: `SELECT slug AS natural_key, id AS row_id, active AS active, supplier_id, name, description, default_owner,
                      renewal_policy, renewal_interval_months, renewal_window, sharing_rule
                 FROM document_types WHERE tenant_id = ?`
   },
@@ -218,7 +223,7 @@ var PACK_KIND_SPECS = {
                 FROM document_type_requirements j
                 JOIN document_types dt ON dt.id = j.document_type_id
                 JOIN requirements r ON r.id = j.requirement_id
-               WHERE j.tenant_id = ?`
+               WHERE j.tenant_id = ? AND dt.supplier_id IS NULL`
   },
   extraction_instructions: {
     section: "extraction_instructions",
@@ -232,7 +237,7 @@ var PACK_KIND_SPECS = {
     readSql: `SELECT dt.slug AS natural_key, e.id AS row_id, 1 AS active, e.instructions
                 FROM document_type_extraction_instructions e
                 JOIN document_types dt ON dt.id = e.document_type_id
-               WHERE e.tenant_id = ?`
+               WHERE e.tenant_id = ? AND dt.supplier_id IS NULL`
   },
   spec_test: {
     section: "spec_tests",
@@ -476,7 +481,7 @@ function idExpr(q, table, id, tenantId) {
     id
   );
 }
-var SAME_VERSION = `COALESCE((SELECT MAX(version) FROM tenant_packs WHERE tenant_id = ? AND pack = ?), ?) = ?`;
+var SAME_VERSION = `(SELECT MAX(version) FROM tenant_packs WHERE tenant_id = ? AND pack = ?) = ?`;
 function ledgerGuard(q, pack, version, item, tenantId) {
   q.add(
     `NOT EXISTS (SELECT 1 FROM pack_applied_items WHERE tenant_id = ? AND pack = ? AND kind = ? AND item_key = ?) AND ` + SAME_VERSION,
@@ -486,7 +491,6 @@ function ledgerGuard(q, pack, version, item, tenantId) {
     item.key,
     tenantId,
     pack,
-    version,
     version
   );
 }
@@ -554,7 +558,7 @@ function packRowInsert(packName, item, ctx, guardVersion) {
       q.add(`INSERT OR IGNORE INTO document_type_requirements (id, tenant_id, document_type_id, requirement_id, source) SELECT `);
       idExpr(q, spec.table, id, t);
       q.add(
-        `, ?, dt.id, r.id, 'pack' FROM document_types dt JOIN requirements r ON r.tenant_id = dt.tenant_id WHERE dt.tenant_id = ? AND dt.slug = ? AND r.slug = ?`,
+        `, ?, dt.id, r.id, 'pack' FROM document_types dt JOIN requirements r ON r.tenant_id = dt.tenant_id WHERE dt.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ? AND r.slug = ?`,
         t,
         t,
         item.refs.document_type,
@@ -566,7 +570,7 @@ function packRowInsert(packName, item, ctx, guardVersion) {
       q.add(`INSERT OR IGNORE INTO document_type_extraction_instructions (id, tenant_id, document_type_id, instructions) SELECT `);
       idExpr(q, spec.table, id, t);
       q.add(
-        `, ?, dt.id, ? FROM document_types dt WHERE dt.tenant_id = ? AND dt.slug = ?`,
+        `, ?, dt.id, ? FROM document_types dt WHERE dt.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ?`,
         t,
         f.instructions,
         t,
@@ -613,6 +617,8 @@ function rowLocator(q, item, tenantId) {
       q.add(`FROM owner_labels x WHERE x.tenant_id = ? AND x.owner_key = ?`, tenantId, item.key);
       break;
     case "document_type":
+      q.add(`FROM document_types x WHERE x.tenant_id = ? AND x.supplier_id IS NULL AND x.slug = ?`, tenantId, item.slug);
+      break;
     case "requirement":
     case "claim_type":
       q.add(`FROM ${PACK_KIND_SPECS[item.kind].table} x WHERE x.tenant_id = ? AND x.slug = ?`, tenantId, item.slug);
@@ -627,7 +633,7 @@ function rowLocator(q, item, tenantId) {
       break;
     case "type_requirement":
       q.add(
-        `FROM document_type_requirements x JOIN document_types dt ON dt.id = x.document_type_id JOIN requirements r ON r.id = x.requirement_id WHERE x.tenant_id = ? AND dt.slug = ? AND r.slug = ?`,
+        `FROM document_type_requirements x JOIN document_types dt ON dt.id = x.document_type_id JOIN requirements r ON r.id = x.requirement_id WHERE x.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ? AND r.slug = ?`,
         tenantId,
         item.refs.document_type,
         item.refs.requirement
@@ -635,7 +641,7 @@ function rowLocator(q, item, tenantId) {
       break;
     case "extraction_instructions":
       q.add(
-        `FROM document_type_extraction_instructions x JOIN document_types dt ON dt.id = x.document_type_id WHERE x.tenant_id = ? AND dt.slug = ?`,
+        `FROM document_type_extraction_instructions x JOIN document_types dt ON dt.id = x.document_type_id WHERE x.tenant_id = ? AND dt.supplier_id IS NULL AND dt.slug = ?`,
         tenantId,
         item.refs.document_type
       );
@@ -684,25 +690,59 @@ function packLedgerAdopt(packName, packVersion, item, ctx, guarded = false) {
   rowLocator(q, item, ctx.tenantId);
   q.add(`) y`);
   if (guarded) {
-    q.add(` WHERE ${SAME_VERSION}`, ctx.tenantId, packName, packVersion, packVersion);
+    q.add(` WHERE ${SAME_VERSION}`, ctx.tenantId, packName, packVersion);
   }
   return { section: "ledger", sql: q.text, params: q.params };
 }
-function packTenantStamp(packName, packVersion, ctx) {
-  return {
-    section: "ledger",
-    sql: `INSERT OR IGNORE INTO tenant_packs (id, tenant_id, pack, version, from_version, source, applied_by) SELECT lower(hex(randomblob(16))), ?, ?, ?, NULL, ?, ? WHERE NOT EXISTS (SELECT 1 FROM tenant_packs WHERE tenant_id = ? AND pack = ?)`,
-    params: [ctx.tenantId, packName, packVersion, ctx.source, ctx.appliedBy, ctx.tenantId, packName]
-  };
+function packVocabularySlugs(pack) {
+  const document_types = pack.document_types.map((d) => d.slug);
+  const requirements = pack.requirements.map((r) => r.slug);
+  const claim_types = pack.claim_types.map((c) => c.slug);
+  return { document_types, requirements, claim_types, total: document_types.length + requirements.length + claim_types.length };
+}
+function heldVocabulary(q, pack, tenantId) {
+  const v = packVocabularySlugs(pack);
+  q.add(
+    `((SELECT COUNT(*) FROM document_types WHERE tenant_id = ? AND supplier_id IS NULL AND slug IN (SELECT value FROM json_each(?))) + (SELECT COUNT(*) FROM requirements WHERE tenant_id = ? AND slug IN (SELECT value FROM json_each(?))) + (SELECT COUNT(*) FROM claim_types WHERE tenant_id = ? AND slug IN (SELECT value FROM json_each(?))))`,
+    tenantId,
+    JSON.stringify(v.document_types),
+    tenantId,
+    JSON.stringify(v.requirements),
+    tenantId,
+    JSON.stringify(v.claim_types)
+  );
+}
+function packHeldVocabularyQuery(pack, tenantId) {
+  const q = new Sql();
+  q.add("SELECT ");
+  heldVocabulary(q, pack, tenantId);
+  q.add(" AS held");
+  return { sql: q.text, params: q.params };
+}
+function packLooksSeeded(held, total) {
+  return total > 0 && held * 2 >= total;
+}
+function packTenantStamp(pack, ctx) {
+  const q = new Sql();
+  q.add(
+    `INSERT OR IGNORE INTO tenant_packs (id, tenant_id, pack, version, from_version, source, applied_by) SELECT lower(hex(randomblob(16))), ?, ?, ?, NULL, ?, ? WHERE NOT EXISTS (SELECT 1 FROM tenant_packs WHERE tenant_id = ? AND pack = ?) AND `,
+    ctx.tenantId,
+    pack.pack,
+    pack.version,
+    ctx.source,
+    ctx.appliedBy,
+    ctx.tenantId,
+    pack.pack
+  );
+  heldVocabulary(q, pack, ctx.tenantId);
+  q.add(` * 2 < ?`, Math.max(packVocabularySlugs(pack).total, 1));
+  return { section: "ledger", sql: q.text, params: q.params };
 }
 function packApplyStatements(pack, ctx) {
   const items = packItems(pack);
   return {
-    rows: items.map((item) => packRowInsert(pack.pack, item, ctx, pack.version)),
-    ledger: [
-      ...items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx, true)),
-      packTenantStamp(pack.pack, pack.version, ctx)
-    ]
+    rows: [packTenantStamp(pack, ctx), ...items.map((item) => packRowInsert(pack.pack, item, ctx, pack.version))],
+    ledger: items.map((item) => packLedgerAdopt(pack.pack, pack.version, item, ctx, true))
   };
 }
 function sqlLiteral(value) {
@@ -743,12 +783,15 @@ function packContentForHash(pack) {
   isPackItemKind,
   packApplyStatements,
   packContentForHash,
+  packHeldVocabularyQuery,
   packItemRowId,
   packItems,
   packLedgerAdopt,
+  packLooksSeeded,
   packRowId,
   packRowInsert,
   packSlugify,
   packTenantStamp,
+  packVocabularySlugs,
   sqlLiteral
 });

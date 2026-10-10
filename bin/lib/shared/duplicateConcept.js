@@ -29,24 +29,26 @@ function conceptKey(text) {
   return String(text ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 function findDuplicateConcept(input) {
-  const key = conceptKey(input.name);
-  if (!key) return null;
+  const nameKey = conceptKey(input.name);
+  const slugKey = input.compareSlug ? conceptKey(input.slug) : "";
+  const keys = new Set([nameKey, slugKey].filter(Boolean));
+  if (keys.size === 0) return null;
   const others = input.rows.filter((r) => r.id !== input.excludeId);
   for (const row of others) {
-    if (conceptKey(row.name) === key) {
+    if (keys.has(conceptKey(row.name))) {
       return { source: "existing", id: row.id, name: row.name, slug: row.slug, active: row.active, matched_on: "name" };
     }
   }
   for (const row of others) {
-    if (conceptKey(row.slug) === key) {
+    if (keys.has(conceptKey(row.slug))) {
       return { source: "existing", id: row.id, name: row.name, slug: row.slug, active: row.active, matched_on: "slug" };
     }
   }
   for (const item of input.packItems) {
     let matchedOn = null;
-    if (conceptKey(item.name) === key) matchedOn = "name";
-    else if (conceptKey(item.slug) === key) matchedOn = "slug";
-    else if (item.aliases.some((a) => conceptKey(a) === key)) matchedOn = "alias";
+    if (keys.has(conceptKey(item.name))) matchedOn = "name";
+    else if (keys.has(conceptKey(item.slug))) matchedOn = "slug";
+    else if (item.aliases.some((a) => keys.has(conceptKey(a)))) matchedOn = "alias";
     if (!matchedOn) continue;
     if (item.slug === input.slug) continue;
     const held = others.find((r) => r.slug === item.slug);

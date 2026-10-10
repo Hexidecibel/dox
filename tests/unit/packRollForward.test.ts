@@ -262,17 +262,25 @@ describe('the comparison is one rule in SQL and in JavaScript', () => {
     expect(req).toContain('x.description IS NOT NULL');
     expect(req).toContain("CASE WHEN y.differing = '{}' THEN 'pack' ELSE 'differs' END");
     // A link has no columns of its own: it is the pack's by existing.
-    const link = inlineSql(ledger.find((s) => s.sql.includes('FROM document_type_requirements x'))!);
-    expect(link).toContain(`'{}' AS differing`);
-    // And the last statement stamps the version, once.
-    expect(inlineSql(ledger[ledger.length - 1])).toMatch(/INTO tenant_packs .* WHERE NOT EXISTS \(SELECT 1 FROM tenant_packs/);
-    // An apply writes nothing -- no row, no ledger entry -- for an organisation
-    // on ANOTHER version of the pack: a new version comes through the roll-forward.
+    const linkEntry = inlineSql(ledger.find((s) => s.sql.includes('FROM document_type_requirements x'))!);
+    expect(linkEntry).toContain(`'{}' AS differing`);
+    // THE STAMP IS THE GATE, and it comes first: once only, and only for an
+    // organisation that does not already hold half the pack's vocabulary.
     const { rows } = packApplyStatements(pack(2), { tenantId: 't1', tenantSlug: 'acme', source: 'cli', appliedBy: null });
-    for (const s of [...rows, ...ledger.slice(0, -1)]) {
+    const stamp = inlineSql(rows[0]);
+    expect(stamp).toMatch(/^INSERT OR IGNORE INTO tenant_packs .* WHERE NOT EXISTS \(SELECT 1 FROM tenant_packs/);
+    expect(stamp).toContain(`json_each('["vendor-form"]')`);
+    expect(stamp).toMatch(/\* 2 < 3;$/);
+    // Every other statement of an apply -- row or ledger entry -- writes only
+    // for an organisation ON RECORD as being on this version. No record (never
+    // stamped: already seeded, never baselined) or another version: nothing.
+    for (const s of [...rows.slice(1), ...ledger]) {
       expect(inlineSql(s)).toMatch(
-        /COALESCE\(\(SELECT MAX\(version\) FROM tenant_packs WHERE tenant_id = 't1' AND pack = 'mini'\), ([12])\) = \1/,
+        /\(SELECT MAX\(version\) FROM tenant_packs WHERE tenant_id = 't1' AND pack = 'mini'\) = [12]/,
       );
     }
+    // A supplier's own document type is never the row a link hangs off.
+    const link = inlineSql(rows.find((s) => s.sql.includes('INTO document_type_requirements'))!);
+    expect(link).toContain('dt.supplier_id IS NULL');
   });
 });

@@ -8,7 +8,8 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { getStarterPack } from '../../lib/starterPacks.generated';
-import { runPackRollForward } from '../../lib/pack-roll-forward';
+import { PackRollForwardRefused, runPackRollForward } from '../../lib/pack-roll-forward';
+import { PackVersionBehindError } from '../../../shared/packRollForward';
 import type { Env, User } from '../../lib/types';
 import type { PackRollForwardRequest } from '../../../shared/types';
 
@@ -36,9 +37,19 @@ import type { PackRollForwardRequest } from '../../../shared/types';
  * deleted on purpose. `bin/baseline-pack-ledger` is what establishes the
  * record, from a report a person reads first.
  *
- * Role: super_admin, org_admin. An API key is not refused here: the only
- * release-relevant change, a looser sharing rule, is never applied by this
- * route for anybody.
+ * AN APPLY RUNS THE PLAN THAT WAS PREVIEWED. The dry run returns
+ * `plan_fingerprint`; a non-dry run must send it back as `fingerprint` and is
+ * refused when there is none (409 `preview_required`) or when the plan computed
+ * at that moment is a different one (409 `plan_changed`: the pack, or a row it
+ * touches, moved since the person looked).
+ *
+ * A VERSION NEVER GOES BACKWARDS: an organisation on a newer version than this
+ * build ships is refused (409 `pack_version_behind`), dry run included.
+ *
+ * Role: super_admin, org_admin. AN API KEY MAY PREVIEW AND MAY NOT APPLY
+ * (decision C-183): rewriting an organisation's vocabulary and limits is an
+ * act a signed-in administrator answers for, like releasing a held document.
+ * 403 `signed_in_admin_required`, in words.
  */
 
 function json(body: unknown, status = 200): Response {
@@ -62,6 +73,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, tenantId);
 
     const dryRun = body.dry_run !== false;
+    if (!dryRun && context.data.authMethod === 'api_key') {
+      return json(
+        {
+          error:
+            'An API key can preview a starter-pack update and cannot apply one. ' +
+            'Applying changes this organisation\'s document types, requirements and limits, ' +
+            'so a signed-in administrator does it, on Settings > Starter pack.',
+          code: 'signed_in_admin_required',
+        },
+        403,
+      );
+    }
     if (body.accept !== undefined && !Array.isArray(body.accept)) {
       throw new BadRequestError('accept must be a list of { kind, key, field? }');
     }
@@ -112,6 +135,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       pack,
       dryRun,
       accept,
+      fingerprint: typeof body.fingerprint === 'string' ? body.fingerprint : null,
       actorId: user.id,
       ip: getClientIp(context.request),
     });
@@ -119,6 +143,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!dryRun) drainSoon(context, context.env.DB);
     return json(result);
   } catch (err) {
+    if (err instanceof PackRollForwardRefused) {
+      return json({ error: err.message, code: err.code }, err.status);
+    }
+    if (err instanceof PackVersionBehindError) {
+      return json(
+        { error: err.message, code: err.code, version: err.onVersion, available_version: err.offeredVersion },
+        409,
+      );
+    }
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
     console.error('starter-pack roll-forward error:', err);

@@ -20,6 +20,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // shared/packRollForward.ts
 var packRollForward_exports = {};
 __export(packRollForward_exports, {
+  PackVersionBehindError: () => PackVersionBehindError,
   packFieldDiff: () => packFieldDiff,
   packPlanIsNoOp: () => packPlanIsNoOp,
   planPackRollForward: () => planPackRollForward,
@@ -138,7 +139,9 @@ var PACK_KIND_SPECS = {
     hasUpdatedAt: true,
     hasUpdatedBy: false,
     groups: [["renewal_policy", "renewal_interval_months", "renewal_window"]],
-    readSql: `SELECT slug AS natural_key, id AS row_id, active AS active, name, description, default_owner,
+    // `supplier_id` is read so a supplier's OWN type at a pack slug can be told
+    // from the pack's organisation-wide one: it is reported, never adopted.
+    readSql: `SELECT slug AS natural_key, id AS row_id, active AS active, supplier_id, name, description, default_owner,
                      renewal_policy, renewal_interval_months, renewal_window, sharing_rule
                 FROM document_types WHERE tenant_id = ?`
   },
@@ -196,7 +199,7 @@ var PACK_KIND_SPECS = {
                 FROM document_type_requirements j
                 JOIN document_types dt ON dt.id = j.document_type_id
                 JOIN requirements r ON r.id = j.requirement_id
-               WHERE j.tenant_id = ?`
+               WHERE j.tenant_id = ? AND dt.supplier_id IS NULL`
   },
   extraction_instructions: {
     section: "extraction_instructions",
@@ -210,7 +213,7 @@ var PACK_KIND_SPECS = {
     readSql: `SELECT dt.slug AS natural_key, e.id AS row_id, 1 AS active, e.instructions
                 FROM document_type_extraction_instructions e
                 JOIN document_types dt ON dt.id = e.document_type_id
-               WHERE e.tenant_id = ?`
+               WHERE e.tenant_id = ? AND dt.supplier_id IS NULL`
   },
   spec_test: {
     section: "spec_tests",
@@ -449,8 +452,23 @@ function ledgerDiffers(entry, next) {
 }
 var VOCABULARY_KINDS = ["document_type", "requirement", "claim_type"];
 var GONE_STATES = /* @__PURE__ */ new Set(["absent", "deleted"]);
+var PackVersionBehindError = class extends Error {
+  constructor(pack, onVersion, offeredVersion) {
+    super(
+      `This organisation is on version ${onVersion} of the "${pack}" pack, and this build ships version ${offeredVersion}. A pack version never goes backwards, so there is nothing to roll forward to: nothing was changed.`
+    );
+    this.pack = pack;
+    this.onVersion = onVersion;
+    this.offeredVersion = offeredVersion;
+    this.name = "PackVersionBehindError";
+  }
+  code = "pack_version_behind";
+};
 function planPackRollForward(input) {
   const { pack } = input;
+  if (input.fromVersion !== null && pack.version < input.fromVersion) {
+    throw new PackVersionBehindError(pack.pack, input.fromVersion, pack.version);
+  }
   const items = packItems(pack);
   const itemIndex = new Map(items.map((i) => [`${i.kind}\0${i.key}`, i]));
   const ledger = /* @__PURE__ */ new Map();
@@ -492,7 +510,9 @@ function planPackRollForward(input) {
     const id = `${item.kind}\0${item.key}`;
     const spec = PACK_KIND_SPECS[item.kind];
     const entry = ledger.get(id);
-    const row = (entry?.row_id ? byId.get(item.kind).get(entry.row_id) : void 0) ?? byNatural.get(item.kind).get(item.natural);
+    const ledgeredRow = entry?.row_id ? byId.get(item.kind).get(entry.row_id) : void 0;
+    const row = ledgeredRow ?? byNatural.get(item.kind).get(item.natural);
+    const replaced = !!entry && entry.row_id !== null && !ledgeredRow && !!row;
     const base = {
       kind: item.kind,
       key: item.key,
@@ -584,11 +604,28 @@ function planPackRollForward(input) {
       atNaturalKey.add(id);
       continue;
     }
+    if (item.kind === "document_type" && row.supplier_id !== null && row.supplier_id !== void 0) {
+      out.push({
+        ...base,
+        row_id: null,
+        outcome: "conflict",
+        news: true,
+        conflict: {
+          id: String(row.row_id),
+          name: String(row.name ?? ""),
+          slug: String(row.natural_key),
+          active: row.active !== 0,
+          supplier_scoped: true
+        }
+      });
+      resolved.set(id, "waiting");
+      continue;
+    }
     resolved.set(id, "present");
     if (byNatural.get(item.kind).get(item.natural) === row) atNaturalKey.add(id);
     const rowId = String(row.row_id);
     const active = spec.activeColumn === null || row.active !== 0;
-    const adopting = !entry || GONE_STATES.has(entry.state);
+    const adopting = !entry || GONE_STATES.has(entry.state) || replaced;
     if (!active) {
       const next2 = adopting ? {
         row_id: rowId,
@@ -628,6 +665,20 @@ function planPackRollForward(input) {
           current,
           target
         });
+      }
+    }
+    let nameTwin;
+    if (VOCABULARY_KINDS.includes(item.kind)) {
+      const rename = fields.find((f) => f.field === "name" && f.action === "update");
+      if (rename) {
+        const wanted = conceptKey(String(rename.target ?? ""));
+        nameTwin = (input.rows[item.kind] ?? []).find(
+          (r) => String(r.row_id) !== rowId && wanted !== "" && (conceptKey(String(r.name ?? "")) === wanted || conceptKey(String(r.natural_key)) === wanted)
+        );
+        if (nameTwin) {
+          rename.action = "keep";
+          rename.reason = "duplicate_name";
+        }
       }
     }
     for (const group of spec.groups) {
@@ -677,7 +728,7 @@ function planPackRollForward(input) {
     const differing = {};
     for (const f of fields) {
       if (f.action === "update") continue;
-      if (f.action === "needs_person") {
+      if (f.action === "needs_person" || f.reason === "duplicate_name") {
         if (f.base !== void 0) written[f.field] = f.base;
         else differing[f.field] = "unknown";
         continue;
@@ -703,6 +754,14 @@ function planPackRollForward(input) {
       news: outcome !== "unchanged",
       fields,
       ...updates.length > 0 ? { row_update: { set, guard } } : {},
+      ...nameTwin ? {
+        conflict: {
+          id: String(nameTwin.row_id),
+          name: String(nameTwin.name ?? ""),
+          slug: String(nameTwin.natural_key),
+          active: nameTwin.active !== 0
+        }
+      } : {},
       ledger: changed ? next : null
     });
   }
@@ -770,6 +829,7 @@ function packPlanIsNoOp(plan) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  PackVersionBehindError,
   packFieldDiff,
   packPlanIsNoOp,
   planPackRollForward,

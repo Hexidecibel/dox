@@ -1545,6 +1545,7 @@ Document types, requirements and claim types each have a `slug`. It is set once,
 - Repeat the request with **`"allow_duplicate": true`** to create (or rename) anyway. The audit row carries `duplicate_override` with the row it duplicated.
 - For `source: "pack"`, repeat a `POST` with **`"adopt_pack_slug": true`** to create the row under the PACK'S slug (audited as `adopted_pack_slug`), so later pack updates reach it. Typing the pack item's own name in full needs neither flag: its slug is already the pack's.
 - An organisation that has taken no pack is compared with its own rows only.
+- On a `POST`, a `slug` the caller supplies (requirements and claim types accept one) is compared exactly as the name is: `{ "name": "Zed thing", "slug": "specsheet" }` is refused as the spec-sheet requirement.
 - An exact slug collision is still the older 409 (`A … with this slug already exists for this tenant`) and cannot be overridden.
 
 ## Starter Pack Versions and Roll-Forward
@@ -1554,18 +1555,19 @@ A starter pack has a `version` (a whole number, in `starter-packs/<name>.json`, 
 | Endpoint | Who | Purpose |
 |----------|-----|---------|
 | `GET /api/starter-packs/status` | super_admin, org_admin | `{ tenant_id, packs: [{ pack, label, version, available_version, update_available, applied_at, applied_by_name, source, history }], not_ledgered }`. `not_ledgered` is set (`{ pack }`) for an organisation that has pack rows and no ledger. `?tenant_id=` for a super_admin. |
-| `POST /api/starter-packs/roll-forward` | super_admin, org_admin | `{ pack?, dry_run?, accept?, tenant_id? }`. **`dry_run` defaults to true and writes nothing.** `pack` is needed only when the organisation is on more than one. |
-| `POST /api/starter-packs/apply` | super_admin, org_admin | Unchanged in shape; the response gains `version`. Applying never updates a row and never moves an organisation to a new version. |
+| `POST /api/starter-packs/roll-forward` | super_admin, org_admin | `{ pack?, dry_run?, fingerprint?, accept?, tenant_id? }`. **`dry_run` defaults to true and writes nothing.** An apply (`dry_run: false`) must send the preview's `plan_fingerprint` back as `fingerprint`, and must be made by a signed-in admin (not an API key). `pack` is needed only when the organisation is on more than one. |
+| `POST /api/starter-packs/apply` | super_admin, org_admin | Unchanged in shape; the response gains `version`. Applying never updates a row and never moves an organisation to a new version. **409 `roll_forward_required`** for an organisation on another version of the pack; **409 `baseline_required`** for one that already holds at least half the pack's document types, requirements and claims with no record of taking it (set up before migration 0141). Neither writes anything. |
 
 ```bash
 # What would version 2 do? (writes nothing)
 curl -X POST http://localhost:8788/api/starter-packs/roll-forward \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
 
-# Do it, and take the pack's wording for one description this organisation had changed
+# Do it (sending back the plan_fingerprint the preview returned), and take the
+# pack's wording for one description this organisation had changed
 curl -X POST http://localhost:8788/api/starter-packs/roll-forward \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{ "dry_run": false, "accept": [{ "kind": "requirement", "key": "gtin", "field": "description" }] }'
+  -d '{ "dry_run": false, "fingerprint": "<plan_fingerprint>", "accept": [{ "kind": "requirement", "key": "gtin", "field": "description" }] }'
 ```
 
 The response is the same shape for a dry run and an apply: `from_version`, `to_version`, `up_to_date`, `summary`, `items[]` and (apply only) `not_applied[]`. Each item has `kind`, `key` (its slug, or `parent__child` for a link), `label`, `outcome`, `news`, and `fields[]` — one entry per column that is not simply in step, with `action`, `reason`, `current`, `target` and, when known, `base` (what the pack wrote).
@@ -1589,7 +1591,12 @@ The response is the same shape for a dry run and an apply: `from_version`, `to_v
 - **`accept`** is a list of `{ kind, key }` (every kept column of the item, or "add it" for a conflict or an absent item) or `{ kind, key, field }` (one column, and with it the rest of its setting).
 - **A slug is never changed.** Nothing is deleted or switched off.
 - **A limit's threshold** moves through the same rule as a manual edit: `spec_limits.version` goes up by one and a `spec_limit.updated` audit row is written with `via: "pack_roll_forward"`. Verdicts already recorded keep their frozen snapshot.
-- **An apply recomputes the plan** and guards every update in SQL by the value it was planned against. A row somebody edited in between is left as they set it and listed in `not_applied` with `reason: "changed_since_preview"`.
+- **An apply runs the plan that was previewed.** Every response carries `plan_fingerprint` (a hash of the version and of what the plan would write, without `accept`). `dry_run: false` with no `fingerprint` is **409 `preview_required`**; with one that no longer matches (the pack, or a row the plan touches, changed) it is **409 `plan_changed`** and nothing is written. Beneath that, every update is guarded in SQL by the value it was planned against: a row edited in the instant between is left as edited and listed in `not_applied` with `reason: "changed_since_preview"`.
+- **An API key may preview and may not apply**: `dry_run: false` with a key is **403 `signed_in_admin_required`**.
+- **A version never goes backwards**: an organisation on a newer version than this build ships is **409 `pack_version_behind`**, dry run included.
+- **`accept` must name something**: an item that is not in the plan, or a column the item does not have, is a **400** listing them.
+- **A pack rename onto a name another row already has** is kept (`action: "keep"`, `reason: "duplicate_name"`, with `conflict` naming that row) and offered again until a person accepts it.
+- **A supplier's own document type** that holds a pack type's slug is reported as a `conflict` with `conflict.supplier_scoped: true` and is never written to, accepted or not.
 - **A second roll-forward is a no-op**: `up_to_date: true`, `summary.writes: 0`, nothing written or audited. What is still open (a conflict, a looser sharing rule) is still listed.
 - Audited as `starter_pack.roll_forward` with the whole plan.
 

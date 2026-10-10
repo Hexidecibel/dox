@@ -28,6 +28,9 @@
 --     the screen treat it as never having had this pack recorded, and
 --     bin/baseline-pack-ledger is what gives it a row.
 --
+--     A version only ever goes UP: the planner refuses to roll an
+--     organisation to an older pack, and one step is one row (the unique index
+--     below).
 --     version       -- the pack version rolled TO.
 --     from_version  -- the version rolled FROM; NULL for the first row.
 --     source        -- 'apply' (the portal), 'cli' (bin/create-tenant),
@@ -116,6 +119,16 @@ CREATE TABLE IF NOT EXISTS tenant_packs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_packs_tenant ON tenant_packs (tenant_id, pack, version);
+
+-- ONE ROW PER STEP. The history is append-only, and a step (this organisation,
+-- this pack, from this version to that one) happens once: two requests that
+-- both reach the stamp write one row, because the second is INSERT OR IGNOREd
+-- on this index. COALESCE because the first row of a pack has no from_version
+-- and NULLs are distinct in a unique index. (Added by amending this file before
+-- it was applied anywhere but local dev; CREATE ... IF NOT EXISTS, so a local
+-- database that ran the first cut takes it with --reapply.)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_packs_step
+  ON tenant_packs (tenant_id, pack, version, COALESCE(from_version, 0));
 
 CREATE TABLE IF NOT EXISTS pack_applied_items (
   tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

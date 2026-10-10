@@ -5360,6 +5360,9 @@ paths:
               properties:
                 pack: { type: string, description: Needed only when the organisation is on more than one pack }
                 dry_run: { type: boolean, default: true }
+                fingerprint:
+                  type: string
+                  description: Required when dry_run is false. The plan_fingerprint of the preview being applied.
                 tenant_id: { type: string, description: super_admin only }
                 accept:
                   type: array
@@ -5424,13 +5427,21 @@ paths:
                         key: { type: string }
                         label: { type: string }
                         reason: { type: string, description: changed_since_preview / not_inserted / invalid_limit }
+                  plan_fingerprint:
+                    type: string
+                    description: Send back as `fingerprint` to apply this plan.
         '400':
-          description: Malformed `accept`, or `pack` missing for an organisation on several
+          description: Malformed `accept`, an `accept` entry naming nothing in the plan, or `pack` missing for an organisation on several
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: "`signed_in_admin_required`: an API key may preview and may not apply"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: "`not_ledgered`: the organisation has no starter-pack record and must be baselined first"
+          description: "`not_ledgered` (baseline first), `pack_version_behind` (the organisation is on a newer version), `preview_required` (an apply with no fingerprint) or `plan_changed` (the plan moved since the preview)"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

@@ -332,7 +332,10 @@ describe('starter packs — SQL generation', () => {
       } as any,
       TENANT,
     );
-    expect(statements[0]).toContain("'Supplier''s letter'");
+    // statements[0] is the version stamp (the gate every other statement
+    // requires); the first ROW statement follows it.
+    expect(statements[0]).toMatch(/^INSERT OR IGNORE INTO tenant_packs /);
+    expect(statements[1]).toContain("'Supplier''s letter'");
   });
 
   it('requires a tenant id and slug', () => {
