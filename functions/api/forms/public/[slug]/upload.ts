@@ -43,12 +43,11 @@ import {
   parseFormSettings,
   resolveAttachmentPolicy,
   mimeAllowed,
+  loadLivePublicForm,
 } from '../../../../lib/records/forms';
+import { publicNotFound } from '../../../../lib/records/publicView';
 import type { Env } from '../../../../lib/types';
-import type {
-  PublicAttachmentUpload,
-  RecordFormRow,
-} from '../../../../../shared/types';
+import type { PublicAttachmentUpload } from '../../../../../shared/types';
 
 const RATE_LIMIT_PER_HOUR = 30;
 const RATE_LIMIT_WINDOW_SECONDS = 60 * 60;
@@ -87,30 +86,23 @@ function randomToken(): string {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const slug = context.params.slug as string;
-    if (!slug) return jsonResponse({ error: 'Form not found' }, 404);
+    if (!slug) return publicNotFound('Form not found');
 
     const ip = getClientIp(context.request) ?? 'unknown';
 
-    // Resolve form first (cheap query) so we can 404 before touching R2.
-    const form = await context.env.DB.prepare(
-      `SELECT f.*
-       FROM records_forms f
-       JOIN records_sheets s ON f.sheet_id = s.id
-       WHERE f.public_slug = ?
-         AND f.is_public = 1
-         AND f.status = 'live'
-         AND f.archived = 0
-         AND s.archived = 0`,
-    )
-      .bind(slug)
-      .first<RecordFormRow>();
-    if (!form) return jsonResponse({ error: 'Form not found' }, 404);
+    // Resolve form first (cheap query) so we can 404 before touching R2, and
+    // BEFORE the size and type checks: without a live form's link, a file
+    // that is too large or of the wrong type is the same 404 as anything
+    // else, so 413 / 415 tell nothing to somebody who holds no valid slug.
+    const found = await loadLivePublicForm(context.env.DB, slug);
+    if (!found) return publicNotFound('Form not found');
+    const { form } = found;
 
     const settings = parseFormSettings(form.settings);
     const policy = resolveAttachmentPolicy(settings);
     if (!policy) {
       // Same 404 — never leak that the form exists but disables uploads.
-      return jsonResponse({ error: 'Form not found' }, 404);
+      return publicNotFound('Form not found');
     }
 
     // Per-IP per-form bucket, disjoint from the submit limiter.
@@ -168,10 +160,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     const mime = (file.type || 'application/octet-stream').toLowerCase();
     if (!mimeAllowed(mime, policy.allowed_mime_types)) {
-      return jsonResponse(
-        { error: `File type "${mime}" is not allowed for this form` },
-        415,
-      );
+      // The type the client declared is NOT repeated back: it is the
+      // caller's own string, and an error body is no place to reflect it.
+      return jsonResponse({ error: 'This file type is not allowed for this form' }, 415);
     }
 
     // Allocate ids + R2 key. Keep the path scoped under

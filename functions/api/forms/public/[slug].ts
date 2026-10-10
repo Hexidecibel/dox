@@ -7,59 +7,49 @@
  * key. We do NOT leak full sheet/column metadata for non-visible
  * columns.
  *
- * 404 returned for: missing slug, not-public, not-live, or archived
- * sheet/form. Same status for every "not available" reason to avoid
- * enumeration of whether a slug exists vs is offline.
+ * A list of the organisation's customers / suppliers / products is sent ONLY
+ * for a field whose form builder opted it in, and then as id + name (C-120).
+ *
+ * 404 returned for: missing slug, not-public, not-live, archived
+ * sheet/form, a form and sheet of different tenants, an inactive
+ * organisation, Records switched off. Same status and body for every "not
+ * available" reason to avoid enumeration of whether a slug exists vs is
+ * offline.
+ *
+ * Every view is rate limited per (form, address) and audited (C-130).
  */
+import { logAudit, getClientIp } from '../../../lib/db';
 import {
   buildPublicFormView,
   entityKindsReferencedByForm,
   fetchPublicEntityOptions,
+  loadLivePublicForm,
 } from '../../../lib/records/forms';
+import { publicNotFound, rateLimited, takePublicView } from '../../../lib/records/publicView';
 import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
-import type { RecordColumnRow, RecordFormRow } from '../../../../shared/types';
 
-function notFound(): Response {
-  return new Response(JSON.stringify({ error: 'Form not found' }), {
-    status: 404,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
+/** A form is opened by many people behind one office address; a scraper is not 120 people. */
+const VIEWS_PER_HOUR = 120;
+
+const notFound = () => publicNotFound('Form not found');
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const slug = context.params.slug as string;
     if (!slug) return notFound();
 
-    const form = await context.env.DB.prepare(
-      `SELECT f.*
-       FROM records_forms f
-       JOIN records_sheets s ON f.sheet_id = s.id
-       WHERE f.public_slug = ?
-         AND f.is_public = 1
-         AND f.status = 'live'
-         AND f.archived = 0
-         AND s.archived = 0`,
-    )
-      .bind(slug)
-      .first<RecordFormRow>();
+    const found = await loadLivePublicForm(context.env.DB, slug);
+    if (!found) return notFound();
+    const { form, columns } = found;
 
-    if (!form) return notFound();
+    const ip = getClientIp(context.request) ?? 'unknown';
+    if (!(await takePublicView(context.env.DB, 'records_form_view', form.id, ip, VIEWS_PER_HOUR))) {
+      return rateLimited();
+    }
 
-    const cols = await context.env.DB.prepare(
-      'SELECT * FROM records_columns WHERE sheet_id = ? AND archived = 0 ORDER BY display_order ASC',
-    )
-      .bind(form.sheet_id)
-      .all<RecordColumnRow>();
-
-    const columns = cols.results ?? [];
-
-    // Pre-fetch tenant-scoped entity dropdown options for any visible
-    // customer_ref / supplier_ref / product_ref columns. The renderer
-    // uses these to render Autocomplete dropdowns instead of falling
-    // back to plain text. Forms without entity-ref columns skip this
-    // entirely (no extra D1 reads).
+    // Lists are fetched ONLY for the kinds a field opted in. A form with no
+    // opted-in field reads no customer, supplier or product at all.
     const kinds = entityKindsReferencedByForm(form, columns);
     const entityOptions = await fetchPublicEntityOptions(
       context.env.DB,
@@ -74,16 +64,30 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       entityOptions,
     );
 
+    // The link is a bearer secret and is not written into the log; the form
+    // id names what was opened.
+    await logAudit(
+      context.env.DB,
+      null,
+      form.tenant_id,
+      'records_form.view',
+      'records_form',
+      form.id,
+      JSON.stringify({ fields: view.fields.length, published_lists: [...kinds], ip }),
+      ip,
+    );
+
     // The organisation's brand (0140), from the tenant that owns the form.
     const brand = await loadPublicBrand(context.env.DB, form.tenant_id, 'records_form');
 
-    // No brand record: the payload is exactly what it was before 0140.
+    // No brand record: the payload has no `brand` key.
     return new Response(JSON.stringify(brand ? { ...view, brand } : view), {
       headers: {
         'Content-Type': 'application/json',
-        // Lightly cache so a viral form share doesn't hammer D1, but keep
-        // it short — a builder edit shouldn't take long to propagate.
-        'Cache-Control': 'public, max-age=30, s-maxage=30',
+        // Never `public`: with a field opted in, this body carries the
+        // organisation's customer or supplier list, and a shared cache would
+        // go on serving it after the builder switched the list off.
+        'Cache-Control': 'no-store',
       },
     });
   } catch (err) {

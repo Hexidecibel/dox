@@ -19,11 +19,19 @@ import {
   refTypeForColumn,
 } from './helpers';
 import { BadRequestError, NotFoundError } from '../permissions';
+import { validatePublicValues, verifyEntityRefIds, type PublicFillField } from './forms';
+import {
+  isReferenceType,
+  isUpdateRequestFieldType,
+  projectColumnConfig,
+  publicCellValue,
+} from './publicView';
 import type {
   RecordColumnRow,
   RecordRowData,
   RecordUpdateRequestRow,
   PublicFormFieldDef,
+  PublicRecordValue,
 } from '../../../shared/types';
 
 /** Token entropy: 32 bytes -> base64url ~43 chars. Way past 24 chars. */
@@ -67,8 +75,9 @@ export function parseFieldsRequested(raw: string | null): string[] {
 
 /**
  * Validate an incoming fields_requested array against a sheet's columns.
- * Drops formula/rollup/attachment columns (those can't be filled by the
- * recipient — see the same restriction in forms.validateSubmission).
+ * Refuses computed and file columns, and (C-124) document, record and contact
+ * columns: the recipient is an outsider, and those cells hold things an
+ * outsider is neither shown nor allowed to choose (`isUpdateRequestFieldType`).
  *
  * Throws BadRequestError on empty selection or unknown keys so the user
  * gets a usable error message in the modal.
@@ -91,7 +100,7 @@ export function normalizeFieldsRequested(
   const validKeys = new Set(
     columns
       .filter((c) => c.archived === 0)
-      .filter((c) => c.type !== 'formula' && c.type !== 'rollup' && c.type !== 'attachment')
+      .filter((c) => isUpdateRequestFieldType(c.type))
       .map((c) => c.key),
   );
 
@@ -109,56 +118,130 @@ export function normalizeFieldsRequested(
 }
 
 /**
+ * The columns a request's recipient is shown and may write, in the order
+ * asked. ONE list for the page, the current values and the submit, so the
+ * three cannot disagree. A key stored on a request made before document,
+ * record and contact columns were excluded is simply not in it.
+ */
+export function requestFillFields(
+  columns: RecordColumnRow[],
+  requestedKeys: string[],
+): PublicFillField[] {
+  const colsByKey = new Map(columns.map((c) => [c.key, c]));
+  const out: PublicFillField[] = [];
+  const seen = new Set<string>();
+  for (const key of requestedKeys) {
+    const column = colsByKey.get(key);
+    if (!column || column.archived || seen.has(key)) continue;
+    if (!isUpdateRequestFieldType(column.type)) continue;
+    seen.add(key);
+    out.push({ column, label: column.label, required: column.required === 1 });
+  }
+  return out;
+}
+
+/**
  * Build a PublicFormFieldDef[] for ONLY the requested keys. Mirrors the
  * shape buildPublicFormView produces so the recipient form can reuse
- * PublicFormRenderer with no special-casing.
+ * PublicFormRenderer with no special-casing. Built field by field; a
+ * column's config is projected per type. No field is a pick-list: a request
+ * never publishes the organisation's customers, suppliers or products.
  */
 export function buildRequestFields(
   columns: RecordColumnRow[],
   requestedKeys: string[],
 ): PublicFormFieldDef[] {
-  const colsByKey = new Map(columns.map((c) => [c.key, c]));
-  const fields: PublicFormFieldDef[] = [];
-  let position = 0;
-  for (const key of requestedKeys) {
-    const col = colsByKey.get(key);
-    if (!col || col.archived) continue;
-    if (col.type === 'formula' || col.type === 'rollup' || col.type === 'attachment') continue;
-
-    let config = null;
-    if (col.config) {
-      try {
-        config = JSON.parse(col.config);
-      } catch {
-        config = null;
-      }
-    }
-    fields.push({
-      key: col.key,
-      type: col.type,
-      label: col.label,
-      help_text: null,
-      required: col.required === 1,
-      config,
-      position: position++,
-    });
-  }
-  return fields;
+  return requestFillFields(columns, requestedKeys).map((f, position) => ({
+    key: f.column.key,
+    type: f.column.type,
+    label: f.label,
+    help_text: null,
+    required: f.required,
+    config: projectColumnConfig(f.column.type, f.column.config),
+    position,
+  }));
 }
 
 /**
- * Pick only the requested keys out of a full row's data. Returned object
- * is a new copy (never the row's parsed JSON itself).
+ * The row's current values for ONLY the requested columns, as an outsider
+ * may read them (`publicCellValue`): a reference is its NAME, read from this
+ * tenant's own table, never an id; an object is never passed through.
  */
-export function pickCurrentValues(
+export async function publicCurrentValues(
+  db: D1Database,
+  tenantId: string,
+  columns: RecordColumnRow[],
   data: RecordRowData,
   requestedKeys: string[],
-): RecordRowData {
-  const out: RecordRowData = {};
-  for (const key of requestedKeys) {
-    if (key in data) out[key] = data[key];
+): Promise<Record<string, PublicRecordValue>> {
+  const out: Record<string, PublicRecordValue> = {};
+  for (const field of requestFillFields(columns, requestedKeys)) {
+    const key = field.column.key;
+    if (!(key in data)) continue;
+    out[key] = await publicCellValue(db, tenantId, field.column, data[key]);
   }
   return out;
+}
+
+/**
+ * What a recipient sent, made safe to store (C-125):
+ *
+ *   1. only requested, fillable columns are read; each value is coerced by
+ *      column type, and a wrong shape is a 400;
+ *   2. a reference id is accepted only when it is this tenant's
+ *      (`verifyEntityRefIds`, the public form's own check), and the name
+ *      stored with it is the tenant's;
+ *   3. a value the recipient did not touch is NOT a change, and is not
+ *      judged. The page pre-fills every field with what it showed, and the
+ *      whole form comes back; a field sent back exactly as shown is dropped
+ *      before validation. Otherwise a reference shown as a name would be
+ *      turned from a real link into typed text, and a row holding an older
+ *      value its column no longer allows (a dropdown option since removed)
+ *      could not be answered at all.
+ */
+export async function cleanUpdateRequestSubmission(
+  db: D1Database,
+  params: {
+    tenantId: string;
+    columns: RecordColumnRow[];
+    requestedKeys: string[];
+    rawData: unknown;
+    currentData: RecordRowData;
+  },
+): Promise<RecordRowData> {
+  const fields = requestFillFields(params.columns, params.requestedKeys);
+  if (!params.rawData || typeof params.rawData !== 'object' || Array.isArray(params.rawData)) {
+    throw new BadRequestError('data must be an object');
+  }
+  const raw = params.rawData as Record<string, unknown>;
+
+  // Exactly what the page showed, sent back: untouched.
+  const touched: Record<string, unknown> = {};
+  const shownByKey = new Map<string, unknown>();
+  for (const field of fields) {
+    const key = field.column.key;
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    const shown = key in params.currentData
+      ? await publicCellValue(db, params.tenantId, field.column, params.currentData[key])
+      : null;
+    shownByKey.set(key, shown);
+    if (JSON.stringify(raw[key] ?? null) === JSON.stringify(shown ?? null)) continue;
+    touched[key] = raw[key];
+  }
+
+  const clean = validatePublicValues(touched, fields, { onlyPresent: true });
+  await verifyEntityRefIds(db, params.tenantId, fields, clean);
+
+  // The same for a reference whose name came back in another shape
+  // (`{ name }` rather than the bare string).
+  for (const field of fields) {
+    const key = field.column.key;
+    if (!(key in clean) || !isReferenceType(field.column.type)) continue;
+    const sent = clean[key] as { name?: unknown; unmatched?: unknown } | null;
+    if (!sent || Array.isArray(sent) || sent.unmatched !== true || typeof sent.name !== 'string') continue;
+    if (shownByKey.get(key) === sent.name) delete clean[key];
+  }
+  return clean;
 }
 
 /**
@@ -177,9 +260,10 @@ export function getUnavailableReason(req: RecordUpdateRequestRow): string | null
 }
 
 /**
- * Apply a recipient's submitted values to the row. Server enforces the
- * fields_requested whitelist regardless of what the body contains, so a
- * recipient can't sneak an extra column write past the gate.
+ * Apply a recipient's submitted values to the row. `submittedData` is what
+ * `cleanUpdateRequestSubmission` returned -- already coerced and its ids
+ * verified. The fields_requested whitelist is enforced again here regardless,
+ * so a recipient can't sneak an extra column write past the gate.
  *
  * Returns the count of cells actually changed (used as the activity
  * detail + the response).
@@ -195,12 +279,14 @@ export async function applyUpdateRequestSubmission(
   const { request, columns, submittedData } = params;
   const requestedKeys = parseFieldsRequested(request.fields_requested);
 
-  // Load the current row so we can diff per-cell for the activity log.
+  // Load the current row so we can diff per-cell for the activity log. The
+  // row must be on the request's sheet AND in the request's tenant.
   const row = await db
     .prepare(
-      'SELECT id, sheet_id, tenant_id, data FROM records_rows WHERE id = ? AND sheet_id = ?',
+      `SELECT id, sheet_id, tenant_id, data FROM records_rows
+        WHERE id = ? AND sheet_id = ? AND tenant_id = ? AND archived = 0`,
     )
-    .bind(request.row_id, request.sheet_id)
+    .bind(request.row_id, request.sheet_id, request.tenant_id)
     .first<{ id: string; sheet_id: string; tenant_id: string; data: string | null }>();
 
   if (!row) {
@@ -210,17 +296,15 @@ export async function applyUpdateRequestSubmission(
   }
 
   const data = parseRowData(row.data);
-  const colsByKey = new Map(columns.map((c) => [c.key, c]));
 
   const changes: Array<{ column_key: string; from: unknown; to: unknown }> = [];
   let touchedRefColumn = false;
   let touchedTitleColumn = false;
 
-  for (const key of requestedKeys) {
+  for (const field of requestFillFields(columns, requestedKeys)) {
+    const key = field.column.key;
+    const col = field.column;
     if (!(key in submittedData)) continue;
-    const col = colsByKey.get(key);
-    if (!col || col.archived) continue;
-    if (col.type === 'formula' || col.type === 'rollup' || col.type === 'attachment') continue;
 
     const newValue = submittedData[key];
     const prevValue = data[key];
@@ -249,18 +333,18 @@ export async function applyUpdateRequestSubmission(
       .prepare(
         `UPDATE records_rows
            SET data = ?, display_title = ?, updated_at = datetime('now')
-         WHERE id = ?`,
+         WHERE id = ? AND tenant_id = ?`,
       )
-      .bind(JSON.stringify(data), nextDisplayTitle, row.id)
+      .bind(JSON.stringify(data), nextDisplayTitle, row.id, row.tenant_id)
       .run();
   } else {
     await db
       .prepare(
         `UPDATE records_rows
            SET data = ?, updated_at = datetime('now')
-         WHERE id = ?`,
+         WHERE id = ? AND tenant_id = ?`,
       )
-      .bind(JSON.stringify(data), row.id)
+      .bind(JSON.stringify(data), row.id, row.tenant_id)
       .run();
   }
 

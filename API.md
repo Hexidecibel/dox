@@ -1819,6 +1819,56 @@ Every decision writes an `intake.sender_notice` audit row: `kind` (`ingest_summa
 
 ---
 
+## Records Public Pages
+
+Three pages somebody outside the organization opens with no login. The link is the only gate.
+
+| Page | Routes |
+|---|---|
+| Public form `/f/:slug` | `GET /api/forms/public/:slug`, `POST .../submit`, `POST .../upload`, `DELETE .../attachment/:attachmentId` |
+| Update request `/u/:token` | `GET` and `POST /api/update-requests/public/:token` |
+| Workflow sign-off `/a/:token` | `GET` and `POST /api/workflow-approvals/public/:token` |
+
+**Every response is an allow-list.** No id of the tenant, sheet, form, row, column or any user is
+returned, and no portal user's email. `sender_name` is the sender's name, else the organization's.
+
+**Pick-lists are off unless a field opts in.** A customer / supplier / product field on a public
+form is a text box. The form builder can turn on "Let people pick from your list" per field
+(`public_picker: true` in the form's `field_config`); only then does the form `GET` carry
+`entity_options` for that kind, as `id` and `name` only, and the field carries `picker: true`.
+Anyone holding the form's link can read that list.
+
+```json
+{
+  "form": { "name": "Supplier intake", "description": null, "accent_color": null, "logo_url": null },
+  "fields": [
+    { "key": "supplier", "type": "supplier_ref", "label": "Supplier", "help_text": null,
+      "required": true, "config": null, "position": 0, "picker": true }
+  ],
+  "turnstile_site_key": "...",
+  "entity_options": { "supplier": [{ "id": "sup_1", "name": "Alpha Dairy" }] }
+}
+```
+
+**What can be sent.** Only the page's own fields are read, and each value is coerced by column
+type; a value of the wrong shape is a `400`. In a customer / supplier / product field:
+
+- text (`"Alpha Dairy"`) is stored as text for a person to match. It is never turned into a reference;
+- `{ "id": "..." }` is accepted only when the id belongs to the organization, and is stored with
+  the organization's own name for it. Any other id is a `400` that does not say why.
+
+**An update request** returns the requested fields and their `current_values`; a reference is
+shown as its name. Document, record, contact, file and computed columns cannot be requested.
+
+**A sign-off page** returns the record's title and only the columns the workflow step names in
+`visible_fields` (none by default), each as `{ "label", "type", "value" }`.
+
+**One `404` for every unusable state** on each page: unknown link, not live, expired, already
+answered, archived, an inactive organization, or the Records module switched off. Each `GET` is
+audited and rate limited (120 an hour per form and address; 30 for a request or a sign-off).
+
+---
+
 ## File Storage
 
 ### Allowed File Types

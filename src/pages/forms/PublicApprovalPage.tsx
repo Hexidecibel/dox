@@ -25,7 +25,7 @@ import {
   CancelOutlined as RejectIcon,
 } from '@mui/icons-material';
 import { publicApprovalsApi } from '../../lib/recordsApi';
-import type { PublicApprovalView } from '../../../shared/types';
+import type { PublicApprovalView, PublicRecordValue } from '../../../shared/types';
 import { BrandHeader, BrandSupport } from '../../components/brand/BrandHeader';
 import { pageBrand } from '../../../shared/tenantBrand';
 
@@ -234,9 +234,9 @@ export function PublicApprovalPage() {
               }}
             >
               <Stack spacing={1.5}>
-                {view.row.fields.map((f) => (
+                {view.row.fields.map((f, i) => (
                   <Stack
-                    key={f.key}
+                    key={`${i}-${f.label}`}
                     direction={isMobile ? 'column' : 'row'}
                     spacing={isMobile ? 0.25 : 2}
                     alignItems={isMobile ? 'flex-start' : 'baseline'}
@@ -319,21 +319,19 @@ export function PublicApprovalPage() {
   );
 }
 
-function renderFieldValue(value: unknown): string {
+/**
+ * A value as the server sent it: text, a number, a yes / no or a list of
+ * texts (`PublicRecordValue`). A reference arrives as a name. Anything else
+ * is drawn as a dash -- an object is never dumped onto the page.
+ */
+function renderFieldValue(value: PublicRecordValue): string {
   if (value == null || value === '') return '—';
   if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (Array.isArray(value)) {
-    return value
-      .map((v) => (typeof v === 'string' ? v : v && typeof v === 'object' && 'name' in v ? String((v as { name: unknown }).name) : JSON.stringify(v)))
-      .join(', ');
+    const parts = value.filter((v): v is string => typeof v === 'string' && v !== '');
+    return parts.length ? parts.join(', ') : '—';
   }
-  if (typeof value === 'object' && value && 'name' in value) {
-    return String((value as { name: unknown }).name);
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return '—';
 }

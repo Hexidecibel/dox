@@ -1827,6 +1827,7 @@ export const helpContent = {
           body:
             "Each sheet can layer extra surfaces on top of the same data. " +
             "Forms — a public or authenticated URL that drops a new row. A public form shows your organization's brand from Settings › Brand (logo, colours, support line); a form's own accent colour is used for that form instead (choose it with the colour picker, or type a hex code such as #1A365D; a short code such as #abc is accepted and expanded, a colour name is not). If a form was given something that is not a hex colour before this was checked, the builder says so and the form shows your brand colour. Required-field validation, and Turnstile gating for public forms. " +
+            "A customer, supplier or product field on a public form is a plain text box: people type a name, it is saved as text, and you match it in the sheet (the cell says it has not been matched yet). If you would rather they pick from your list, turn on 'Let people pick from your list' for that field in the form builder — but anyone who has the form's link can then read the names of all your active customers, suppliers or products of that kind, without signing in, so leave it off for a list you would not publish. Document, record, file and computed columns cannot be put on a public form. " +
             "Kanban — group rows by a single-select column and drag between columns to update status. " +
             "Calendar — pin rows to a date column and view them month / week. " +
             "Workflows — multi-step automation that fires on row create / update; steps can send email, set fields, or pause for human approval (see /help/approvals).",
@@ -1853,7 +1854,7 @@ export const helpContent = {
         {
           heading: 'The decision page',
           body:
-            "The magic link drops the recipient on a no-login decision page that shows the row context, the approval question, and three actions: Approve, Reject, Comment. Comments don't resolve the approval; they're optional notes that surface on the workflow run for the next decider. Once approved or rejected, the link is single-use — re-visiting shows the resolved state. " +
+            "The magic link drops the recipient on a no-login decision page that shows the record's title, the approval question, and three actions: Approve, Reject, Comment. The page shows nothing else from the record unless you pick it: in the workflow builder, each approval step has 'Fields the approver sees'. A customer, supplier, product or document you pick appears by name. The page names who sent the request, never their email address. Comments don't resolve the approval; they're optional notes that surface on the workflow run for the next decider. Once approved or rejected, the link is single-use — re-visiting shows the resolved state. " +
             "Tokens are scoped to the specific approval step; revoking a recipient's access means cancelling the approval (and the workflow run with it).",
         },
         {

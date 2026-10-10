@@ -16,6 +16,7 @@ import { sanitizeString } from '../../../../../lib/validation';
 import { loadSheetForUser } from '../../../../../lib/records/helpers';
 import {
   generatePublicSlug,
+  entityKindForColumnType,
   normalizeFieldConfig,
   normalizeSettings,
   attachSubmissionCounts,
@@ -99,7 +100,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const columns = colsResult.results ?? [];
     const validIds = new Set(columns.map((c) => c.id));
 
-    let fieldConfig = normalizeFieldConfig(body.field_config ?? null, validIds);
+    // A list is published only for a field that asks for it (C-120), and
+    // only a customer / supplier / product column can ask.
+    const pickerIds = new Set(columns.filter((c) => entityKindForColumnType(c.type)).map((c) => c.id));
+    let fieldConfig = normalizeFieldConfig(body.field_config ?? null, validIds, pickerIds);
     if (fieldConfig.length === 0) {
       // Default: every non-formula/rollup column, in display order, with
       // the column's own required flag carried over.

@@ -21,7 +21,7 @@ import { logAudit, getClientIp } from '../../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../../lib/ratelimit';
 import { errorToResponse } from '../../../../lib/permissions';
 import {
-  validateSubmission,
+  validatePublicValues,
   verifyEntityRefIds,
   createRowFromSubmission,
   verifyTurnstileToken,
@@ -29,13 +29,14 @@ import {
   parseFormSettings,
   resolveAttachmentPolicy,
   linkPendingAttachments,
+  loadLivePublicForm,
+  publicFormFields,
 } from '../../../../lib/records/forms';
+import { publicNotFound } from '../../../../lib/records/publicView';
 import type { Env } from '../../../../lib/types';
 import type {
   PublicFormSubmitRequest,
   PublicFormSubmitResponse,
-  RecordColumnRow,
-  RecordFormRow,
 } from '../../../../../shared/types';
 
 const RATE_LIMIT_PER_HOUR = 10;
@@ -51,7 +52,7 @@ function jsonResponse(body: unknown, status: number): Response {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const slug = context.params.slug as string;
-    if (!slug) return jsonResponse({ error: 'Form not found' }, 404);
+    if (!slug) return publicNotFound('Form not found');
 
     const ip = getClientIp(context.request) ?? 'unknown';
 
@@ -64,20 +65,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Invalid JSON' }, 400);
     }
 
-    // ---- Resolve form (404 covers all "unavailable" cases). ----
-    const form = await context.env.DB.prepare(
-      `SELECT f.*
-       FROM records_forms f
-       JOIN records_sheets s ON f.sheet_id = s.id
-       WHERE f.public_slug = ?
-         AND f.is_public = 1
-         AND f.status = 'live'
-         AND f.archived = 0
-         AND s.archived = 0`,
-    )
-      .bind(slug)
-      .first<RecordFormRow>();
-    if (!form) return jsonResponse({ error: 'Form not found' }, 404);
+    // ---- Resolve form (404 covers all "unavailable" cases, including a
+    //      form and sheet of different tenants, an inactive organisation and
+    //      Records switched off -- one lookup for all four form routes). ----
+    const found = await loadLivePublicForm(context.env.DB, slug);
+    if (!found) return publicNotFound('Form not found');
+    const { form, columns } = found;
 
     // ---- Rate limit per IP per form. Generous but not unlimited. ----
     const rlKey = `form_submit:${form.id}:${ip}`;
@@ -110,29 +103,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    // ---- Load columns + validate the payload against field_config. ----
-    const colsResult = await context.env.DB.prepare(
-      'SELECT * FROM records_columns WHERE sheet_id = ? AND archived = 0 ORDER BY display_order ASC',
-    )
-      .bind(form.sheet_id)
-      .all<RecordColumnRow>();
-    const columns = colsResult.results ?? [];
-
+    // ---- Validate the payload against the form's fields. ----
+    const fields = publicFormFields(form, columns);
     let cleanData;
     try {
-      cleanData = validateSubmission(body.data, form, columns);
-      // Cross-tenant guard: ensure any entity-ref ids in the submission
-      // belong to this form's tenant. Cheap (one query per ref field)
-      // and prevents drive-by submission of ids enumerated elsewhere.
-      await verifyEntityRefIds(
-        context.env.DB,
-        form.tenant_id,
-        form,
-        columns,
-        cleanData,
-      );
+      // Coerced by column type; a typed customer / supplier / product is
+      // stored as text for a person to match, never as an id.
+      cleanData = validatePublicValues(body.data, fields, { onlyPresent: false });
+      // Cross-tenant guard: an id is accepted only when it is this tenant's,
+      // and the name stored beside it is read from the tenant's own row.
+      await verifyEntityRefIds(context.env.DB, form.tenant_id, fields, cleanData);
     } catch (err) {
-      // BadRequestError from validateSubmission/verifyEntityRefIds
+      // BadRequestError from validatePublicValues / verifyEntityRefIds
       // carries the user-facing message.
       const httpErr = errorToResponse(err);
       if (httpErr) return httpErr;
@@ -190,8 +172,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // so archive it (matches the pattern used elsewhere — soft
         // delete is the contract).
         await context.env.DB
-          .prepare('UPDATE records_rows SET archived = 1 WHERE id = ?')
-          .bind(rowId)
+          .prepare('UPDATE records_rows SET archived = 1 WHERE id = ? AND tenant_id = ?')
+          .bind(rowId, form.tenant_id)
           .run();
         const httpErr = errorToResponse(err);
         if (httpErr) return httpErr;

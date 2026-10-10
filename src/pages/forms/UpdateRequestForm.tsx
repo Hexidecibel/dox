@@ -624,8 +624,10 @@ function formatCurrentValue(value: unknown): string {
       .join(', ');
   }
   if (typeof value === 'object') {
-    const obj = value as { id?: string; name?: string; label?: string };
-    return obj.name || obj.label || obj.id || '';
+    // The server sends a reference as its name (a string). This is only the
+    // value a pick-list would hold; an id is never what gets shown.
+    const obj = value as { name?: string; label?: string };
+    return obj.name || obj.label || '';
   }
   return String(value);
 }

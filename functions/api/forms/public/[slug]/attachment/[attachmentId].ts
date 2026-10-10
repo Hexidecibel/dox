@@ -12,6 +12,9 @@
  * whoever holds the token can delete.
  *
  * Hard requirements:
+ *   - The form must be LIVE (the same lookup as read / submit / upload): a
+ *     form taken back to draft, an inactive organisation or Records switched
+ *     off answers 404 here too.
  *   - The attachment must still be pending (row_id IS NULL).
  *   - form_id must match the slug's form.
  *   - tenant_id must match the slug's form.
@@ -23,8 +26,9 @@
  */
 
 import { logAudit, getClientIp } from '../../../../../lib/db';
+import { loadLivePublicForm } from '../../../../../lib/records/forms';
+import { publicNotFound } from '../../../../../lib/records/publicView';
 import type { Env } from '../../../../../lib/types';
-import type { RecordFormRow, RecordRowAttachmentRow } from '../../../../../../shared/types';
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -38,7 +42,7 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
     const slug = context.params.slug as string;
     const attachmentId = context.params.attachmentId as string;
     if (!slug || !attachmentId) {
-      return jsonResponse({ error: 'Not found' }, 404);
+      return publicNotFound('Form not found');
     }
 
     // Parse the body for the pending_token. Both query string and JSON
@@ -60,21 +64,12 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Missing pending_token' }, 400);
     }
 
-    const form = await context.env.DB.prepare(
-      `SELECT f.*
-       FROM records_forms f
-       JOIN records_sheets s ON f.sheet_id = s.id
-       WHERE f.public_slug = ?
-         AND f.is_public = 1
-         AND f.archived = 0
-         AND s.archived = 0`,
-    )
-      .bind(slug)
-      .first<RecordFormRow>();
-    if (!form) return jsonResponse({ error: 'Not found' }, 404);
+    const found = await loadLivePublicForm(context.env.DB, slug);
+    if (!found) return publicNotFound('Form not found');
+    const { form } = found;
 
     const att = await context.env.DB.prepare(
-      `SELECT * FROM records_row_attachments
+      `SELECT id, r2_key FROM records_row_attachments
        WHERE id = ?
          AND form_id = ?
          AND tenant_id = ?
@@ -82,11 +77,11 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
          AND row_id IS NULL`,
     )
       .bind(attachmentId, form.id, form.tenant_id, pendingToken)
-      .first<RecordRowAttachmentRow>();
+      .first<{ id: string; r2_key: string }>();
     if (!att) {
-      // Generic 404 — never confirm whether the id existed for a
-      // different form / token / linked state.
-      return jsonResponse({ error: 'Not found' }, 404);
+      // The same 404 as an unknown form — never confirm whether the id
+      // existed for a different form / token / linked state.
+      return publicNotFound('Form not found');
     }
 
     // R2 first (see file header). Tolerate a missing object — that just
@@ -97,8 +92,10 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
       console.error('Pending attachment R2 delete failed:', err);
     }
 
-    await context.env.DB.prepare('DELETE FROM records_row_attachments WHERE id = ?')
-      .bind(attachmentId)
+    await context.env.DB.prepare(
+      'DELETE FROM records_row_attachments WHERE id = ? AND tenant_id = ? AND form_id = ? AND row_id IS NULL',
+    )
+      .bind(attachmentId, form.tenant_id, form.id)
       .run();
 
     const ip = getClientIp(context.request);

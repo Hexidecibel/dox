@@ -28,6 +28,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { PDFDocument } from 'pdf-lib';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
 import { fnContext, readJson } from '../helpers/requests';
 import type { TestUser } from '../helpers/requests';
 import { onRequestPost as createOrder } from '../../functions/api/orders/index';
@@ -691,6 +692,34 @@ describe('PUT / DELETE /api/orders/:id/items/:itemId', () => {
 // ===========================================================================
 
 describe('GET /api/orders/:id/send-preview + POST /api/orders/:id/send', () => {
+  it("an internal note, a spec limit and another tenant's record never appear in what the customer is sent", async () => {
+    const a = await makeDocument({ title: 'Cert with things around it', lots: [{ number: '77700001' }] });
+    const supplier = await db.prepare('SELECT supplier_id FROM documents WHERE id = ?').bind(a.id).first<{ supplier_id: string }>();
+    // The client's own three, planted on THIS certificate and its supplier.
+    const planted = await plantNeverSee(db, {
+      tenantId: seed.tenantId,
+      otherTenantId: seed.tenantId2,
+      authorId: seed.orgAdminId,
+      documentId: a.id,
+      supplierId: supplier!.supplier_id,
+    });
+    const order = await orderId({ po_number: 'PO-PLANT' });
+    await pick(order, [a.id]);
+    const plan = await preview(order);
+    expect(plan.blocked).toBeNull();
+
+    const mail = stubMail();
+    const { status, body } = await send(order, { fingerprint: plan.fingerprint });
+    expect(status).toBe(200);
+    expect(body.sent).toBe(true);
+    expect(mail).toHaveLength(1);
+    // Everything on the wire except the file's own bytes: subject, body,
+    // headers, attachment names.
+    const { attachments, ...rest } = mail[0];
+    expectNothingPlanted(JSON.stringify(rest), planted);
+    expectNothingPlanted((attachments ?? []).map((x) => x.filename).join('\n'), planted);
+  });
+
   it('attaches each certificate under a generated name, from the organization, reply-to the sender', async () => {
     const a = await makeDocument({ title: 'Cream cert', lots: [{ number: '10426203', sub: '03', production: '2026-07-22' }] });
     const b = await makeDocument({ title: 'Butter cert', lots: [{ number: '20000001' }] });

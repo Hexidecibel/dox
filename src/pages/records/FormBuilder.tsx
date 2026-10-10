@@ -88,23 +88,38 @@ function entityKindsReferenced(
   for (const fc of fieldConfig) {
     const col = colsById.get(fc.column_id);
     if (!col || col.archived) continue;
-    if (col.type === 'customer_ref') kinds.add('customer');
-    else if (col.type === 'supplier_ref') kinds.add('supplier');
-    else if (col.type === 'product_ref') kinds.add('product');
+    // Only a field that opted in publishes (and so previews) a list.
+    if (fc.public_picker !== true) continue;
+    const kind = entityKindOf(col.type);
+    if (kind) kinds.add(kind);
   }
   return kinds;
+}
+
+/** The kind of list a column could publish, or null when it has none. */
+function entityKindOf(type: string): EntityKind | null {
+  if (type === 'customer_ref') return 'customer';
+  if (type === 'supplier_ref') return 'supplier';
+  if (type === 'product_ref') return 'product';
+  return null;
+}
+
+/**
+ * Column types a public form cannot carry: computed ones, files, and the two
+ * references (a document, another record) that could only be chosen from a
+ * list an outsider must not see. Mirrors `isPublicFormFieldType` on the server.
+ */
+function notOnPublicForms(type: string): 'computed' | 'not_public' | null {
+  if (type === 'formula' || type === 'rollup') return 'computed';
+  if (type === 'document_ref' || type === 'record_ref' || type === 'attachment') return 'not_public';
+  return null;
 }
 
 /**
  * Mirror of `fetchPublicEntityOptions` (functions/lib/records/forms.ts)
  * but client-side: hits the existing admin list endpoints and reshapes
- * to the same `PublicEntityOption` contract the renderer expects.
- *
- * Disambiguator rules match the public endpoint exactly:
- *   - customer.secondary = customer_number (skip if blank)
- *   - supplier.secondary = (omit — slug is a derived URL form, not a
- *     useful disambiguator)
- *   - product.secondary  = description (no SKU column per migration 0017)
+ * to the same `PublicEntityOption` contract the renderer expects --
+ * id and name, nothing else, exactly what the public page is given.
  */
 const ENTITY_OPTIONS_LIMIT = 500;
 
@@ -114,13 +129,8 @@ async function loadEntityOptions(kind: EntityKind, tenantId: string): Promise<Pu
       tenant_id: tenantId,
       active: '1',
       limit: ENTITY_OPTIONS_LIMIT,
-    })) as { customers: { id: string; name: string; customer_number?: string | null }[] };
-    return (res.customers ?? [])
-      .map<PublicEntityOption>((c) => {
-        const opt: PublicEntityOption = { id: c.id, name: c.name };
-        if (c.customer_number && c.customer_number.trim()) opt.secondary = c.customer_number.trim();
-        return opt;
-      });
+    })) as { customers: { id: string; name: string }[] };
+    return (res.customers ?? []).map<PublicEntityOption>((c) => ({ id: c.id, name: c.name }));
   }
   if (kind === 'supplier') {
     const res = await api.suppliers.list({ tenant_id: tenantId, active: 1, limit: ENTITY_OPTIONS_LIMIT });
@@ -128,11 +138,7 @@ async function loadEntityOptions(kind: EntityKind, tenantId: string): Promise<Pu
   }
   // product
   const res = await api.products.list({ tenant_id: tenantId, active: 1, limit: ENTITY_OPTIONS_LIMIT });
-  return res.products.map<PublicEntityOption>((p) => {
-    const opt: PublicEntityOption = { id: p.id, name: p.name };
-    if (p.description && p.description.trim()) opt.secondary = p.description.trim();
-    return opt;
-  });
+  return res.products.map<PublicEntityOption>((p) => ({ id: p.id, name: p.name }));
 }
 
 function pluralEntityKind(kind: EntityKind): string {
@@ -448,7 +454,7 @@ export function FormBuilder() {
       .map((fc) => {
         const col = colsById.get(fc.column_id);
         if (!col || col.archived) return null;
-        if (col.type === 'formula' || col.type === 'rollup') return null;
+        if (notOnPublicForms(col.type)) return null;
         let config = null;
         if (col.config) {
           try {
@@ -465,6 +471,8 @@ export function FormBuilder() {
           required: !!fc.required || col.required === 1,
           config,
           position: fc.position,
+          // The public page draws a pick-list only for a field that opted in.
+          ...(fc.public_picker === true && entityKindOf(col.type) ? { picker: true as const } : {}),
         };
       })
       .filter((f): f is NonNullable<typeof f> => f != null)
@@ -691,7 +699,8 @@ export function FormBuilder() {
               {columns
                 .filter((c) => !fieldConfig.find((f) => f.column_id === c.id))
                 .map((col) => {
-                  const isComputed = col.type === 'formula' || col.type === 'rollup';
+                  const excluded = notOnPublicForms(col.type);
+                  const isComputed = excluded != null;
                   return (
                     <Box
                       key={col.id}
@@ -713,7 +722,8 @@ export function FormBuilder() {
                         {col.label}
                       </Typography>
                       <Chip size="small" label={col.type} variant="outlined" />
-                      {isComputed && <Chip size="small" label="Computed" />}
+                      {excluded === 'computed' && <Chip size="small" label="Computed" />}
+                      {excluded === 'not_public' && <Chip size="small" label="Not on public forms" />}
                     </Box>
                   );
                 })}
@@ -905,8 +915,12 @@ interface FieldRowProps {
   onRemove: () => void;
 }
 
-function FieldRow({ column, field, isFirst, isLast, onMove, onChange, onRemove }: FieldRowProps) {
+export function FieldRow({ column, field, isFirst, isLast, onMove, onChange, onRemove }: FieldRowProps) {
   const [expanded, setExpanded] = useState(false);
+  // A customer / supplier / product field can publish that list (C-120).
+  const listKind = entityKindOf(column.type);
+  const listNoun = listKind ? pluralEntityKind(listKind) : '';
+  const listPublic = !!listKind && field.public_picker === true;
   return (
     <Box
       sx={{
@@ -939,6 +953,9 @@ function FieldRow({ column, field, isFirst, isLast, onMove, onChange, onRemove }
             {field.required && (
               <Chip size="small" label="Required" color="primary" sx={{ height: 18, fontSize: 11 }} />
             )}
+            {listPublic && (
+              <Chip size="small" label="List is public" color="warning" sx={{ height: 18, fontSize: 11 }} />
+            )}
           </Box>
         </Box>
         <FormControlLabel
@@ -952,6 +969,35 @@ function FieldRow({ column, field, isFirst, isLast, onMove, onChange, onRemove }
           <ExpandIcon sx={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 200ms', fontSize: 18 }} />
         </IconButton>
       </Box>
+      {listKind && (
+        // Not tucked into the expander: this switch decides whether a list of
+        // the organisation's own records can be read by anyone with the link.
+        <Box sx={{ px: 1.5, pb: 1.25 }}>
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={listPublic}
+                onChange={(e) => onChange({ public_picker: e.target.checked })}
+                inputProps={{ 'aria-label': `Let people pick from your list of ${listNoun}` }}
+              />
+            }
+            label={`Let people pick from your list of ${listNoun}`}
+            sx={{ m: 0, '& .MuiFormControlLabel-label': { fontSize: 13 } }}
+          />
+          {listPublic ? (
+            <Alert severity="warning" sx={{ mt: 0.75, py: 0.25, '& .MuiAlert-message': { fontSize: 13 } }}>
+              Anyone who has this form's link can read the names of all your active {listNoun}, without
+              signing in. Leave this on only if that list is not confidential.
+            </Alert>
+          ) : (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
+              Off: people type a name and it is saved as text for you to match in the sheet. Nothing from your
+              list of {listNoun} is shown to them.
+            </Typography>
+          )}
+        </Box>
+      )}
       <Collapse in={expanded}>
         <Box sx={{ px: 1.5, pb: 1.5, pt: 0, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           <TextField

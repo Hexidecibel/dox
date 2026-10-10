@@ -22,6 +22,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
 import { onRequestGet as portalGet } from '../../functions/api/supplier-requests/public/[token]';
 import { onRequestPost as portalUpload } from '../../functions/api/supplier-requests/public/[token]/upload';
 import { onRequest as middleware } from '../../functions/api/_middleware';
@@ -424,6 +425,26 @@ describe('the response is an allow-list', () => {
     expect(serialized).not.toContain('amendment_reason');
     expect(serialized).not.toContain('line_kind');
     expect(serialized).not.toContain(seed.orgAdminId);
+  });
+
+  it("an internal note, a spec limit and another tenant's record never appear, on the page or in the upload answer", async () => {
+    // The client's own three, planted on THIS supplier and next door.
+    const planted = await plantNeverSee(db, {
+      tenantId: seed.tenantId,
+      otherTenantId: seed.tenantId2,
+      authorId: seed.orgAdminId,
+      supplierId,
+    });
+    const { token, lineIds } = await makeRequest(['Allergen Statement', 'Kosher Certificate']);
+
+    const page = await get(token);
+    expect(page.status).toBe(200);
+    expectNothingPlanted(JSON.stringify(page.body), planted);
+
+    const { body } = await upload(token, await refsFor(token, lineIds), { name: 'pack.pdf', label: 'Priya' });
+    expectNothingPlanted(JSON.stringify(body), planted);
+    // And the page again, now that an arrival sits on the ask.
+    expectNothingPlanted(JSON.stringify((await get(token)).body), planted);
   });
 
   it('carries no internal id — not the request, tenant, supplier, line or requirement', async () => {

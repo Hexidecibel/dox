@@ -71,6 +71,18 @@ const NON_FILLABLE_TYPES = new Set<ApiRecordColumn['type']>([
   'attachment',
 ]);
 
+/**
+ * What an update-request step cannot ask an outsider to fill: the above, and
+ * a document, another record or a contact, which an outsider is neither shown
+ * nor allowed to choose (the server refuses these keys too).
+ */
+const NOT_REQUESTABLE_TYPES = new Set<ApiRecordColumn['type']>([
+  ...NON_FILLABLE_TYPES,
+  'document_ref',
+  'record_ref',
+  'contact',
+]);
+
 interface UserOption {
   id: string;
   email: string;
@@ -629,6 +641,7 @@ function StepEditor({
             <ApprovalConfigEditor
               config={step.config as ApprovalStepConfig}
               users={users}
+              columns={columns}
               onChange={(patch) => onChange({ config: { ...step.config, ...patch } })}
             />
           )}
@@ -666,16 +679,30 @@ function stepTypeIcon(type: WorkflowStepType) {
 function ApprovalConfigEditor({
   config,
   users,
+  columns,
   onChange,
 }: {
   config: ApprovalStepConfig;
   users: UserOption[];
+  columns: ApiRecordColumn[];
   onChange: (patch: Partial<ApprovalStepConfig>) => void;
 }) {
   // Resolve current user pick.
   const value = config.assignee_user_id
     ? users.find((u) => u.id === config.assignee_user_id) ?? null
     : null;
+  // What the sign-off page shows of the row: its title, plus ONLY the
+  // columns picked here. A file column is never shown.
+  const showable = useMemo(
+    () => columns.filter((c) => c.archived === 0 && c.type !== 'attachment'),
+    [columns],
+  );
+  const shown = config.visible_fields ?? [];
+  const toggleShown = (key: string) => {
+    onChange({
+      visible_fields: shown.includes(key) ? shown.filter((k) => k !== key) : [...shown, key],
+    });
+  };
   return (
     <>
       <Autocomplete<UserOption, false, false, true>
@@ -719,6 +746,31 @@ function ApprovalConfigEditor({
           />
         )}
       />
+      <Box>
+        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
+          Fields the approver sees ({shown.length} selected)
+        </Typography>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+          {showable.map((c) => {
+            const checked = shown.includes(c.key);
+            return (
+              <Chip
+                key={c.id}
+                label={c.label}
+                onClick={() => toggleShown(c.key)}
+                variant={checked ? 'filled' : 'outlined'}
+                color={checked ? 'primary' : 'default'}
+                size="small"
+              />
+            );
+          })}
+        </Box>
+        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.75 }}>
+          The sign-off page always shows the record's title. It shows nothing else from the record unless you
+          pick it here. Whoever holds the link can read what you pick, without signing in — a customer,
+          supplier or document appears by name.
+        </Typography>
+      </Box>
       <TextField
         label="Message (optional)"
         size="small"
@@ -752,7 +804,7 @@ function UpdateRequestConfigEditor({
   onChange: (patch: Partial<UpdateRequestStepConfig>) => void;
 }) {
   const fillable = useMemo(
-    () => columns.filter((c) => c.archived === 0 && !NON_FILLABLE_TYPES.has(c.type)),
+    () => columns.filter((c) => c.archived === 0 && !NOT_REQUESTABLE_TYPES.has(c.type)),
     [columns],
   );
   const selected = config.fields_requested ?? [];
@@ -792,6 +844,21 @@ function UpdateRequestConfigEditor({
               />
             );
           })}
+          {/* A step saved before documents, records and contacts stopped being
+              requestable can still name one. Shown so it can be removed: the
+              server refuses to save the step while it is there. */}
+          {selected
+            .filter((k) => !fillable.some((c) => c.key === k))
+            .map((k) => (
+              <Chip
+                key={`stale-${k}`}
+                label={`${columns.find((c) => c.key === k)?.label ?? k} (cannot be requested)`}
+                onDelete={() => toggle(k)}
+                color="warning"
+                variant="outlined"
+                size="small"
+              />
+            ))}
         </Box>
       </Box>
       <TextField

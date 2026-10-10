@@ -14,6 +14,7 @@ import { sanitizeString } from '../../../../../lib/validation';
 import { loadSheetForUser } from '../../../../../lib/records/helpers';
 import {
   generatePublicSlug,
+  entityKindForColumnType,
   normalizeFieldConfig,
   normalizeSettings,
   attachSubmissionCounts,
@@ -125,14 +126,22 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(nextSlug);
     }
 
+    // Which fields publish their list to anyone holding the link (C-120).
+    // Recorded on the audit row whenever the fields are saved, so "who made
+    // the customer list public, and when" has an answer.
+    let publicPickers: string[] | undefined;
     if (body.field_config !== undefined) {
       const colsResult = await context.env.DB.prepare(
-        'SELECT id FROM records_columns WHERE sheet_id = ?',
+        'SELECT id, key, type FROM records_columns WHERE sheet_id = ?',
       )
         .bind(sheetId)
-        .all<{ id: string }>();
-      const validIds = new Set((colsResult.results ?? []).map((r) => r.id));
-      const fc = normalizeFieldConfig(body.field_config, validIds);
+        .all<{ id: string; key: string; type: string }>();
+      const cols = colsResult.results ?? [];
+      const validIds = new Set(cols.map((r) => r.id));
+      const pickerIds = new Set(cols.filter((r) => entityKindForColumnType(r.type)).map((r) => r.id));
+      const fc = normalizeFieldConfig(body.field_config, validIds, pickerIds);
+      const keyById = new Map(cols.map((r) => [r.id, r.key]));
+      publicPickers = fc.filter((f) => f.public_picker === true).map((f) => keyById.get(f.column_id) ?? f.column_id);
       updates.push('field_config = ?');
       params.push(JSON.stringify(fc));
     }
@@ -163,7 +172,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       'records_form.updated',
       'records_form',
       formId,
-      JSON.stringify({ changes: Object.keys(body) }),
+      JSON.stringify({
+        changes: Object.keys(body),
+        ...(publicPickers !== undefined ? { public_picker_fields: publicPickers } : {}),
+      }),
       getClientIp(context.request),
     );
 

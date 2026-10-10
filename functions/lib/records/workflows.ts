@@ -24,8 +24,10 @@ import {
   generateUpdateRequestToken,
   computeExpiresAt,
   normalizeFieldsRequested,
+  requestFillFields,
 } from './updateRequests';
 import { BadRequestError } from '../permissions';
+import { publicCellValue, publicSenderName, recordsPublicAvailable } from './publicView';
 import type {
   ApprovalStepConfig,
   RecordColumnRow,
@@ -134,6 +136,21 @@ export function normalizeWorkflowSteps(
       const cfg = s.config as ApprovalStepConfig;
       if (!cfg.assignee_email && !cfg.assignee_user_id) {
         throw new BadRequestError(`steps[${i}].config requires assignee_email or assignee_user_id`);
+      }
+      // What the sign-off page shows of the row (C-122). Each key must be a
+      // live column of this sheet that is not a file; a step that names
+      // nothing shows the row's title only.
+      if (cfg.visible_fields != null) {
+        if (!Array.isArray(cfg.visible_fields)) {
+          throw new BadRequestError(`steps[${i}].config.visible_fields must be a list of column keys`);
+        }
+        for (const key of cfg.visible_fields) {
+          const col = typeof key === 'string' ? columns.find((c) => c.key === key && c.archived === 0) : undefined;
+          if (!col || col.type === 'attachment') {
+            throw new BadRequestError(`steps[${i}].config.visible_fields: "${String(key)}" is not a column that can be shown`);
+          }
+        }
+        (s.config as ApprovalStepConfig).visible_fields = approvalVisibleFields(cfg);
       }
     }
     out.push({
@@ -247,12 +264,26 @@ interface EngineEnv {
   appOrigin: string;
 }
 
-/** Look up a column by key (used by set_cell). */
-async function loadColumns(db: D1Database, sheetId: string): Promise<RecordColumnRow[]> {
-  const r = await db
-    .prepare('SELECT * FROM records_columns WHERE sheet_id = ? AND archived = 0 ORDER BY display_order ASC')
-    .bind(sheetId)
-    .all<RecordColumnRow>();
+/**
+ * A sheet's live columns. The public sign-off page passes the tenant it
+ * resolved, and the read then carries it as a predicate.
+ */
+async function loadColumns(db: D1Database, sheetId: string, tenantId?: string): Promise<RecordColumnRow[]> {
+  const r = tenantId
+    ? await db
+        .prepare(
+          `SELECT id, sheet_id, tenant_id, key, label, type, config, required, is_title,
+                  display_order, width, archived, created_at, updated_at
+             FROM records_columns
+            WHERE sheet_id = ? AND tenant_id = ? AND archived = 0
+            ORDER BY display_order ASC`,
+        )
+        .bind(sheetId, tenantId)
+        .all<RecordColumnRow>()
+    : await db
+        .prepare('SELECT * FROM records_columns WHERE sheet_id = ? AND archived = 0 ORDER BY display_order ASC')
+        .bind(sheetId)
+        .all<RecordColumnRow>();
   return r.results ?? [];
 }
 
@@ -519,7 +550,12 @@ export async function executeStep(
   if (step.type === 'update_request') {
     const cfg = step.config as UpdateRequestStepConfig;
     const columns = await loadColumns(env.DB, workflow.sheet_id);
-    const fields = normalizeFieldsRequested(cfg.fields_requested, columns);
+    // A step saved before document, record and contact columns stopped being
+    // requestable (C-124) may still name one. Those keys are dropped here
+    // rather than failing a run that is already under way; what is left is
+    // validated as before.
+    const requestable = requestFillFields(columns, Array.isArray(cfg.fields_requested) ? cfg.fields_requested : []);
+    const fields = normalizeFieldsRequested(requestable.map((f) => f.column.key), columns);
     const urId = generateId();
     const urToken = generateApproverToken();
     const expiresAt = computeExpiresAt(cfg.due_days ? addDaysIso(cfg.due_days) : null);
@@ -825,76 +861,200 @@ export async function handleUpdateRequestResponse(
 // Public-approval projection -- shipped to /a/:token form.
 // ---------------------------------------------------------------------
 
-/** Build the sanitized view sent to the approver at /a/:token. */
+const APPROVAL_VISIBLE_FIELDS_MAX = 30;
+
+/**
+ * The column keys an approval step shows on its sign-off page (C-122): the
+ * step's `visible_fields`, as strings, without repeats, capped. Absent or
+ * malformed is the empty list -- the approver then sees the row's title and
+ * nothing else, which is what every step made before this field existed says.
+ */
+export function approvalVisibleFields(config: ApprovalStepConfig | null | undefined): string[] {
+  const raw = config?.visible_fields;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const key of raw) {
+    if (typeof key !== 'string' || !key || out.includes(key)) continue;
+    out.push(key);
+    if (out.length >= APPROVAL_VISIBLE_FIELDS_MAX) break;
+  }
+  return out;
+}
+
+/** Everything a sign-off link resolves to, when it resolves at all. */
+export interface PublicApprovalContext {
+  stepRun: WorkflowStepRunDbRow;
+  /** The run's tenant, which the workflow, sheet and row were all checked against. */
+  tenantId: string;
+  sheetId: string;
+  rowId: string;
+  workflowName: string;
+  step: RecordWorkflowStep;
+  sheetName: string;
+  rowTitle: string | null;
+  rowData: RecordRowData;
+  /** The workflow creator's NAME (a user of this tenant), or null. Never an email. */
+  senderName: string | null;
+}
+
+/**
+ * The ONE gate of the public sign-off link, for the page (GET) and for the
+ * decision (POST) alike (C-128). Null -- which both answer with the same 404
+ * -- unless ALL hold:
+ *
+ *   - the token names an approval step that is still awaiting a response and
+ *     has not expired;
+ *   - its run is in progress;
+ *   - the workflow is active and not archived;
+ *   - the sheet and the row are not archived;
+ *   - the workflow, the sheet and the row all belong to THE RUN'S TENANT, and
+ *     the row is on the run's sheet (C-127): a run that names another
+ *     tenant's row resolves to nothing;
+ *   - the organisation is active and has Records switched on (C-129).
+ *
+ * The decision used to check only the first of these, so a link went on
+ * accepting an approval for a row that had been archived.
+ */
+export async function loadPublicApprovalContext(
+  db: D1Database,
+  token: string,
+): Promise<PublicApprovalContext | null> {
+  if (!token) return null;
+  const found = await db
+    .prepare(
+      `SELECT sr.id, sr.run_id, sr.step_id, sr.step_index, sr.step_type, sr.status,
+              sr.assignee_email, sr.assignee_user_id, sr.approver_token, sr.token_expires_at,
+              sr.response_value, sr.response_comment, sr.responded_at,
+              sr.responded_by_email_or_user_id, sr.update_request_id, sr.started_at, sr.completed_at,
+              run.tenant_id AS run_tenant_id, run.sheet_id AS run_sheet_id, run.row_id AS run_row_id,
+              wf.name AS workflow_name, wf.steps AS workflow_steps,
+              s.name AS sheet_name,
+              rr.display_title AS row_title, rr.data AS row_data,
+              u.name AS sender_name
+         FROM records_workflow_step_runs sr
+         JOIN records_workflow_runs run
+           ON run.id = sr.run_id AND run.status = 'in_progress'
+         JOIN records_workflows wf
+           ON wf.id = run.workflow_id AND wf.tenant_id = run.tenant_id AND wf.sheet_id = run.sheet_id
+          AND wf.archived = 0 AND wf.status = 'active'
+         JOIN records_sheets s
+           ON s.id = run.sheet_id AND s.tenant_id = run.tenant_id AND s.archived = 0
+         JOIN records_rows rr
+           ON rr.id = run.row_id AND rr.sheet_id = run.sheet_id AND rr.tenant_id = run.tenant_id
+          AND rr.archived = 0
+         LEFT JOIN users u
+           ON u.id = wf.created_by_user_id AND u.tenant_id = run.tenant_id
+        WHERE sr.approver_token = ? AND sr.step_type = 'approval'`,
+    )
+    .bind(token)
+    .first<
+      WorkflowStepRunDbRow & {
+        run_tenant_id: string;
+        run_sheet_id: string;
+        run_row_id: string;
+        workflow_name: string;
+        workflow_steps: string | null;
+        sheet_name: string;
+        row_title: string | null;
+        row_data: string | null;
+        sender_name: string | null;
+      }
+    >();
+  if (!found) return null;
+  if (!isApprovalAcceptable(found)) return null;
+
+  const step = parseWorkflowSteps(found.workflow_steps).find((s) => s.id === found.step_id);
+  if (!step || step.type !== 'approval') return null;
+
+  if (!(await recordsPublicAvailable(db, found.run_tenant_id))) return null;
+
+  return {
+    stepRun: {
+      id: found.id,
+      run_id: found.run_id,
+      step_id: found.step_id,
+      step_index: found.step_index,
+      step_type: found.step_type,
+      status: found.status,
+      assignee_email: found.assignee_email,
+      assignee_user_id: found.assignee_user_id,
+      approver_token: found.approver_token,
+      token_expires_at: found.token_expires_at,
+      response_value: found.response_value,
+      response_comment: found.response_comment,
+      responded_at: found.responded_at,
+      responded_by_email_or_user_id: found.responded_by_email_or_user_id,
+      update_request_id: found.update_request_id,
+      started_at: found.started_at,
+      completed_at: found.completed_at,
+    },
+    tenantId: found.run_tenant_id,
+    sheetId: found.run_sheet_id,
+    rowId: found.run_row_id,
+    workflowName: found.workflow_name,
+    step,
+    sheetName: found.sheet_name,
+    rowTitle: found.row_title,
+    rowData: parseRowData(found.row_data),
+    senderName: found.sender_name,
+  };
+}
+
+/**
+ * Build the view sent to the approver at /a/:token, field by field (C-122).
+ *
+ * The approver is shown the row's TITLE and ONLY the columns the step's
+ * config names (`visible_fields`); with none named, no cell of the row is
+ * read into the response at all. It used to send the first thirty columns
+ * raw -- ids, contacts, everything.
+ *
+ * Each value goes through `publicCellValue`: a reference is the name of the
+ * tenant's own record and never an id; a contact, an email or a phone number
+ * leaves only because its column was named. A file column is never shown.
+ */
 export async function buildPublicApprovalView(
   db: D1Database,
-  stepRun: WorkflowStepRunDbRow,
-  data: RecordRowData,
-): Promise<PublicApprovalView | null> {
-  const run = await db
-    .prepare('SELECT * FROM records_workflow_runs WHERE id = ?')
-    .bind(stepRun.run_id)
-    .first<{ id: string; workflow_id: string; sheet_id: string; row_id: string }>();
-  if (!run) return null;
-  const wf = await db
-    .prepare('SELECT * FROM records_workflows WHERE id = ?')
-    .bind(run.workflow_id)
-    .first<WorkflowDbRow>();
-  if (!wf) return null;
-  const workflow = hydrateWorkflow(wf);
-  const step = workflow.steps.find((s) => s.id === stepRun.step_id);
-  if (!step) return null;
+  ctx: PublicApprovalContext,
+): Promise<PublicApprovalView> {
+  const cfg = ctx.step.config as ApprovalStepConfig;
+  const columns = await loadColumns(db, ctx.sheetId, ctx.tenantId);
+  const colsByKey = new Map(columns.map((c) => [c.key, c]));
 
-  const sheet = await db
-    .prepare('SELECT name FROM records_sheets WHERE id = ? AND archived = 0')
-    .bind(run.sheet_id)
-    .first<{ name: string }>();
-  if (!sheet) return null;
+  const fields: PublicApprovalView['row']['fields'] = [];
+  for (const key of approvalVisibleFields(cfg)) {
+    const col = colsByKey.get(key);
+    if (!col || col.type === 'attachment') continue;
+    fields.push({
+      label: col.label,
+      type: col.type,
+      value: await publicCellValue(db, ctx.tenantId, col, ctx.rowData[key]),
+    });
+  }
 
-  const row = await db
-    .prepare('SELECT display_title FROM records_rows WHERE id = ? AND archived = 0')
-    .bind(run.row_id)
-    .first<{ display_title: string | null }>();
-  if (!row) return null;
-
-  const sender = await db
-    .prepare('SELECT name, email FROM users WHERE id = ?')
-    .bind(workflow.created_by_user_id)
-    .first<{ name: string | null; email: string | null }>();
-
-  const columns = await loadColumns(db, run.sheet_id);
-  // Show all non-archived columns -- gives the approver context. Skip
-  // attachments since their value shape is opaque.
-  const fields = columns
-    .filter((c) => c.type !== 'attachment')
-    .slice(0, 30)
-    .map((c) => ({
-      key: c.key,
-      label: c.label,
-      type: c.type,
-      value: data[c.key] ?? null,
-    }));
-
-  const cfg = step.config as ApprovalStepConfig;
   return {
     step: {
-      name: step.name,
-      message: cfg.message ?? null,
-      workflow_name: workflow.name,
-      sender_name: sender?.name || sender?.email || 'A teammate',
-      sender_email: sender?.email || '',
-      expires_at: stepRun.token_expires_at,
+      name: ctx.step.name,
+      message: typeof cfg.message === 'string' ? cfg.message : null,
+      workflow_name: ctx.workflowName,
+      // A name, or the organisation's. Never an address.
+      sender_name: await publicSenderName(db, ctx.tenantId, ctx.senderName),
+      expires_at: ctx.stepRun.token_expires_at,
     },
     row: {
-      sheet_name: sheet.name,
-      title: row.display_title,
+      sheet_name: ctx.sheetName,
+      title: ctx.rowTitle,
       fields,
     },
   };
 }
 
-/** True if a step_run's token is still valid for submitting a decision. */
-export function isApprovalAcceptable(stepRun: WorkflowStepRunDbRow): boolean {
+/**
+ * True if a step_run is still awaiting a decision and its token has not
+ * expired. This is the STEP's own state only: the public link asks
+ * `loadPublicApprovalContext`, which also requires a live run, workflow,
+ * sheet, row and organisation.
+ */
+export function isApprovalAcceptable(stepRun: Pick<WorkflowStepRunDbRow, 'status' | 'token_expires_at'>): boolean {
   if (stepRun.status !== 'awaiting_response') return false;
   if (stepRun.token_expires_at) {
     const exp = Date.parse(stepRun.token_expires_at);

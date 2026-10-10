@@ -48,6 +48,12 @@ const NON_FILLABLE_TYPES = new Set<ApiRecordColumn['type']>([
   'formula',
   'rollup',
   'attachment',
+  // The recipient is somebody outside. A document, another record or a
+  // contact is not shown to them and cannot be chosen by them (the server
+  // refuses these keys too).
+  'document_ref',
+  'record_ref',
+  'contact',
 ]);
 
 interface Props {

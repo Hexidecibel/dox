@@ -23,6 +23,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
 import { fnContext, readJson } from '../helpers/requests';
 import type { TestUser } from '../helpers/requests';
 import { onRequestPost as createOrder } from '../../functions/api/orders/index';
@@ -780,6 +781,38 @@ describe('sending a document order', () => {
     const view = await landing(link.token);
     expect(view.documents).toHaveLength(1);
     expect(view.unavailable_count).toBe(0);
+  });
+
+  it("an internal note, a spec limit and another tenant's record never appear, in the customer's mail or on the link it opens", async () => {
+    const pair = await makePair('Planted Around Item');
+    const spec = await makeDoc(types.spec, { products: [pair.product_id], title: 'Spec with things around it' });
+    // The client's own three, planted on THIS document and its supplier.
+    const planted = await plantNeverSee(db, {
+      tenantId: seed.tenantId,
+      otherTenantId: seed.tenantId2,
+      authorId: seed.orgAdminId,
+      documentId: spec.id,
+      supplierId: pair.supplier_id,
+    });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.spec]);
+    const plan = await preview(order);
+    expect(plan.blocked).toBeNull();
+
+    const mails = stubMail();
+    const { status, body } = await send(order, 'user', { fingerprint: plan.fingerprint });
+    expect(status).toBe(200);
+    expect(body.sent).toBe(true);
+
+    const customerMails = toCustomer(mails);
+    expect(customerMails).toHaveLength(1);
+    expectNothingPlanted(JSON.stringify(customerMails[0]), planted);
+
+    const row = await lineRow((await lines(order))[0].id);
+    const link = (await linkById(row.export_link_id))!;
+    const page = await exportLanding(fnContext(`http://localhost/api/document-exports/public/${link.token}`, { params: { token: link.token } }));
+    expect(page.status).toBe(200);
+    expectNothingPlanted(await page.text(), planted);
   });
 
   it('a certificate of analysis on a document line goes attached, like a COA pick', async () => {

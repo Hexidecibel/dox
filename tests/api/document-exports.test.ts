@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { unzipSync, strFromU8 } from 'fflate';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
 import { fnContext, readJson } from '../helpers/requests';
 import type { TestUser } from '../helpers/requests';
 import { onRequestPost as exportZip } from '../../functions/api/document-exports/zip';
@@ -566,6 +567,32 @@ describe('GET /api/document-exports/public/:token', () => {
     expect(raw).not.toContain(seed.tenantId);
     expect(raw).not.toContain(INTERNAL_OWNER);
     expect(raw).not.toContain('docs/');
+  });
+
+  it("an internal note, a spec limit and another tenant's record never appear, on the page, in the manifest or in a file name", async () => {
+    const a = await makeDocument({ title: 'Certificate with things around it' });
+    // The client's own three, planted on THIS document and its supplier.
+    const planted = await plantNeverSee(db, {
+      tenantId: seed.tenantId,
+      otherTenantId: seed.tenantId2,
+      authorId: seed.orgAdminId,
+      documentId: a.id,
+      supplierId,
+    });
+    const token = await mintedTokenFor([a.id]);
+
+    const page = await exportLanding(landingCtx(token));
+    expect(page.status).toBe(200);
+    expectNothingPlanted(await page.text(), planted);
+
+    const zip = await exportLandingZip(landingCtx(token));
+    expect(zip.status).toBe(200);
+    const files = unzip(await zip.arrayBuffer());
+    expectNothingPlanted(Object.keys(files).join('\n') + '\n' + files['manifest.csv'], planted);
+
+    const one = await exportLandingFile(landingCtx(token, { index: '0' }));
+    expect(one.status).toBe(200);
+    expectNothingPlanted(one.headers.get('Content-Disposition') ?? '', planted);
   });
 
   it('audits every view', async () => {

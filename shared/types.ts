@@ -4823,6 +4823,15 @@ export interface RecordFormFieldConfig {
   help_text?: string | null;
   /** 0-based render order. Independent of column.display_order on the grid. */
   position: number;
+  /**
+   * Customer / supplier / product fields only (C-120). TRUE publishes the
+   * organisation's list of that kind -- id and name -- to anyone holding the
+   * form's link, so the field can be a pick-list. Absent / false (every form
+   * made before this existed): nothing is published and the field is a text
+   * box whose typed value a person matches later. Only the form builder sets
+   * it, per field.
+   */
+  public_picker?: boolean;
 }
 
 /** Presentation knobs for the public form. */
@@ -4957,6 +4966,34 @@ export interface UpdateFormRequest {
 // included, only the fields needed to render and validate. We never
 // expose tenant_id, hidden columns, or sheet metadata that wasn't
 // explicitly opted into the form.
+//
+// Every shape below is an ALLOW-LIST built field by field in
+// `functions/lib/records/publicView.ts` (C-120..C-132), and pinned key by key
+// in `tests/api/records-public-leak.test.ts`. Adding a key here is a decision
+// about what somebody who is not signed in may read.
+
+/**
+ * The part of a column's config a public page is given, by column type:
+ * dropdown options, number / date formatting, "several values". Never the
+ * stored config itself -- `target_sheet_id` and anything else a builder keeps
+ * there stays inside (`projectColumnConfig`).
+ */
+export interface PublicFieldConfig {
+  options?: Array<{ value: string; label?: string; color?: string }>;
+  allow_custom?: boolean;
+  precision?: number;
+  format?: string;
+  currency_code?: string;
+  include_time?: boolean;
+  multiple?: boolean;
+}
+
+/**
+ * One cell as a public page may show it: text, a number, a yes / no or a list
+ * of texts. A reference is its NAME (`publicCellValue`) -- an id never
+ * leaves, and an object is never passed through.
+ */
+export type PublicRecordValue = string | number | boolean | string[] | null;
 
 /** Column definition shipped to the public form renderer. */
 export interface PublicFormFieldDef {
@@ -4968,29 +5005,31 @@ export interface PublicFormFieldDef {
   label: string;
   help_text?: string | null;
   required: boolean;
-  /** Type-specific config (dropdown options, etc). */
-  config?: RecordColumnConfig | null;
+  /** Type-specific config (dropdown options, etc), projected per type. */
+  config?: PublicFieldConfig | null;
   position: number;
+  /**
+   * Present (true) only on a customer / supplier / product field whose form
+   * builder opted it in: the page draws a pick-list from `entity_options`.
+   * Absent: the field is a text box.
+   */
+  picker?: true;
 }
 
 /**
- * Tenant-scoped entity option safe to expose on a public form.
- *
- * Intentionally minimal — id, display name, and a single optional
- * disambiguator (e.g. customer_number, sku). NEVER include PII like
- * email, phone, or address; this rides on an unauthenticated route.
+ * Tenant-scoped entity option safe to expose on a public form: id and name,
+ * nothing else (C-120). No customer number, no product description, no
+ * contact detail -- this rides on an unauthenticated route.
  */
 export interface PublicEntityOption {
   id: string;
   name: string;
-  /** Optional disambiguator shown as a subtle subtitle in the picker. */
-  secondary?: string;
 }
 
 /**
- * Pre-fetched entity options for any entity-ref columns visible on the
- * form. Keyed by entity-ref kind so the renderer can match a column's
- * type to its dropdown options without an extra network roundtrip.
+ * The lists for the fields that opted in (`RecordFormFieldConfig.public_picker`),
+ * keyed by kind. A kind no field opted in is ABSENT, and with no opted-in
+ * field at all the whole object is absent.
  *
  * Only `customer`, `supplier`, and `product` are populated. Other ref
  * types (`record_ref`, `document_ref`, `contact`) are intentionally
@@ -5031,10 +5070,9 @@ export interface PublicFormView {
   /** Cloudflare Turnstile site key. Public — safe to ship to the browser. */
   turnstile_site_key: string;
   /**
-   * Tenant-scoped entity dropdown options for any visible
-   * customer_ref / supplier_ref / product_ref columns. Absent (or empty
-   * sub-keys) when the form has no such columns. Capped at 500 entries
-   * per kind — see [slug].ts for the search/pagination TODO.
+   * Lists for the customer / supplier / product fields that OPTED IN, and
+   * only those kinds. Absent when no field did. Capped at 500 entries per
+   * kind.
    */
   entity_options?: PublicFormEntityOptions;
   /**
@@ -5185,8 +5223,8 @@ export interface PublicUpdateRequestView {
   request: {
     sheet_name: string;
     row_title: string | null;
+    /** The sender's name, else the organisation's. Never an email (C-123). */
     sender_name: string;
-    sender_email: string;
     message: string | null;
     due_date: string | null;
     /** When this request stops accepting submissions. NULL = no expiry. */
@@ -5201,9 +5239,9 @@ export interface PublicUpdateRequestView {
    * Current row values, keyed by column.key. Pre-fills the form so the
    * recipient sees "current: X" and can change it. Only includes keys
    * present in `fields` — values for non-requested columns are never
-   * included in this projection.
+   * included in this projection. A reference is its name, never an id.
    */
-  current_values: RecordRowData;
+  current_values: Record<string, PublicRecordValue>;
 }
 
 /** Body for POST /api/update-requests/public/:token (recipient submit). */
@@ -5321,6 +5359,11 @@ export interface ApprovalStepConfig {
   message?: string | null;
   /** Hours-from-step-start until the magic link / inbox item expires. Optional. */
   due_days?: number | null;
+  /**
+   * Column keys of the row this step shows on its sign-off page (C-122).
+   * Absent or empty: the approver sees the row's title and nothing else.
+   */
+  visible_fields?: string[];
 }
 
 export interface UpdateRequestStepConfig {
@@ -5513,20 +5556,22 @@ export interface PublicApprovalView {
     name: string;
     message: string | null;
     workflow_name: string;
+    /** The sender's name, else the organisation's. Never an email (C-123). */
     sender_name: string;
-    sender_email: string;
     /** ISO timestamp at which this token will stop accepting submissions. */
     expires_at: string | null;
   };
   row: {
     sheet_name: string;
     title: string | null;
-    /** Visible columns + their current values, surfaced read-only. */
+    /**
+     * ONLY the columns the step names (`ApprovalStepConfig.visible_fields`),
+     * read-only. A reference is its name, never an id.
+     */
     fields: Array<{
-      key: string;
       label: string;
       type: RecordColumnType;
-      value: unknown;
+      value: PublicRecordValue;
     }>;
   };
 }
