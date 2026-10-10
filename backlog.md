@@ -2,6 +2,30 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## Tracked nits from the final review of the Records public pages (2026-10-10)
+
+Left open when the fourth adversarial round passed the build (v2.34.0). None leaks anything to an
+outsider. The first two were written as failing tests by the reviewer (`NIT R4-1`, `NIT R4-2` in
+`tests/api/records-public-adversarial-r4.test.ts`, deliberately not merged: they fail by design).
+
+- **A Resume that dies right after its claim blocks Resume for ten minutes, and the answer says
+  Cancel is not offered** (R4-1). The run is still stalled and resumable, yet the route answers 409
+  `already_resuming` with `can_cancel: false` although Cancel works. The reviewer's scenario: a run
+  on its second step with the first approved, and a `workflow_resume:<run>:<step>:<newest step run>`
+  claim row left in `rate_limits` as by a worker that died; Resume by a signed-in user should
+  answer 200 and answers 409. `functions/lib/records/workflows.ts` `resumeStalledRun`,
+  `functions/api/records/workflow-runs/[runId]/resume.ts`.
+- **Resume does not check the workflow's status / archived** (R4-2). On a DEACTIVATED (draft)
+  workflow a stalled run can start a step: a step row is written and (with mail on) a mail goes out
+  for a link that answers 404 until the workflow is reactivated. The reviewer's scenario: the same
+  run with the workflow set to `draft`; `resumeStalledRun` should refuse and returns ok.
+- **Resume racing cancel can leave one dangling `awaiting_response` row on a cancelled run.** The
+  same one-statement gap as the ordinary advance path. The run does end cancelled and no link of it
+  opens (held by the reviewer's race test); the leftover is the step row.
+- **`looksLikeId` shows a lower-case hyphenated bare-string name ("anne-marie") as nothing on a
+  public page**, the stated trade-off of C-144; and a one-word lower-case test-seed id still reads
+  as a name.
+
 ## Found while fixing the Records public pages (2026-10-10)
 
 - **Signed-in joins to `suppliers` / `document_types` by id with no tenant predicate.** The outward
