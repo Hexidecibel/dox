@@ -79,15 +79,29 @@ describe('which pack is it on', () => {
     expect(answer.scores.find((s: { pack: string }) => s.pack === 'finance').share).toBeLessThan(0.5);
   });
 
-  it('refuses to guess for an organisation that holds little of any pack', async () => {
+  it('refuses to guess for an organisation that holds little of any pack, all of it hand-made', async () => {
+    // Its own rows at a few pack slugs, under random ids: not a seeded organisation.
+    const own = generateTestId();
+    await db.prepare('INSERT INTO tenants (id, name, slug, active) VALUES (?, ?, ?, 1)').bind(own, `Own rows ${own}`, `own-${own.slice(0, 8)}`).run();
+    for (const slug of ['organic', 'kosher', 'halal']) {
+      await db.prepare('INSERT INTO claim_types (id, tenant_id, slug, name) VALUES (?, ?, ?, ?)').bind(generateTestId(), own, slug, slug).run();
+    }
+    const answer = inferPack([finance, fsqa], await loadPackRows(db, own));
+    expect(answer.pack).toBeNull();
+    expect(answer.reason).toMatch(/under the 50% needed/);
+  });
+
+  it('a seeded organisation that has diverged a long way is still recognised, by the ids a pack gives its rows', async () => {
+    // Round 2 (C-185): the apply gate refuses this organisation, so the
+    // baseline -- its only way in -- must be able to name its pack.
     await db.prepare('DELETE FROM document_type_requirements WHERE tenant_id = ?').bind(tenantId).run();
     await db.prepare('DELETE FROM document_type_extraction_instructions WHERE tenant_id = ?').bind(tenantId).run();
     await db.prepare('DELETE FROM claim_type_requirements WHERE tenant_id = ?').bind(tenantId).run();
     await db.prepare('DELETE FROM document_types WHERE tenant_id = ?').bind(tenantId).run();
     await db.prepare('DELETE FROM requirements WHERE tenant_id = ?').bind(tenantId).run();
     const answer = inferPack([finance, fsqa], await loadPackRows(db, tenantId));
-    expect(answer.pack).toBeNull();
-    expect(answer.reason).toMatch(/under the 50% needed/);
+    expect(answer.pack).toBe('fsqa');
+    expect(answer.reason).toMatch(/carry the ids this pack gives/);
   });
 
   it('an organisation with nothing matches nothing', () => {

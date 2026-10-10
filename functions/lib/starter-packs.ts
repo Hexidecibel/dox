@@ -209,7 +209,10 @@ export class StarterPackApplyRefused extends Error {
  *
  *   SEEDED, AND NEVER RECORDED (`baseline_required`): no `tenant_packs` row,
  *       yet it holds at least half of the pack's document types, requirements
- *       and claim types by slug. It was set up before the ledger existed. An
+ *       and claim types by slug -- OR shows any evidence of an earlier seeding
+ *       however little is left (a row at a pack key with a pack-shaped id, or a
+ *       setup run that recorded applying the pack; `seedEvidence` in
+ *       shared/packItems.ts). It was set up before the ledger existed. An
  *       apply would put back whatever it had deleted on purpose and ledger
  *       every row as though the apply had written it -- the guess
  *       `bin/baseline-pack-ledger` exists to avoid. That script is its way in.
@@ -240,17 +243,21 @@ export async function starterPackApplyRefusal(
   }
 
   const q = packHeldVocabularyQuery(pack, tenantId);
-  const held = Number((await db.prepare(q.sql).bind(...q.params).first<{ held: number }>())?.held ?? 0);
+  const found = await db.prepare(q.sql).bind(...q.params).first<{ held: number; seeded: number }>();
+  const held = Number(found?.held ?? 0);
+  const seeded = Number(found?.seeded ?? 0) === 1;
   const total = packVocabularySlugs(pack).total;
-  if (!packLooksSeeded(held, total)) return null;
+  if (!packLooksSeeded(held, total) && !seeded) return null;
   return new StarterPackApplyRefused(
     'baseline_required',
-    `This organisation already holds ${held} of the ${total} document types, requirements and claims of the ${pack.label} pack, ` +
+    (packLooksSeeded(held, total)
+      ? `This organisation already holds ${held} of the ${total} document types, requirements and claims of the ${pack.label} pack, `
+      : 'This organisation was seeded from a starter pack before (rows a pack wrote are still here, or its setup recorded applying one), ') +
       'and has no record of having taken it: it was set up before pack versions existed. ' +
       'Applying the pack now would put back anything it removed on purpose and record every row as freshly written. ' +
       'Nothing was changed. An operator records what is there first, with bin/baseline-pack-ledger (it changes none of your rows); ' +
       'updates then come through Settings > Starter pack.',
-    { held, total },
+    { held, total, earlier_seeding: seeded },
   );
 }
 

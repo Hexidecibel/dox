@@ -78,6 +78,7 @@ function plan(over: Partial<PackRollForwardResponse> = {}): PackRollForwardRespo
     to_version: 2,
     ledgered: true,
     up_to_date: false,
+    needs_attention: true,
     summary: SUMMARY,
     not_applied: [],
     plan_fingerprint: 'fp-of-this-plan',
@@ -156,6 +157,8 @@ describe('StarterPackSettings', () => {
 
     await waitFor(() => expect(rollForward).toHaveBeenCalledWith({ tenantId: 't1', pack: 'fsqa', dryRun: true }));
     expect(await screen.findByText('This is a preview. Nothing has been changed.')).toBeInTheDocument();
+    // A conflict and a looser sharing rule are waiting on a person, and the page says so.
+    expect(screen.getByTestId('pack-needs-attention')).toBeInTheDocument();
 
     const updates = within(screen.getByTestId('group-update'));
     expect(updates.getByText('Pack Size')).toBeInTheDocument();

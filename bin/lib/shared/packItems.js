@@ -22,6 +22,7 @@ var packItems_exports = {};
 __export(packItems_exports, {
   PACK_ITEM_KINDS: () => PACK_ITEM_KINDS,
   PACK_KIND_SPECS: () => PACK_KIND_SPECS,
+  PACK_ROW_ID_PREFIXES: () => PACK_ROW_ID_PREFIXES,
   canonicalJson: () => canonicalJson,
   inlineSql: () => inlineSql,
   isPackItemKind: () => isPackItemKind,
@@ -712,11 +713,40 @@ function heldVocabulary(q, pack, tenantId) {
     JSON.stringify(v.claim_types)
   );
 }
+function seedEvidence(q, pack, tenantId) {
+  const v = packVocabularySlugs(pack);
+  const like = (table, prefix, column, values) => q.add(
+    `EXISTS (SELECT 1 FROM ${table} WHERE tenant_id = ? AND id LIKE '${prefix}\\_%' ESCAPE '\\' AND ${column} IN (SELECT value FROM json_each(?)))`,
+    tenantId,
+    JSON.stringify(values)
+  );
+  q.add(`((NOT EXISTS (SELECT 1 FROM tenant_packs WHERE tenant_id = ?) AND (`, tenantId);
+  like("document_types", "dt", "slug", v.document_types);
+  q.add(" OR ");
+  like("requirements", "req", "slug", v.requirements);
+  q.add(" OR ");
+  like("claim_types", "clm", "slug", v.claim_types);
+  q.add(" OR ");
+  like("spec_tests", "spt", "name", pack.spec_tests.map((t) => t.name));
+  q.add(
+    `)) OR EXISTS (SELECT 1 FROM tenant_setup_runs WHERE tenant_id = ? AND json_extract(applied, '$.pack.name') = ?))`,
+    tenantId,
+    pack.pack
+  );
+}
+var PACK_ROW_ID_PREFIXES = {
+  document_type: "dt_",
+  requirement: "req_",
+  claim_type: "clm_",
+  spec_test: "spt_"
+};
 function packHeldVocabularyQuery(pack, tenantId) {
   const q = new Sql();
   q.add("SELECT ");
   heldVocabulary(q, pack, tenantId);
-  q.add(" AS held");
+  q.add(" AS held, ");
+  seedEvidence(q, pack, tenantId);
+  q.add(" AS seeded");
   return { sql: q.text, params: q.params };
 }
 function packLooksSeeded(held, total) {
@@ -735,7 +765,8 @@ function packTenantStamp(pack, ctx) {
     pack.pack
   );
   heldVocabulary(q, pack, ctx.tenantId);
-  q.add(` * 2 < ?`, Math.max(packVocabularySlugs(pack).total, 1));
+  q.add(` * 2 < ? AND NOT `, Math.max(packVocabularySlugs(pack).total, 1));
+  seedEvidence(q, pack, ctx.tenantId);
   return { section: "ledger", sql: q.text, params: q.params };
 }
 function packApplyStatements(pack, ctx) {
@@ -778,6 +809,7 @@ function packContentForHash(pack) {
 0 && (module.exports = {
   PACK_ITEM_KINDS,
   PACK_KIND_SPECS,
+  PACK_ROW_ID_PREFIXES,
   canonicalJson,
   inlineSql,
   isPackItemKind,

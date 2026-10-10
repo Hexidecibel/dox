@@ -931,12 +931,65 @@ function heldVocabulary(q: Sql, pack: PackLike, tenantId: string): void {
   );
 }
 
-/** `SELECT <held> AS held` -- for the callers that explain a refusal in words. */
+/**
+ * EVIDENCE OF AN EARLIER SEEDING, whatever fraction of the pack is left. A SQL
+ * boolean, true when the organisation has NO pack record of any kind and
+ *
+ *   holds a row AT ONE OF THIS PACK'S KEYS WHOSE ID HAS THE SHAPE A PACK GIVES
+ *   the rows it inserts (`dt_...`, `req_...`, `clm_...`, `spt_...`): a row a
+ *   person makes through the portal has a random hex id, never one of these; or
+ *
+ *   has a setup run that RECORDED APPLYING this pack (`applied.pack.name`). A
+ *   run that merely chose a pack and has not applied it is not evidence.
+ *
+ * The 50% bar alone (`packLooksSeeded`) let the MOST diverged legacy
+ * organisation through: one that had deleted every requirement and claim type
+ * still held the pack's document types, under half the vocabulary, and an apply
+ * re-seeded it. The id shape does not care how much is left.
+ *
+ * "No pack record of any kind" because two packs can share a slug (both ship a
+ * W-9): an organisation on one pack, taking a second, holds a pack-shaped id at
+ * a slug the second also uses, and that is not evidence about the second.
+ */
+function seedEvidence(q: Sql, pack: PackLike, tenantId: string): void {
+  const v = packVocabularySlugs(pack);
+  const like = (table: string, prefix: string, column: string, values: string[]) =>
+    q.add(
+      `EXISTS (SELECT 1 FROM ${table} WHERE tenant_id = ? AND id LIKE '${prefix}\\_%' ESCAPE '\\' AND ${column} IN (SELECT value FROM json_each(?)))`,
+      tenantId,
+      JSON.stringify(values),
+    );
+  q.add(`((NOT EXISTS (SELECT 1 FROM tenant_packs WHERE tenant_id = ?) AND (`, tenantId);
+  like('document_types', 'dt', 'slug', v.document_types);
+  q.add(' OR ');
+  like('requirements', 'req', 'slug', v.requirements);
+  q.add(' OR ');
+  like('claim_types', 'clm', 'slug', v.claim_types);
+  q.add(' OR ');
+  like('spec_tests', 'spt', 'name', pack.spec_tests.map((t) => t.name));
+  q.add(
+    `)) OR EXISTS (SELECT 1 FROM tenant_setup_runs WHERE tenant_id = ? AND json_extract(applied, '$.pack.name') = ?))`,
+    tenantId,
+    pack.pack,
+  );
+}
+
+/** The id prefixes `seedEvidence` reads, for the baseline's JavaScript twin. */
+export const PACK_ROW_ID_PREFIXES: Partial<Record<PackItemKind, string>> = {
+  document_type: 'dt_',
+  requirement: 'req_',
+  claim_type: 'clm_',
+  spec_test: 'spt_',
+};
+
+/** `SELECT <held> AS held, <evidence> AS seeded` -- for the callers that explain a refusal in words. */
 export function packHeldVocabularyQuery(pack: PackLike, tenantId: string): { sql: string; params: PackValue[] } {
   const q = new Sql();
   q.add('SELECT ');
   heldVocabulary(q, pack, tenantId);
-  q.add(' AS held');
+  q.add(' AS held, ');
+  seedEvidence(q, pack, tenantId);
+  q.add(' AS seeded');
   return { sql: q.text, params: q.params };
 }
 
@@ -957,7 +1010,10 @@ export function packLooksSeeded(held: number, total: number): boolean {
  * It is the first statement of an apply and every other statement requires it
  * (`SAME_VERSION`). So an organisation that holds the pack's rows and has no
  * record -- one seeded before migration 0141 and never baselined -- gets no
- * stamp, and therefore NOTHING: no row, no ledger entry. Without this, applying
+ * stamp, and therefore NOTHING: no row, no ledger entry. "Holds the pack's
+ * rows" is two tests, either of which is enough: at least half the vocabulary
+ * by slug (`packLooksSeeded`), or ANY evidence of an earlier seeding however
+ * little is left (`seedEvidence`). Without this, applying
  * to such an organisation re-inserted what it had deleted on purpose and
  * ledgered every row as if the apply had just written it, which is exactly the
  * guess a baseline exists to avoid. `bin/baseline-pack-ledger` is its way in.
@@ -980,8 +1036,10 @@ export function packTenantStamp(pack: PackLike, ctx: PackApplyContext): PackStat
     pack.pack,
   );
   heldVocabulary(q, pack, ctx.tenantId);
-  // Integer form of `packLooksSeeded`: stamped only while held * 2 < total.
-  q.add(` * 2 < ?`, Math.max(packVocabularySlugs(pack).total, 1));
+  // Integer form of `packLooksSeeded`: stamped only while held * 2 < total --
+  // and only with no evidence at all of an earlier seeding.
+  q.add(` * 2 < ? AND NOT `, Math.max(packVocabularySlugs(pack).total, 1));
+  seedEvidence(q, pack, ctx.tenantId);
   return { section: 'ledger', sql: q.text, params: q.params };
 }
 

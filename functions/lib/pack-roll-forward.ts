@@ -62,6 +62,7 @@ import {
 } from '../../shared/packItems';
 import {
   planPackRollForward,
+  packPlanNeedsAttention,
   type PackAccept,
   type PackCurrentRow,
   type PackLedgerEntry,
@@ -300,8 +301,11 @@ export async function runPackRollForward(
     if (!a || typeof a !== 'object' || !isPackItemKind(a.kind) || typeof a.key !== 'string' || !a.key) {
       throw new BadRequestError('accept must be a list of { kind, key, field? } naming items of this pack');
     }
-    if (a.field !== undefined && a.field !== null && typeof a.field !== 'string') {
-      throw new BadRequestError('accept[].field must be a column name');
+    // A whole-item accept is an explicit shape (no `field`, or null). An empty
+    // string is neither a column nor that shape, so it is refused rather than
+    // read as "the whole item".
+    if (a.field !== undefined && a.field !== null && (typeof a.field !== 'string' || a.field.trim() === '')) {
+      throw new BadRequestError('accept[].field must be a column name; leave it out to take the whole item');
     }
   }
 
@@ -373,9 +377,13 @@ export async function runPackRollForward(
     to_version: plan.to_version,
     ledgered: fromVersion !== null,
     up_to_date: plan.summary.writes === 0 && plan.from_version === plan.to_version,
+    needs_attention: packPlanNeedsAttention(plan),
     summary: plan.summary,
     items: reportable(plan).map(viewOf),
-    not_applied: [],
+    // What `accept` asked for and the plan will not do: said on the dry run too.
+    not_applied: plan.items.flatMap((i) =>
+      (i.refused ?? []).map((r) => ({ kind: i.kind, key: i.key, label: i.label, reason: r.reason, detail: r.detail })),
+    ),
     plan_fingerprint: fingerprint,
   };
   if (opts.dryRun) return response;
@@ -390,7 +398,7 @@ export async function runPackRollForward(
   for (const kind of PACK_ITEM_KINDS) {
     for (const row of rows[kind]) rowsById.set(`${kind}\u0000${row.row_id}`, row);
   }
-  const notApplied: PackRollForwardResponse['not_applied'] = [];
+  const notApplied: PackRollForwardResponse['not_applied'] = [...response.not_applied];
   const skipLedger = new Set<PackPlanItem>();
 
   // ---- 1. new items ------------------------------------------------------

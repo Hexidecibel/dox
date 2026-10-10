@@ -270,7 +270,11 @@ describe('the comparison is one rule in SQL and in JavaScript', () => {
     const stamp = inlineSql(rows[0]);
     expect(stamp).toMatch(/^INSERT OR IGNORE INTO tenant_packs .* WHERE NOT EXISTS \(SELECT 1 FROM tenant_packs/);
     expect(stamp).toContain(`json_each('["vendor-form"]')`);
-    expect(stamp).toMatch(/\* 2 < 3;$/);
+    expect(stamp).toMatch(/\* 2 < 3 AND NOT \(\(NOT EXISTS \(SELECT 1 FROM tenant_packs WHERE tenant_id = 't1'\)/);
+    // ...and that shows no evidence of an earlier seeding, however little is left:
+    // a row at a pack key under a pack-shaped id, or a setup run that applied the pack.
+    expect(stamp).toContain(`id LIKE 'dt\\_%' ESCAPE '\\'`);
+    expect(stamp).toContain(`json_extract(applied, '$.pack.name') = 'mini'`);
     // Every other statement of an apply -- row or ledger entry -- writes only
     // for an organisation ON RECORD as being on this version. No record (never
     // stamped: already seeded, never baselined) or another version: nothing.

@@ -35,7 +35,7 @@
 
 'use strict';
 
-const { packItems, PACK_KIND_SPECS, PACK_ITEM_KINDS, sqlLiteral } = require('./shared/packItems.js');
+const { packItems, PACK_KIND_SPECS, PACK_ITEM_KINDS, PACK_ROW_ID_PREFIXES, sqlLiteral } = require('./shared/packItems.js');
 const { packFieldDiff } = require('./shared/packRollForward.js');
 
 /** The three vocabularies an organisation's pack is recognised by. */
@@ -124,27 +124,62 @@ function planBaseline(pack, rows, existing = []) {
  * @returns {{ pack: string|null, reason: string, scores: Array<{pack:string, held:number, of:number, share:number}> }}
  */
 function inferPack(packs, rows) {
-  const slugs = {};
-  for (const kind of VOCABULARY_KINDS) slugs[kind] = new Set((rows[kind] || []).map((r) => String(r.natural_key)));
+  // natural key -> row id, per kind. A supplier's own document type is not a
+  // pack row and counts for nothing (as in the apply gate).
+  const held = {};
+  for (const kind of [...VOCABULARY_KINDS, 'spec_test']) {
+    held[kind] = new Map(
+      (rows[kind] || [])
+        .filter((r) => !(kind === 'document_type' && r.supplier_id !== null && r.supplier_id !== undefined))
+        .map((r) => [String(r.natural_key), String(r.row_id)]),
+    );
+  }
 
   const scores = packs
     .map((pack) => {
-      let held = 0;
+      let heldCount = 0;
       let of = 0;
+      // Rows at this pack's keys whose id has the shape a pack gives the rows
+      // it inserts: evidence of an earlier seeding however little is left. The
+      // JavaScript twin of `seedEvidence` in shared/packItems.ts.
+      let seededIds = 0;
       for (const item of packItems(pack)) {
+        const prefix = PACK_ROW_ID_PREFIXES[item.kind];
+        if (!prefix) continue;
+        const id = held[item.kind].get(item.natural);
+        if (id !== undefined && id.startsWith(prefix)) seededIds += 1;
         if (!VOCABULARY_KINDS.includes(item.kind)) continue;
         of += 1;
-        if (slugs[item.kind].has(item.natural)) held += 1;
+        if (id !== undefined) heldCount += 1;
       }
-      return { pack: pack.pack, held, of, share: of === 0 ? 0 : held / of };
+      return { pack: pack.pack, held: heldCount, of, share: of === 0 ? 0 : heldCount / of, seeded_ids: seededIds };
     })
     .sort((a, b) => b.share - a.share || a.pack.localeCompare(b.pack));
 
+  // Under the bar by share, but carrying a pack's ids: the organisation was
+  // seeded and has since diverged a long way. The same organisation the apply
+  // gate refuses, so the baseline must be able to take it in.
+  const byEvidence = () => {
+    const withIds = scores.filter((s) => s.seeded_ids > 0).sort((a, b) => b.seeded_ids - a.seeded_ids);
+    if (withIds.length === 0) return null;
+    if (withIds.length > 1 && withIds[0].seeded_ids === withIds[1].seeded_ids) return null;
+    const s = withIds[0];
+    return {
+      pack: s.pack,
+      reason: `${s.seeded_ids} of its rows carry the ids this pack gives the rows it writes (it now holds only ${s.held} of ${s.of} of the pack's document types, requirements and claims)`,
+      scores,
+    };
+  };
+
   const best = scores[0];
   if (!best || best.held === 0) {
+    const evidence = byEvidence();
+    if (evidence) return evidence;
     return { pack: null, reason: 'holds no item of any pack', scores };
   }
   if (best.share < MIN_PACK_OVERLAP) {
+    const evidence = byEvidence();
+    if (evidence) return evidence;
     return {
       pack: null,
       reason: `holds only ${best.held} of ${best.of} items of its closest pack ("${best.pack}"), under the ${Math.round(MIN_PACK_OVERLAP * 100)}% needed to call it that pack`,

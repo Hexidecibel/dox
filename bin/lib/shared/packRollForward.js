@@ -23,6 +23,7 @@ __export(packRollForward_exports, {
   PackVersionBehindError: () => PackVersionBehindError,
   packFieldDiff: () => packFieldDiff,
   packPlanIsNoOp: () => packPlanIsNoOp,
+  packPlanNeedsAttention: () => packPlanNeedsAttention,
   planPackRollForward: () => planPackRollForward,
   samePackValue: () => samePackValue
 });
@@ -616,7 +617,16 @@ function planPackRollForward(input) {
           slug: String(row.natural_key),
           active: row.active !== 0,
           supplier_scoped: true
-        }
+        },
+        // Ticked anyway: said, never silently dropped.
+        ...acceptAll.has(id) ? {
+          refused: [
+            {
+              reason: "supplier_scoped",
+              detail: "One supplier's own document type holds this slug. An update never writes to it and cannot add the pack's type beside it."
+            }
+          ]
+        } : {}
       });
       resolved.set(id, "waiting");
       continue;
@@ -668,19 +678,19 @@ function planPackRollForward(input) {
       }
     }
     let nameTwin;
-    if (VOCABULARY_KINDS.includes(item.kind)) {
-      const rename = fields.find((f) => f.field === "name" && f.action === "update");
-      if (rename) {
-        const wanted = conceptKey(String(rename.target ?? ""));
-        nameTwin = (input.rows[item.kind] ?? []).find(
-          (r) => String(r.row_id) !== rowId && wanted !== "" && (conceptKey(String(r.name ?? "")) === wanted || conceptKey(String(r.natural_key)) === wanted)
-        );
-        if (nameTwin) {
-          rename.action = "keep";
-          rename.reason = "duplicate_name";
-        }
+    const refused = [];
+    const nameField = VOCABULARY_KINDS.includes(item.kind) ? fields.find((f) => f.field === "name") : void 0;
+    if (nameField) {
+      const wanted = conceptKey(String(nameField.target ?? ""));
+      nameTwin = (input.rows[item.kind] ?? []).find(
+        (r) => String(r.row_id) !== rowId && wanted !== "" && (conceptKey(String(r.name ?? "")) === wanted || conceptKey(String(r.natural_key)) === wanted)
+      );
+      if (nameTwin && nameField.action === "update") {
+        nameField.action = "keep";
+        nameField.reason = "duplicate_name";
       }
     }
+    const nameBlocked = !!nameTwin;
     for (const group of spec.groups) {
       const members = fields.filter((f) => group.includes(f.field));
       if (members.some((f) => f.action !== "update")) {
@@ -702,10 +712,18 @@ function planPackRollForward(input) {
     }
     for (const f of fields) {
       if (accepted.has(f.field) && (f.action === "keep" || f.action === "customised")) {
+        if (f.field === "name" && nameBlocked) {
+          refused.push({
+            reason: "duplicate_name",
+            detail: `"${nameTwin.name}" (${nameTwin.natural_key}) already has that name. Rename one of them on its own screen.`
+          });
+          continue;
+        }
         f.action = "update";
         f.reason = "accepted";
       }
     }
+    const showTwin = !!nameTwin && (nameField.action === "keep" || refused.length > 0);
     if (item.kind === "document_type") {
       for (const f of fields) {
         if (f.field !== "sharing_rule" || f.action !== "update") continue;
@@ -754,7 +772,8 @@ function planPackRollForward(input) {
       news: outcome !== "unchanged",
       fields,
       ...updates.length > 0 ? { row_update: { set, guard } } : {},
-      ...nameTwin ? {
+      ...refused.length > 0 ? { refused } : {},
+      ...showTwin && nameTwin ? {
         conflict: {
           id: String(nameTwin.row_id),
           name: String(nameTwin.name ?? ""),
@@ -824,6 +843,11 @@ function planPackRollForward(input) {
   }
   return { pack: pack.pack, from_version: input.fromVersion, to_version: pack.version, items: out, summary };
 }
+function packPlanNeedsAttention(plan) {
+  return plan.items.some(
+    (i) => i.outcome === "conflict" || i.conflict !== void 0 || i.fields.some((f) => f.action === "needs_person" || f.reason === "duplicate_name")
+  );
+}
 function packPlanIsNoOp(plan) {
   return plan.summary.writes === 0 && plan.from_version === plan.to_version;
 }
@@ -832,6 +856,7 @@ function packPlanIsNoOp(plan) {
   PackVersionBehindError,
   packFieldDiff,
   packPlanIsNoOp,
+  packPlanNeedsAttention,
   planPackRollForward,
   samePackValue
 });

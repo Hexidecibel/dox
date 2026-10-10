@@ -273,13 +273,15 @@ describe('m1: a pack rename does not land on a name another row has', () => {
     // It is offered again next time (it is not filed as the organisation's own edit)...
     const again = await roll(v2);
     expect(again.items.find((i) => i.key === 'pack-size')!.fields[0]).toMatchObject({ action: 'keep', reason: 'duplicate_name' });
-    // ...and a person may say yes.
-    await roll(v2, [{ kind: 'requirement', key: 'pack-size', field: 'name' }]);
-    const renamed = await db
+    // ...and ticking it is NOT the way two rows come to share a name (round 2,
+    // C-186): it is reported as not applied, and the row keeps its name.
+    const ticked = await roll(v2, [{ kind: 'requirement', key: 'pack-size', field: 'name' }]);
+    expect(ticked.not_applied).toEqual([expect.objectContaining({ key: 'pack-size', reason: 'duplicate_name' })]);
+    const still = await db
       .prepare(`SELECT name FROM requirements WHERE tenant_id = ? AND slug = 'pack-size'`)
       .bind(tenantId)
       .first<{ name: string }>();
-    expect(renamed!.name).toBe('Case Configuration');
+    expect(still!.name).toBe(v1.requirements.find((r) => r.slug === 'pack-size')!.name);
   });
 });
 

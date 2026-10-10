@@ -8107,8 +8107,15 @@ export interface PackRollForwardResponse {
   from_version: number | null;
   to_version: number;
   ledgered: boolean;
-  /** Nothing to do: the same version, and no row or ledger entry would change. */
+  /** Nothing to WRITE: the same version, and no row or ledger entry would change. */
   up_to_date: boolean;
+  /**
+   * Something is waiting on a PERSON: a conflict, a rename held because the
+   * name is taken, a sharing rule only a person may loosen. Separate from
+   * `up_to_date` on purpose -- a plan can have nothing left to write and still
+   * not be finished.
+   */
+  needs_attention: boolean;
   summary: PackPlanSummary;
   /** Every item with something to say. Items the pack and the row agree on are left out. */
   items: PackRollForwardItem[];

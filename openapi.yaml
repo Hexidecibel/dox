@@ -5389,7 +5389,10 @@ paths:
                   from_version: { type: integer, nullable: true }
                   to_version: { type: integer }
                   ledgered: { type: boolean }
-                  up_to_date: { type: boolean }
+                  up_to_date: { type: boolean, description: Nothing would be written. }
+                  needs_attention:
+                    type: boolean
+                    description: Something waits on a person (a conflict, a held rename, a sharing rule only a person may loosen). Independent of up_to_date.
                   summary: { type: object }
                   items:
                     type: array
@@ -5426,7 +5429,8 @@ paths:
                         kind: { type: string }
                         key: { type: string }
                         label: { type: string }
-                        reason: { type: string, description: changed_since_preview / not_inserted / invalid_limit }
+                        reason: { type: string, description: changed_since_preview / not_inserted / invalid_limit / duplicate_name / supplier_scoped }
+                        detail: { type: string }
                   plan_fingerprint:
                     type: string
                     description: Send back as `fingerprint` to apply this plan.
@@ -5436,7 +5440,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '403':
-          description: "`signed_in_admin_required`: an API key may preview and may not apply"
+          description: "`signed_in_admin_required`: an apply needs a signed-in session; an API key may only preview"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

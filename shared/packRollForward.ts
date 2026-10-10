@@ -195,6 +195,11 @@ export interface PackPlanItem {
   item?: PackItem;
   /** For `insert`: a gone item a person asked for back. Its old ledger entry is replaced. */
   restores?: boolean;
+  /**
+   * What a person asked for with `accept` and the plan will not do, with why.
+   * Carried into the response's `not_applied`, on a dry run as well.
+   */
+  refused?: Array<{ reason: string; detail?: string }>;
   /** Columns the row is updated to, guarded by the values they were planned against. */
   row_update?: { set: Record<string, PackValue>; guard: Record<string, PackValue> };
   /** The ledger entry this run writes, or null when the entry already says it. */
@@ -506,6 +511,17 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
           active: row.active !== 0,
           supplier_scoped: true,
         },
+        // Ticked anyway: said, never silently dropped.
+        ...(acceptAll.has(id)
+          ? {
+              refused: [
+                {
+                  reason: 'supplier_scoped',
+                  detail: "One supplier's own document type holds this slug. An update never writes to it and cannot add the pack's type beside it.",
+                },
+              ],
+            }
+          : {}),
       });
       resolved.set(id, 'waiting');
       continue;
@@ -576,26 +592,32 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
       }
     }
 
-    // A RENAME MUST NOT LAND ON A NAME ANOTHER ROW HAS. The routes refuse a
-    // person renaming into another concept's name; a pack doing it would leave
-    // two active rows with one name. Held for a person, who may still say yes.
+    // NO RENAME LANDS ON A NAME ANOTHER ROW HAS -- whoever chose it. The
+    // routes refuse a person renaming into another concept's name; here the
+    // pack's name for this row is compared with every OTHER row of the
+    // vocabulary. If it is taken: a rename the planner would have made is held
+    // (`keep`, `duplicate_name`), and one a person asks for with `accept` is
+    // NOT applied either -- it is reported in `refused`, because ticking a box
+    // must not be the way two active rows come to share a name. A person who
+    // really wants that renames the row on its own screen, where the override
+    // is asked for and audited.
     let nameTwin: PackCurrentRow | undefined;
-    if (VOCABULARY_KINDS.includes(item.kind)) {
-      const rename = fields.find((f) => f.field === 'name' && f.action === 'update');
-      if (rename) {
-        const wanted = conceptKey(String(rename.target ?? ''));
-        nameTwin = (input.rows[item.kind] ?? []).find(
-          (r) =>
-            String(r.row_id) !== rowId &&
-            wanted !== '' &&
-            (conceptKey(String(r.name ?? '')) === wanted || conceptKey(String(r.natural_key)) === wanted),
-        );
-        if (nameTwin) {
-          rename.action = 'keep';
-          rename.reason = 'duplicate_name';
-        }
+    const refused: Array<{ reason: string; detail?: string }> = [];
+    const nameField = VOCABULARY_KINDS.includes(item.kind) ? fields.find((f) => f.field === 'name') : undefined;
+    if (nameField) {
+      const wanted = conceptKey(String(nameField.target ?? ''));
+      nameTwin = (input.rows[item.kind] ?? []).find(
+        (r) =>
+          String(r.row_id) !== rowId &&
+          wanted !== '' &&
+          (conceptKey(String(r.name ?? '')) === wanted || conceptKey(String(r.natural_key)) === wanted),
+      );
+      if (nameTwin && nameField.action === 'update') {
+        nameField.action = 'keep';
+        nameField.reason = 'duplicate_name';
       }
     }
+    const nameBlocked = !!nameTwin;
 
     // One setting, several columns: it moves whole or not at all.
     for (const group of spec.groups) {
@@ -622,10 +644,21 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
     }
     for (const f of fields) {
       if (accepted.has(f.field) && (f.action === 'keep' || f.action === 'customised')) {
+        if (f.field === 'name' && nameBlocked) {
+          refused.push({
+            reason: 'duplicate_name',
+            detail: `"${nameTwin!.name}" (${nameTwin!.natural_key}) already has that name. Rename one of them on its own screen.`,
+          });
+          continue;
+        }
         f.action = 'update';
         f.reason = 'accepted';
       }
     }
+    // The other row is shown wherever the pack's name is on offer: a rename
+    // held or kept. (A name the organisation simply keeps as its own, with
+    // nothing new from the pack, is not a conflict until somebody asks for it.)
+    const showTwin = !!nameTwin && (nameField!.action === 'keep' || refused.length > 0);
 
     // A looser sharing rule is a person's act, never a roll-forward's.
     if (item.kind === 'document_type') {
@@ -683,7 +716,8 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
       news: outcome !== 'unchanged',
       fields,
       ...(updates.length > 0 ? { row_update: { set, guard } } : {}),
-      ...(nameTwin
+      ...(refused.length > 0 ? { refused } : {}),
+      ...(showTwin && nameTwin
         ? {
             conflict: {
               id: String(nameTwin.row_id),
@@ -760,6 +794,21 @@ export function planPackRollForward(input: PackRollForwardInput): PackRollForwar
   }
 
   return { pack: pack.pack, from_version: input.fromVersion, to_version: pack.version, items: out, summary };
+}
+
+/**
+ * True when something in the plan is waiting on a PERSON: a conflict, a rename
+ * held because the name is taken, a sharing rule only a person may loosen.
+ * Deliberately separate from "nothing to write": a plan can have nothing left
+ * to write and still not be finished.
+ */
+export function packPlanNeedsAttention(plan: PackRollForwardPlan): boolean {
+  return plan.items.some(
+    (i) =>
+      i.outcome === 'conflict' ||
+      i.conflict !== undefined ||
+      i.fields.some((f) => f.action === 'needs_person' || f.reason === 'duplicate_name'),
+  );
 }
 
 /** True when the plan would change nothing: no row, no ledger entry, no version. */

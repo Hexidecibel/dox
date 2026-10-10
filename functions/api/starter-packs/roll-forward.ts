@@ -73,7 +73,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, tenantId);
 
     const dryRun = body.dry_run !== false;
-    if (!dryRun && context.data.authMethod === 'api_key') {
+    // REQUIRES a signed-in session, rather than refusing a key: an auth method
+    // this route has never heard of, or none on record, is refused too.
+    if (!dryRun && context.data.authMethod !== 'jwt') {
       return json(
         {
           error:

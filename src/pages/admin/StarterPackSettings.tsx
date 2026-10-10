@@ -308,6 +308,7 @@ export function StarterPackSettings() {
     );
   }
 
+  // "Nothing to write" disables Apply; it does not mean finished (see needs_attention).
   const nothingToApply = preview !== null && preview.up_to_date && accept.size === 0;
 
   return (
@@ -410,9 +411,30 @@ export function StarterPackSettings() {
             </Typography>
           </Box>
 
-          {preview.up_to_date && (
+          {preview.up_to_date && !preview.needs_attention && (
             <Alert severity="success">
               Nothing to do: everything the pack wrote is either as the pack has it or as you changed it.
+            </Alert>
+          )}
+          {preview.needs_attention && (
+            <Alert severity="warning" data-testid="pack-needs-attention">
+              <AlertTitle>Something here needs a person</AlertTitle>
+              {preview.up_to_date ? 'Nothing will be changed by applying, but this update is not finished: ' : ''}
+              an item below collides with something you already have, or would loosen a sharing rule. An update never
+              settles those for you. They are listed under "Kept as you have them", "Needs a person" and "You may
+              already have these under another name".
+            </Alert>
+          )}
+          {preview.not_applied.length > 0 && (
+            <Alert severity="warning">
+              <AlertTitle>Asked for, and will not be done</AlertTitle>
+              <Box component="ul" sx={{ my: 0, pl: 2 }}>
+                {preview.not_applied.map((n) => (
+                  <li key={`${n.kind}:${n.key}:${n.reason}`}>
+                    <strong>{n.label}</strong>: {n.detail ?? n.reason}
+                  </li>
+                ))}
+              </Box>
             </Alert>
           )}
 
@@ -474,19 +496,28 @@ export function StarterPackSettings() {
                             : field.reason === 'setting'
                               ? 'Part of a setting you changed; it moves whole or not at all.'
                               : field.reason === 'duplicate_name'
-                                ? `You already have "${item.conflict?.name}" (${item.conflict?.slug}) under that name. Tick to rename this one anyway.`
+                                ? `You already have "${item.conflict?.name}" (${item.conflict?.slug}) under that name, so this one is not renamed. Rename one of them on its own screen if you want both.`
                                 : 'It already differed when this organisation was recorded.'}
+                          {field.field === 'name' && field.reason !== 'duplicate_name' && item.conflict && (
+                            <>
+                              {' '}The pack's name is already used by "{item.conflict.name}" ({item.conflict.slug}), so it cannot be
+                              taken here.
+                            </>
+                          )}
                         </Typography>
                       </TableCell>
                       <TableCell><Value value={field.current} /></TableCell>
                       <TableCell><Value value={field.target} /></TableCell>
                       <TableCell>
-                        <Checkbox
-                          checked={accept.has(acceptKey(a))}
-                          onChange={() => toggle(a)}
-                          disabled={busy}
-                          inputProps={{ 'aria-label': `Use the pack's ${fieldLabel(field.field)} for ${item.label}` }}
-                        />
+                        {/* A name another row already holds is never taken by a tick. */}
+                        {!(field.field === 'name' && item.conflict) && (
+                          <Checkbox
+                            checked={accept.has(acceptKey(a))}
+                            onChange={() => toggle(a)}
+                            disabled={busy}
+                            inputProps={{ 'aria-label': `Use the pack's ${fieldLabel(field.field)} for ${item.label}` }}
+                          />
+                        )}
                       </TableCell>
                     </TableRow>
                   );
