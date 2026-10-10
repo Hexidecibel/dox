@@ -1,6 +1,11 @@
 {
-  "current": "2.33.0",
+  "current": "2.34.0",
   "versions": [
+    {
+      "version": "2.34.0",
+      "date": "2026-10-10",
+      "title": "What an outside page is allowed to show"
+    },
     {
       "version": "2.33.0",
       "date": "2026-10-09",
