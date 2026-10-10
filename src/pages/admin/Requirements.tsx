@@ -57,6 +57,12 @@ import {
   Edit as EditIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import {
+  DuplicateConceptNotice,
+  slugStaysNote,
+  useDuplicateConcept,
+  type DuplicateConceptChoice,
+} from '../../components/DuplicateConceptNotice';
 import type { ApiRequirement } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
@@ -81,6 +87,7 @@ export function Requirements() {
   const [requirements, setRequirements] = useState<ApiRequirement[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const { duplicate, clear: clearDuplicate, capture: captureDuplicate } = useDuplicateConcept();
 
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -142,6 +149,7 @@ export function Requirements() {
     setFormDescription('');
     setFormTenantId(isSuperAdmin ? tenantFilter || selectedTenantId || '' : user?.tenant_id || '');
     setFormScope('supplier');
+    clearDuplicate();
     setDialogOpen(true);
   };
 
@@ -152,6 +160,7 @@ export function Requirements() {
     setFormDescription(req.description || '');
     setFormTenantId(req.tenant_id);
     setFormScope(normalizeRequirementScope(req.scope));
+    clearDuplicate();
     setDialogOpen(true);
   };
 
@@ -176,7 +185,7 @@ export function Requirements() {
     };
   }, [editing, formScope, scopeChanged]);
 
-  const handleSave = async () => {
+  const handleSave = async (choice: DuplicateConceptChoice = {}) => {
     setSaving(true);
     setError('');
     try {
@@ -186,6 +195,7 @@ export function Requirements() {
           checklist: formChecklist.trim() || null,
           description: formDescription.trim() || null,
           ...(scopeChanged ? { scope: formScope } : {}),
+          ...(choice.allow_duplicate ? { allow_duplicate: true } : {}),
         });
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
@@ -200,11 +210,15 @@ export function Requirements() {
           description: formDescription.trim() || undefined,
           tenant_id: tenantId,
           scope: formScope,
+          ...choice,
         });
       }
+      clearDuplicate();
       setDialogOpen(false);
       load();
     } catch (err) {
+      // "You already have this" is answered inside the dialog, with the choices.
+      if (captureDuplicate(err)) return;
       setError(err instanceof Error ? err.message : 'Failed to save requirement');
     } finally {
       setSaving(false);
@@ -459,6 +473,15 @@ export function Requirements() {
           </IconButton>
         </DialogTitle>
         <DialogContent dividers>
+          {duplicate && (
+            <DuplicateConceptNotice
+              state={duplicate}
+              renaming={!!editing}
+              busy={saving}
+              onChoose={(choice) => handleSave(choice)}
+              onDismiss={clearDuplicate}
+            />
+          )}
           {isSuperAdmin && !editing && (
             <FormControl fullWidth sx={{ mt: 1, mb: 2 }}>
               <InputLabel>Tenant</InputLabel>
@@ -567,8 +590,7 @@ export function Requirements() {
           />
           {editing && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
-              Renaming is safe — the internal slug ({editing.slug}) stays the same, so starter-pack
-              re-runs and imports keep matching this row.
+              {slugStaysNote(editing.slug)}
             </Typography>
           )}
         </DialogContent>
@@ -578,7 +600,7 @@ export function Requirements() {
           </Button>
           <Button
             variant="contained"
-            onClick={handleSave}
+            onClick={() => handleSave()}
             disabled={!formName.trim() || saving || (!editing && isSuperAdmin && !formTenantId)}
           >
             {saving ? 'Saving…' : editing ? 'Save Changes' : 'Add Requirement'}

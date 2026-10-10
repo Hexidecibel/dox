@@ -48,8 +48,12 @@
 # + vocabulary only (e.g. when an existing super_admin will scope into it).
 #
 # Re-running is safe: tenant rows upsert, and every pack statement is
-# INSERT OR IGNORE against a deterministic id derived from the tenant slug, so
-# nothing duplicates and admin edits to a seeded row are preserved.
+# INSERT OR IGNORE with its rows found by (tenant_id, slug), so nothing
+# duplicates, a row somebody made by hand under a pack slug is adopted, and
+# admin edits to a seeded row are preserved. The pack also records what it
+# wrote (pack_applied_items / tenant_packs, migration 0141 -- the target
+# database needs that migration first). It never UPDATES a row and never moves
+# a tenant to a newer pack version: that is POST /api/starter-packs/roll-forward.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -117,7 +121,26 @@ if [ -n "$PACK" ]; then
   PACK_SQL=$(mktemp); trap 'rm -f "$PACK_SQL"' EXIT
   node bin/render-starter-pack --pack "$PACK" --tenant-id "$TID" --tenant-slug "$SLUG" > "$PACK_SQL"
   d1_file "$PACK_SQL" >/dev/null
-  echo "  '$PACK' pack seeded: $PACK_SUMMARY (INSERT OR IGNORE)"
+  # The pack's SQL writes NOTHING for a tenant that is on another version of the
+  # pack, or that already holds the pack's rows with no record of taking it
+  # (seeded before migration 0141). It cannot say so itself, so ask.
+  ON_RECORD=$(npx wrangler d1 execute "$DB" $REMOTE --json --command \
+    "SELECT COUNT(*) AS n FROM tenant_packs WHERE tenant_id = '$TID' AND pack = '$PACK'" 2>/dev/null \
+    | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const m=s.match(/\"n\"\s*:\s*(\d+)/);console.log(m?m[1]:'?')})")
+  if [ "$ON_RECORD" = "?" ] || [ -z "$ON_RECORD" ]; then
+    # The pack's SQL ran, and whether it seeded anything could not be read back.
+    # Saying "seeded" here would be a guess; say what failed and stop.
+    echo "  '$PACK' pack: COULD NOT CONFIRM. The pack's statements ran, but reading tenant_packs afterwards failed," >&2
+    echo "  so it is not known whether this tenant was seeded. Check with:" >&2
+    echo "    bin/baseline-pack-ledger --tenant $TID ${REMOTE}" >&2
+    exit 1
+  elif [ "$ON_RECORD" = "0" ]; then
+    echo "  '$PACK' pack NOT SEEDED: this tenant already holds the pack's rows and has no pack record."
+    echo "  It was set up before pack versions existed. Record it first:"
+    echo "    bin/baseline-pack-ledger --tenant $TID ${REMOTE}"
+  else
+    echo "  '$PACK' pack seeded: $PACK_SUMMARY (INSERT OR IGNORE; a tenant already on the pack is left as it is)"
+  fi
 fi
 
 # ---- Optional org_admin user ----

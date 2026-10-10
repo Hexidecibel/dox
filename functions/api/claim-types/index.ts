@@ -14,6 +14,8 @@ import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { isValidClaimSubjectGrain, CLAIM_SUBJECT_GRAINS } from '../../lib/registry';
 import { slugifyVocab, resolveWriteTenant } from '../../lib/registry-vocab';
+import { checkDuplicateConcept, duplicateConceptResponse } from '../../lib/duplicate-concepts';
+import type { DuplicateConcept } from '../../../shared/duplicateConcept';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -101,7 +103,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 /**
  * POST /api/claim-types
  * Fields: name (required), slug, description, subject_grain, sort_order,
- * tenant_id (super_admin only).
+ * tenant_id (super_admin only). The slug is set ONCE (decision C-154).
+ *
+ * A name that duplicates a claim type the organisation already has, or an item
+ * of its starter pack, is refused with 409 `duplicate_concept`;
+ * `allow_duplicate: true` / `adopt_pack_slug: true` as on /api/requirements.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -115,6 +121,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       subject_grain?: string;
       sort_order?: number;
       tenant_id?: string;
+      /** Create it although it duplicates an existing row or a pack item. Audited. */
+      allow_duplicate?: boolean;
+      /** The name is a pack item this organisation lacks: create it under the pack's slug. */
+      adopt_pack_slug?: boolean;
     };
 
     if (!body.name || !body.name.trim()) {
@@ -133,7 +143,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const name = sanitizeString(body.name);
     const description = body.description ? sanitizeString(body.description) : null;
-    const slug = slugifyVocab(body.slug || name);
+    let slug = slugifyVocab(body.slug || name);
     if (!slug) return json({ error: 'Could not generate a valid slug from name' }, 400);
 
     const existing = await context.env.DB.prepare(
@@ -143,6 +153,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       .first();
     if (existing) {
       return json({ error: 'A claim type with this slug already exists for this tenant' }, 409);
+    }
+
+    // The same concept under a second slug is what a starter-pack update can
+    // never reach (shared/duplicateConcept.ts).
+    let duplicateOverride: DuplicateConcept | null = null;
+    let adoptedPackSlug: string | null = null;
+    const dup = await checkDuplicateConcept(context.env.DB, {
+      tenantId,
+      vocabulary: 'claim_types',
+      name,
+      slug,
+    });
+    if (dup) {
+      if (dup.duplicate.source === 'pack' && body.adopt_pack_slug === true) {
+        slug = dup.duplicate.slug;
+        adoptedPackSlug = slug;
+      } else if (body.allow_duplicate === true) {
+        duplicateOverride = dup.duplicate;
+      } else {
+        return duplicateConceptResponse(dup);
+      }
     }
 
     const id = generateId();
@@ -162,7 +193,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'claim_type_created',
       'claim_type',
       id,
-      JSON.stringify({ name, slug, subject_grain: subjectGrain }),
+      JSON.stringify({
+        name,
+        slug,
+        subject_grain: subjectGrain,
+        ...(adoptedPackSlug ? { adopted_pack_slug: adoptedPackSlug } : {}),
+        ...(duplicateOverride ? { duplicate_override: duplicateOverride } : {}),
+      }),
       getClientIp(context.request),
     );
 

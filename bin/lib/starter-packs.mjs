@@ -77,25 +77,26 @@
  */
 
 /**
- * The ONE renewal-default helper, reached through the compiled mirror.
+ * The ONE applier, reached through the compiled mirror.
  *
- * THE EXCEPTION TO "DEPENDENCY-FREE", AND WHY. Everything else this file needs
- * from `shared/` is restated here and pinned by a test (see SPEC_OPERATORS
- * below). That trade is fine for a validation rule: a drifted copy rejects a
- * limit somebody has to fix anyway. It is NOT fine here. This is the name match
- * that decides whether a Certificate of Analysis renews at all, and a drifted
- * copy produces SILENCE — the CLI seeds a tenant whose COA type renews
- * annually, mails its owner about a certificate that does not renew, and
- * nothing fails. So the CLI calls the same function the API and the in-portal
- * applier call, via `bin/lib/shared/renewalPeriod.js` — the same generated
- * mirror `bin/process-worker` already uses for `shared/specCheck.ts`, rebuilt
- * by `npm run build:worker-shared`.
+ * THE EXCEPTION TO "DEPENDENCY-FREE", AND WHY. Everything the VALIDATION half
+ * of this file needs from `shared/` is restated here and pinned by a test (see
+ * SPEC_OPERATORS below). That trade is fine for a validation rule: a drifted
+ * copy rejects a limit somebody has to fix anyway. It is NOT fine for what a
+ * pack WRITES. The renewal default is the name match that decides whether a
+ * Certificate of Analysis renews at all, and a drifted copy produces SILENCE --
+ * the CLI seeds a tenant whose COA type renews annually, mails its owner about
+ * a certificate that does not renew, and nothing fails.
+ *
+ * So the CLI does not write a pack itself any more. `shared/packItems.ts`
+ * (compiled to `bin/lib/shared/packItems.js` by `npm run build:worker-shared`,
+ * the same way `bin/process-worker` gets `shared/specCheck.ts`) holds what a
+ * pack writes and the SQL that writes it -- including the renewal default
+ * (`defaultRenewalSettingForTypeName`) and the sharing rule
+ * (`defaultSharingRuleForTypeName`), bundled into that one file. The in-portal
+ * applier binds the same statements this file inlines.
  */
-import { defaultRenewalSettingForTypeName } from './shared/renewalPeriod.js';
-// The sharing rule a type starts with (migration 0137) -- the compiled mirror
-// of shared/sharingRule.ts, for the same reason as the line above: the name
-// match exists once, and this file must not grow a second copy of it.
-import { defaultSharingRuleForTypeName } from './shared/sharingRule.js';
+import { packApplyStatements, inlineSql, packRowId } from './shared/packItems.js';
 
 /** Grains a claim_types.subject_grain may declare (mirrors functions/lib/registry.ts). */
 export const SUBJECT_GRAINS = ['any', 'tenant', 'product', 'supplier', 'facility'];
@@ -175,6 +176,17 @@ export function sqlQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+/**
+ * The key two names are compared on to decide whether they are the same
+ * concept: lower-cased, everything that is not a letter or a digit removed.
+ * A MIRROR of `conceptKey` in shared/duplicateConcept.ts (this file's
+ * validation half imports nothing); tests/unit/duplicateConcept.test.ts pins
+ * the two equal.
+ */
+export function conceptKey(text) {
+  return String(text ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 function itemSlug(item, index, kind) {
   const slug = slugify(item.slug || item.name || '');
   if (!slug) {
@@ -192,6 +204,16 @@ export function normalizePack(pack, options = {}) {
   if (!pack || typeof pack !== 'object') throw new Error('Pack must be a JSON object');
   if (!pack.pack || !/^[a-z0-9-]+$/.test(pack.pack)) {
     throw new Error('Pack must have a "pack" name matching [a-z0-9-]+');
+  }
+
+  // `version` (migration 0141). A positive whole number, REQUIRED: it is what
+  // an organisation's ledger records and what the roll-forward compares, so a
+  // pack without one could be applied and then never updated -- the state this
+  // whole mechanism exists to end.
+  if (!Number.isInteger(pack.version) || pack.version < 1) {
+    throw new Error(
+      'Pack must have a "version": a positive whole number. Start at 1 and raise it by one every time the pack changes.',
+    );
   }
 
   /** Non-fatal notes for the CLI. See the `modules` section for why they exist. */
@@ -214,6 +236,23 @@ export function normalizePack(pack, options = {}) {
 
   const normalize = (items, kind) => {
     const seen = new Set();
+    // Every way this vocabulary can name one of its items -> the item that
+    // owns it. `aliases` exist so the portal can recognise a second copy of a
+    // concept ("Spec Sheet" for "Specification Sheet"); a spelling that two
+    // items both claim would make that answer ambiguous, so it is an error
+    // here rather than a coin toss at a customer's screen.
+    const claimed = new Map();
+    const claim = (text, owner, what) => {
+      const key = conceptKey(text);
+      if (!key) return;
+      const by = claimed.get(key);
+      if (by && by !== owner) {
+        throw new Error(
+          `${kind} "${owner}": ${what} "${text}" is already a name, slug or alias of "${by}" — one spelling may only mean one item`,
+        );
+      }
+      claimed.set(key, owner);
+    };
     return (items || []).map((item, i) => {
       if (!item || typeof item !== 'object') throw new Error(`${kind}[${i}] must be an object`);
       if (!item.name || !String(item.name).trim()) {
@@ -222,10 +261,29 @@ export function normalizePack(pack, options = {}) {
       const slug = itemSlug(item, i, kind);
       if (seen.has(slug)) throw new Error(`${kind}: duplicate slug "${slug}"`);
       seen.add(slug);
+      const name = String(item.name).trim();
+      if (item.aliases !== undefined && !Array.isArray(item.aliases)) {
+        throw new Error(`${kind} "${name}": "aliases" must be an array of other names for the same thing`);
+      }
+      claim(name, name, 'the name');
+      claim(slug, name, 'the slug');
+      const aliases = [];
+      const seenAlias = new Set([conceptKey(name), conceptKey(slug)]);
+      for (const raw of item.aliases || []) {
+        const text = String(raw ?? '').trim();
+        if (!text) throw new Error(`${kind} "${name}": "aliases" holds an empty entry`);
+        const key = conceptKey(text);
+        if (!key) throw new Error(`${kind} "${name}": alias "${text}" has no letters or digits in it`);
+        if (seenAlias.has(key)) continue;
+        seenAlias.add(key);
+        claim(text, name, 'the alias');
+        aliases.push(text);
+      }
       return {
         ...item,
-        name: String(item.name).trim(),
+        name,
         slug,
+        aliases,
         description: item.description ? String(item.description) : null,
         sort_order: Number.isFinite(item.sort_order) ? item.sort_order : (i + 1) * 10,
       };
@@ -508,6 +566,7 @@ export function normalizePack(pack, options = {}) {
 
   return {
     pack: pack.pack,
+    version: pack.version,
     label: pack.label || pack.pack,
     description: pack.description || '',
     document_types: documentTypes,
@@ -745,165 +804,42 @@ function normalizeModules(raw, moduleKeys, warnings) {
 }
 
 /**
- * Deterministic row ids, derived from the tenant slug + the vocabulary slug.
+ * The id a pack gives a row IT inserts. Re-exported from the shared compiler.
  *
- * This is what makes seeding idempotent in the strong sense: re-running
- * `bin/create-tenant` against an existing tenant produces the SAME ids, so the
- * INSERT OR IGNORE hits the primary key and no duplicate-by-another-name row
- * is created — and any edits an admin made to the seeded row survive.
+ * It used to be how every row was FOUND as well, which made the tenant slug
+ * half of every foreign key: a hand-made row under a pack slug, or a tenant
+ * whose slug had been changed, failed the whole batch. Rows are now found by
+ * `(tenant_id, slug)`; see the header of shared/packItems.ts.
  */
-export function packRowId(prefix, tenantSlug, slug) {
-  return `${prefix}_${slugify(tenantSlug)}_${slug}`;
-}
+export { packRowId };
 
 /**
  * Compile a pack into an array of SQL statements for one tenant.
  *
- * Every statement is INSERT OR IGNORE: seeding is additive and never clobbers
- * what a tenant has already customized.
+ * THE SAME STATEMENTS THE PORTAL RUNS. `packApplyStatements`
+ * (shared/packItems.ts, reached through its compiled mirror) writes each one
+ * once with `?` placeholders; `functions/lib/starter-packs.ts` binds them and
+ * this function inlines them. Until migration 0141 this was a second
+ * hand-written copy of the portal's applier.
+ *
+ * Every row statement is INSERT OR IGNORE: applying is additive and never
+ * clobbers what a tenant has customized. They are followed by one ledger
+ * statement per item (`pack_applied_items`: what the pack wrote, and which
+ * columns of an adopted row were not the pack's) and the version stamp
+ * (`tenant_packs`) -- which is what lets a LATER pack version reach this
+ * tenant through a roll-forward instead of a repair script.
  */
 export function packToStatements(rawPack, { tenantId, tenantSlug, moduleKeys } = {}) {
   if (!tenantId) throw new Error('tenantId is required');
   if (!tenantSlug) throw new Error('tenantSlug is required');
   const pack = normalizePack(rawPack, { moduleKeys });
-  const statements = [];
-
-  // owner_labels FIRST: it has no `id`, its primary key is
-  // (tenant_id, owner_key), and `document_types.default_owner` below is only
-  // meaningful once the department it names exists as a row.
-  for (const owner of pack.owner_labels) {
-    statements.push(
-      `INSERT OR IGNORE INTO owner_labels (tenant_id, owner_key, owner_label) VALUES (` +
-        `${sqlQuote(tenantId)}, ${sqlQuote(owner.owner_key)}, ${sqlQuote(owner.label)});`,
-    );
-  }
-
-  for (const dt of pack.document_types) {
-    // The renewal setting (0096/0097) is NAMED, not left to the column
-    // defaults — see the import of `defaultRenewalSettingForTypeName` at the
-    // top of this file for why, and why it is the SAME function the API and
-    // the in-portal applier call rather than a third copy of the name match.
-    const renewal = defaultRenewalSettingForTypeName(dt.name);
-    statements.push(
-      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window, sharing_rule) VALUES (` +
-        `${sqlQuote(packRowId('dt', tenantSlug, dt.slug))}, ${sqlQuote(tenantId)}, ` +
-        `${sqlQuote(dt.name)}, ${sqlQuote(dt.slug)}, ${sqlQuote(dt.description)}, ` +
-        `${sqlQuote(dt.owner)}, ${sqlQuote(renewal.policy)}, ${sqlNum(renewal.interval_months)}, ` +
-        `${renewal.window ? sqlQuote(JSON.stringify(renewal.window)) : 'NULL'}, ` +
-        `${sqlQuote(defaultSharingRuleForTypeName(dt.name))});`,
-    );
-  }
-
-  for (const req of pack.requirements) {
-    statements.push(
-      `INSERT OR IGNORE INTO requirements (id, tenant_id, slug, name, description, checklist, sort_order, scope) VALUES (` +
-        `${sqlQuote(packRowId('req', tenantSlug, req.slug))}, ${sqlQuote(tenantId)}, ` +
-        `${sqlQuote(req.slug)}, ${sqlQuote(req.name)}, ${sqlQuote(req.description)}, ` +
-        `${sqlQuote(req.checklist)}, ${req.sort_order}, ${sqlQuote(req.scope)});`,
-    );
-  }
-
-  for (const ct of pack.claim_types) {
-    statements.push(
-      `INSERT OR IGNORE INTO claim_types (id, tenant_id, slug, name, description, subject_grain, sort_order) VALUES (` +
-        `${sqlQuote(packRowId('clm', tenantSlug, ct.slug))}, ${sqlQuote(tenantId)}, ` +
-        `${sqlQuote(ct.slug)}, ${sqlQuote(ct.name)}, ${sqlQuote(ct.description)}, ` +
-        `${sqlQuote(ct.subject_grain)}, ${ct.sort_order});`,
-    );
-  }
-
-  for (const rule of pack.claim_rules) {
-    const claimId = packRowId('clm', tenantSlug, rule.claim);
-    const emit = (reqSlug, isRequired) => {
-      const reqId = packRowId('req', tenantSlug, reqSlug);
-      statements.push(
-        `INSERT OR IGNORE INTO claim_type_requirements (id, tenant_id, claim_type_id, requirement_id, is_required, notes) VALUES (` +
-          `${sqlQuote(`ctr_${slugify(tenantSlug)}_${rule.claim}__${reqSlug}`)}, ${sqlQuote(tenantId)}, ` +
-          `${sqlQuote(claimId)}, ${sqlQuote(reqId)}, ${isRequired}, ${sqlQuote(rule.notes)});`,
-      );
-    };
-    for (const reqSlug of rule.requires) emit(reqSlug, 1);
-    for (const reqSlug of rule.recommends) emit(reqSlug, 0);
-  }
-
-  // ── document_type_requirements (0100) — the default that makes an approved
-  // document mean something. Emitted AFTER both document_types and
-  // requirements, because both FKs must already resolve.
-  for (const dt of pack.document_types) {
-    for (const reqSlug of dt.closes) {
-      statements.push(
-        `INSERT OR IGNORE INTO document_type_requirements (id, tenant_id, document_type_id, requirement_id, source) VALUES (` +
-          `${sqlQuote(`dtr_${slugify(tenantSlug)}_${dt.slug}__${reqSlug}`)}, ${sqlQuote(tenantId)}, ` +
-          `${sqlQuote(packRowId('dt', tenantSlug, dt.slug))}, ${sqlQuote(packRowId('req', tenantSlug, reqSlug))}, ` +
-          `'pack');`,
-      );
-    }
-  }
-
-  // ── document_type_extraction_instructions (0098). INSERT OR IGNORE is safe
-  // here for a reason worth stating: that table carries
-  // UNIQUE(tenant_id, document_type_id), so a re-run collides on the deterministic
-  // id AND on the unique key, and guidance somebody has edited is never
-  // overwritten. bin/seed-doctype-extraction-instructions upserts instead —
-  // that script is a deliberate, per-tenant act with an --overwrite flag; a
-  // pack re-run is not.
-  for (const dt of pack.document_types) {
-    if (!dt.extraction_instructions) continue;
-    statements.push(
-      `INSERT OR IGNORE INTO document_type_extraction_instructions (id, tenant_id, document_type_id, instructions) VALUES (` +
-        `${sqlQuote(packRowId('dtei', tenantSlug, dt.slug))}, ${sqlQuote(tenantId)}, ` +
-        `${sqlQuote(packRowId('dt', tenantSlug, dt.slug))}, ${sqlQuote(dt.extraction_instructions)});`,
-    );
-  }
-
-  // ── spec_tests (0084) — the synonym map, then ONE tenant-wide limit each.
-  for (const test of pack.spec_tests) {
-    statements.push(
-      `INSERT OR IGNORE INTO spec_tests (id, tenant_id, name, aliases, default_unit, notes) VALUES (` +
-        `${sqlQuote(packRowId('spt', tenantSlug, test.slug))}, ${sqlQuote(tenantId)}, ` +
-        `${sqlQuote(test.name)}, ${sqlQuote(JSON.stringify(test.aliases))}, ` +
-        `${sqlQuote(test.default_unit)}, ${sqlQuote(test.notes)});`,
-    );
-  }
-  for (const test of pack.spec_tests) {
-    if (!test.limit) continue;
-    const l = test.limit;
-    // supplier_id / document_type_id / product_id are written as literal NULLs
-    // rather than omitted, because "all three scope columns NULL" IS the claim:
-    // 0086's expression index COALESCEs them to '' so exactly one tenant-wide
-    // default can exist per analyte, and resolveSpecLimits scores an all-NULL
-    // row as the least specific match — the one that works on day one, before a
-    // single supplier or product is configured.
-    statements.push(
-      `INSERT OR IGNORE INTO spec_limits (id, tenant_id, spec_test_id, supplier_id, document_type_id, product_id, ` +
-        `operator, value_min, value_max, unit, severity, criticality, notes) VALUES (` +
-        `${sqlQuote(packRowId('spl', tenantSlug, test.slug))}, ${sqlQuote(tenantId)}, ` +
-        `${sqlQuote(packRowId('spt', tenantSlug, test.slug))}, NULL, NULL, NULL, ` +
-        `${sqlQuote(l.operator)}, ${sqlNum(l.value_min)}, ${sqlNum(l.value_max)}, ` +
-        `${sqlQuote(l.unit || test.default_unit)}, ${sqlQuote(l.severity)}, ` +
-        `${sqlQuote(l.criticality)}, ${sqlQuote(l.notes)});`,
-    );
-  }
-
-  // ── tenant_modules (0099). Both sides are written, not just the off ones: a
-  // missing row means "whatever the code default is today", and the pack made a
-  // DECISION. Writing it down means a later change to a module's
-  // `defaultEnabled` cannot silently move a tenant that was seeded from a pack
-  // which had already answered the question.
-  for (const key of pack.modules.default_on) {
-    statements.push(
-      `INSERT OR IGNORE INTO tenant_modules (tenant_id, module_key, enabled) VALUES (` +
-        `${sqlQuote(tenantId)}, ${sqlQuote(key)}, 1);`,
-    );
-  }
-  for (const key of pack.modules.default_off) {
-    statements.push(
-      `INSERT OR IGNORE INTO tenant_modules (tenant_id, module_key, enabled) VALUES (` +
-        `${sqlQuote(tenantId)}, ${sqlQuote(key)}, 0);`,
-    );
-  }
-
-  return statements;
+  const { rows, ledger } = packApplyStatements(pack, {
+    tenantId,
+    tenantSlug,
+    source: 'cli',
+    appliedBy: null,
+  });
+  return [...rows, ...ledger].map(inlineSql);
 }
 
 /** Same as packToStatements, joined into a single .sql file body. */
@@ -912,7 +848,9 @@ export function packToSql(rawPack, opts) {
   const header = [
     `-- Starter pack: ${pack.pack} (${pack.label})`,
     `-- Tenant: ${opts.tenantId} (${opts.tenantSlug})`,
-    '-- Generated by bin/render-starter-pack. Every statement is INSERT OR IGNORE.',
+    `-- Pack version: ${pack.version}`,
+    '-- Generated by bin/render-starter-pack. Every row statement is INSERT OR IGNORE;',
+    '-- the pack_applied_items / tenant_packs statements after them are the ledger (0141).',
     ...(pack.requirement_packets.length
       ? [
           `-- ${pack.requirement_packets.length} requirement packet(s) are DEFINED by this pack and`,

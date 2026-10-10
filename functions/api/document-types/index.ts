@@ -14,6 +14,8 @@ import {
 } from '../../../shared/renewalPeriod';
 import { parseRenewalIntervalMonths, parseTypeRenewalWindowSetting } from '../../lib/registry';
 import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
+import { checkDuplicateConcept, duplicateConceptResponse } from '../../lib/duplicate-concepts';
+import type { DuplicateConcept } from '../../../shared/duplicateConcept';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -126,7 +128,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
  * Create a new document type. org_admin+ for their own tenant.
  * super_admin can specify tenant_id.
  * Fields: name (required), description (optional), tenant_id (optional, super_admin only).
- * Auto-generates slug from name.
+ * Auto-generates slug from name; THE SLUG NEVER CHANGES AFTERWARDS (decision C-154).
+ *
+ * A name that is another name for something the organisation already has, or
+ * for an item of its starter pack, is refused with 409 `duplicate_concept`
+ * naming it (shared/duplicateConcept.ts). Repeat the request with
+ * `allow_duplicate: true` to create a separate type anyway (audited), or with
+ * `adopt_pack_slug: true` to create the pack's item under the pack's slug.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -149,6 +157,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       sharing_rule?: string | null;
       /** Days of renewal-alert warning for this type; null/absent = inherit (0111). */
       renewal_alert_lead_days?: number | null;
+      /** Create it although it duplicates an existing type or a pack item. Audited. */
+      allow_duplicate?: boolean;
+      /** The name is a pack item this organisation lacks: create it under the pack's slug. */
+      adopt_pack_slug?: boolean;
     };
 
     if (!body.name || !body.name.trim()) {
@@ -175,7 +187,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     body.name = sanitizeString(body.name);
     if (body.description) body.description = sanitizeString(body.description);
 
-    const slug = slugify(body.name);
+    let slug = slugify(body.name);
 
     if (!slug) {
       return new Response(
@@ -196,6 +208,28 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         JSON.stringify({ error: 'A document type with this slug already exists for this tenant' }),
         { status: 409, headers: { 'Content-Type': 'application/json' } }
       );
+    }
+
+    // The same concept under a second slug is what a starter-pack update can
+    // never reach. Asked AFTER the exact-slug check above, so an identical name
+    // keeps the answer it always had.
+    let duplicateOverride: DuplicateConcept | null = null;
+    let adoptedPackSlug: string | null = null;
+    const dup = await checkDuplicateConcept(context.env.DB, {
+      tenantId,
+      vocabulary: 'document_types',
+      name: body.name,
+      slug,
+    });
+    if (dup) {
+      if (dup.duplicate.source === 'pack' && body.adopt_pack_slug === true) {
+        slug = dup.duplicate.slug;
+        adoptedPackSlug = slug;
+      } else if (body.allow_duplicate === true) {
+        duplicateOverride = dup.duplicate;
+      } else {
+        return duplicateConceptResponse(dup);
+      }
     }
 
     // Optional supplier ownership. Empty string is treated as "global" (NULL).
@@ -337,6 +371,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         renewal_window: renewalWindow,
         renewal_alert_lead_days: renewalAlertLeadDays,
         sharing_rule: sharingRule,
+        ...(adoptedPackSlug ? { adopted_pack_slug: adoptedPackSlug } : {}),
+        ...(duplicateOverride ? { duplicate_override: duplicateOverride } : {}),
       }),
       getClientIp(context.request)
     );

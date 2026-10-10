@@ -299,17 +299,19 @@ describe('requirements — read / update / delete', () => {
     expect(res.body.requirement.slug).toBe(before!.slug);
   });
 
-  it('rejects a slug change that collides', async () => {
+  it('rejects ANY slug change: a slug is set once (decision C-154)', async () => {
+    // This used to be "rejects a slug change that collides" (409). There is no
+    // slug change to collide any more: the field is refused outright, in words.
     const a = await seedRequirement(seed.tenantId, 'Collide A');
     const aSlug = (await db.prepare('SELECT slug FROM requirements WHERE id = ?').bind(a).first<any>())!.slug;
     const b = await seedRequirement(seed.tenantId, 'Collide B');
-    const res = await call(reqPut, {
-      user: orgAdmin,
-      method: 'PUT',
-      params: { id: b },
-      body: { slug: aSlug },
-    });
-    expect(res.status).toBe(409);
+    const bSlug = (await db.prepare('SELECT slug FROM requirements WHERE id = ?').bind(b).first<any>())!.slug;
+    for (const slug of [aSlug, 'somewhere-free']) {
+      const res = await call(reqPut, { user: orgAdmin, method: 'PUT', params: { id: b }, body: { slug } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('slug_immutable');
+    }
+    expect((await db.prepare('SELECT slug FROM requirements WHERE id = ?').bind(b).first<any>())!.slug).toBe(bSlug);
   });
 
   it('rejects an empty update', async () => {

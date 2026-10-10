@@ -12,6 +12,12 @@
 export interface StarterPackDocumentType {
   name: string;
   slug: string;
+  /**
+   * Other names for the same thing ("Spec Sheet"). Nothing is written from
+   * them: they are how a second copy of the concept is recognised and refused
+   * (shared/duplicateConcept.ts).
+   */
+  aliases: string[];
   description: string | null;
   sort_order: number;
   /** A declared `owner_labels` label, or null. Becomes `document_types.default_owner`. */
@@ -25,6 +31,12 @@ export interface StarterPackDocumentType {
 export interface StarterPackRequirement {
   name: string;
   slug: string;
+  /**
+   * Other names for the same thing ("Spec Sheet"). Nothing is written from
+   * them: they are how a second copy of the concept is recognised and refused
+   * (shared/duplicateConcept.ts).
+   */
+  aliases: string[];
   description: string | null;
   checklist: string | null;
   sort_order: number;
@@ -35,6 +47,12 @@ export interface StarterPackRequirement {
 export interface StarterPackClaimType {
   name: string;
   slug: string;
+  /**
+   * Other names for the same thing ("Spec Sheet"). Nothing is written from
+   * them: they are how a second copy of the concept is recognised and refused
+   * (shared/duplicateConcept.ts).
+   */
+  aliases: string[];
   description: string | null;
   subject_grain: string;
   sort_order: number;
@@ -133,6 +151,13 @@ export interface StarterPackModules {
 
 export interface StarterPack {
   pack: string;
+  /**
+   * A positive whole number, raised by one whenever the pack changes
+   * (migration 0141). An organisation's ledger records the version it was
+   * seeded from; a higher one here is what "an update is available" means.
+   * tests/unit/starterPackVersions.test.ts pins version -> content hash.
+   */
+  version: number;
   label: string;
   description: string;
   document_types: StarterPackDocumentType[];
@@ -150,12 +175,14 @@ export interface StarterPack {
 export const STARTER_PACKS: Record<string, StarterPack> = {
   "finance": {
     "pack": "finance",
+    "version": 1,
     "label": "Financial Records",
     "description": "Minimal starter vocabulary for a financial-records tenant. Deliberately small and generic: it exists to prove the platform is aimed by configuration, not to guess at a client's retention schedule.",
     "document_types": [
       {
         "name": "Invoice",
         "slug": "invoice",
+        "aliases": [],
         "description": "Vendor or customer invoice.",
         "sort_order": 10,
         "owner": "Accounting",
@@ -165,6 +192,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Purchase Order",
         "slug": "purchase-order",
+        "aliases": [],
         "description": "Authorized purchase commitment.",
         "sort_order": 20,
         "owner": "Accounting",
@@ -174,6 +202,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Receipt",
         "slug": "receipt",
+        "aliases": [],
         "description": "Proof of payment.",
         "sort_order": 30,
         "owner": "Accounting",
@@ -183,6 +212,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Bank Statement",
         "slug": "bank-statement",
+        "aliases": [],
         "description": "Periodic statement from a financial institution.",
         "sort_order": 40,
         "owner": "Accounting",
@@ -192,6 +222,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Bank Reconciliation",
         "slug": "bank-reconciliation",
+        "aliases": [],
         "description": "Reconciliation of a bank statement to the ledger.",
         "sort_order": 50,
         "owner": "Accounting",
@@ -203,6 +234,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "General Ledger Export",
         "slug": "general-ledger-export",
+        "aliases": [],
         "description": "Ledger detail for a fiscal period.",
         "sort_order": 60,
         "owner": "Accounting",
@@ -214,6 +246,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Trial Balance",
         "slug": "trial-balance",
+        "aliases": [],
         "description": "Period-end trial balance.",
         "sort_order": 70,
         "owner": "Accounting",
@@ -225,6 +258,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Journal Entry Support",
         "slug": "journal-entry-support",
+        "aliases": [],
         "description": "Backup documentation for a manual journal entry.",
         "sort_order": 80,
         "owner": "Accounting",
@@ -236,6 +270,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Financial Statement",
         "slug": "financial-statement",
+        "aliases": [],
         "description": "Balance sheet, income statement or cash-flow statement.",
         "sort_order": 90,
         "owner": "Accounting",
@@ -247,6 +282,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Tax Return",
         "slug": "tax-return",
+        "aliases": [],
         "description": "Filed return for a tax period.",
         "sort_order": 100,
         "owner": "Tax",
@@ -258,6 +294,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Payroll Register",
         "slug": "payroll-register",
+        "aliases": [],
         "description": "Per-period payroll detail.",
         "sort_order": 110,
         "owner": "Accounting",
@@ -269,6 +306,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Fixed Asset Register",
         "slug": "fixed-asset-register",
+        "aliases": [],
         "description": "Asset listing with cost and accumulated depreciation.",
         "sort_order": 120,
         "owner": "Accounting",
@@ -280,6 +318,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "External Audit Report",
         "slug": "external-audit-report",
+        "aliases": [],
         "description": "Report issued by an outside auditor.",
         "sort_order": 130,
         "owner": "Tax",
@@ -291,6 +330,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Contract",
         "slug": "contract",
+        "aliases": [],
         "description": "Executed agreement with a counterparty.",
         "sort_order": 140,
         "owner": "Legal",
@@ -302,6 +342,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Insurance Policy",
         "slug": "insurance-policy",
+        "aliases": [],
         "description": "Policy document with coverage and term.",
         "sort_order": 150,
         "owner": "Risk",
@@ -313,6 +354,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Board Minutes",
         "slug": "board-minutes",
+        "aliases": [],
         "description": "Minutes recording board approvals.",
         "sort_order": 160,
         "owner": "Legal",
@@ -324,6 +366,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "W-9",
         "slug": "w-9",
+        "aliases": [],
         "description": "Counterparty tax identification form.",
         "sort_order": 170,
         "owner": "Accounting",
@@ -335,6 +378,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "1099",
         "slug": "1099",
+        "aliases": [],
         "description": "Information return issued to a contractor.",
         "sort_order": 180,
         "owner": "Tax",
@@ -346,6 +390,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Trial Balance on file",
         "slug": "trial-balance-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 10,
@@ -354,6 +399,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "General Ledger on file",
         "slug": "general-ledger-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 20,
@@ -362,6 +408,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Bank Reconciliations on file",
         "slug": "bank-reconciliations-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 30,
@@ -370,6 +417,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Financial Statements on file",
         "slug": "financial-statements-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 40,
@@ -378,6 +426,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Payroll Register on file",
         "slug": "payroll-register-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 50,
@@ -386,6 +435,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Fixed Asset Register on file",
         "slug": "fixed-asset-register-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 60,
@@ -394,6 +444,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Journal Entry Support on file",
         "slug": "journal-entry-support-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 70,
@@ -402,6 +453,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Board Approval on file",
         "slug": "board-approval-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Period Close",
         "sort_order": 80,
@@ -410,6 +462,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Tax Return on file",
         "slug": "tax-return-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Tax & Audit",
         "sort_order": 90,
@@ -418,6 +471,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "External Audit Report on file",
         "slug": "external-audit-report-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Tax & Audit",
         "sort_order": 100,
@@ -426,6 +480,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Counterparty W-9 on file",
         "slug": "counterparty-w9-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Counterparty",
         "sort_order": 110,
@@ -434,6 +489,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Executed Contract on file",
         "slug": "executed-contract-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Counterparty",
         "sort_order": 120,
@@ -442,6 +498,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Insurance Certificate on file",
         "slug": "insurance-certificate-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Counterparty",
         "sort_order": 130,
@@ -452,6 +509,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Externally Audited Period",
         "slug": "externally-audited",
+        "aliases": [],
         "description": "The document states the period was audited by an outside firm — the audit report itself then has to be on file.",
         "subject_grain": "tenant",
         "sort_order": 10
@@ -459,6 +517,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Reportable Contractor Payment",
         "slug": "reportable-contractor-payment",
+        "aliases": [],
         "description": "The document records a payment to a contractor that triggers information reporting — the counterparty W-9 has to be on file.",
         "subject_grain": "supplier",
         "sort_order": 20
@@ -565,12 +624,18 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
   },
   "fsqa": {
     "pack": "fsqa",
+    "version": 1,
     "label": "Food Safety & Quality Assurance",
     "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which requirements it CLOSES, and which claims OPEN new ones.",
     "document_types": [
       {
         "name": "Specification Sheet",
         "slug": "specification-sheet",
+        "aliases": [
+          "Spec Sheet",
+          "Product Specification",
+          "Product Spec Sheet"
+        ],
         "description": "Supplier product spec. Typically closes many requirements at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
         "sort_order": 10,
         "owner": "QA",
@@ -590,6 +655,10 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Certificate of Analysis",
         "slug": "certificate-of-analysis",
+        "aliases": [
+          "COA",
+          "C of A"
+        ],
         "description": "Lot-level test results for a specific shipment.",
         "sort_order": 20,
         "owner": "QA",
@@ -601,6 +670,11 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Safety Data Sheet",
         "slug": "safety-data-sheet",
+        "aliases": [
+          "SDS",
+          "MSDS",
+          "Material Safety Data Sheet"
+        ],
         "description": "SDS for chemicals and sanitation products.",
         "sort_order": 30,
         "owner": "QA",
@@ -612,6 +686,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "3rd Party Food Safety Audit Report",
         "slug": "3rd-party-food-safety-audit-report",
+        "aliases": [],
         "description": "The full audit REPORT — findings, non-conformances, corrective actions. A dated snapshot of an audit event: it does not 'expire', it is superseded by the next audit. Distinct from the certificate below.",
         "sort_order": 40,
         "owner": "Food Safety",
@@ -623,6 +698,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "3rd Party Audit Certificate",
         "slug": "3rd-party-audit-certificate",
+        "aliases": [],
         "description": "The one-page CERTIFICATE issued on passing the audit — scheme, grade, valid-through date. Hard expiry on that date, unlike the report it accompanies. Distinct from the report above.",
         "sort_order": 50,
         "owner": "Food Safety",
@@ -634,6 +710,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Organic Certificate",
         "slug": "organic-certificate",
+        "aliases": [],
         "description": "USDA/NOP organic certification for a product or facility.",
         "sort_order": 60,
         "owner": "QA",
@@ -645,6 +722,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Kosher Certificate",
         "slug": "kosher-certificate",
+        "aliases": [],
         "description": "Kosher certification letter.",
         "sort_order": 70,
         "owner": "QA",
@@ -656,6 +734,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Halal Certificate",
         "slug": "halal-certificate",
+        "aliases": [],
         "description": "Halal certification letter.",
         "sort_order": 80,
         "owner": "QA",
@@ -667,6 +746,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Gluten-Free Certificate",
         "slug": "gluten-free-certificate",
+        "aliases": [],
         "description": "Gluten-free certification or attestation.",
         "sort_order": 90,
         "owner": "QA",
@@ -678,6 +758,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Non-GMO Certificate",
         "slug": "non-gmo-certificate",
+        "aliases": [],
         "description": "Non-GMO Project verification or equivalent.",
         "sort_order": 100,
         "owner": "QA",
@@ -689,6 +770,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Animal Welfare Certificate",
         "slug": "animal-welfare-certificate",
+        "aliases": [],
         "description": "Certified Humane / Global Animal Partnership / equivalent.",
         "sort_order": 110,
         "owner": "QA",
@@ -700,6 +782,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Sustainability Certificate",
         "slug": "sustainability-certificate",
+        "aliases": [],
         "description": "Rainforest Alliance, Fair Trade, RSPO and similar.",
         "sort_order": 120,
         "owner": "QA",
@@ -711,6 +794,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Allergen Statement",
         "slug": "allergen-statement",
+        "aliases": [],
         "description": "Allergen declaration / matrix.",
         "sort_order": 130,
         "owner": "QA",
@@ -722,6 +806,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Nutritional Information",
         "slug": "nutritional-information",
+        "aliases": [],
         "description": "Nutrition panel data, typically per 100g.",
         "sort_order": 140,
         "owner": "QA",
@@ -733,6 +818,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Country of Origin Statement",
         "slug": "country-of-origin-statement",
+        "aliases": [],
         "description": "Origin attestation for a product.",
         "sort_order": 150,
         "owner": "QA",
@@ -744,6 +830,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Product Label",
         "slug": "product-label",
+        "aliases": [],
         "description": "Label artwork or a photo of the applied label.",
         "sort_order": 160,
         "owner": "QA",
@@ -756,6 +843,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Letter of Guarantee",
         "slug": "letter-of-guarantee",
+        "aliases": [],
         "description": "Continuing guarantee of compliance from the supplier.",
         "sort_order": 170,
         "owner": "QA",
@@ -767,6 +855,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Certificate of Insurance",
         "slug": "certificate-of-insurance",
+        "aliases": [],
         "description": "Supplier liability insurance, with limits and expiry.",
         "sort_order": 180,
         "owner": "Insurance",
@@ -778,6 +867,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "W-9",
         "slug": "w-9",
+        "aliases": [],
         "description": "Supplier tax identification form.",
         "sort_order": 190,
         "owner": "Accounting",
@@ -789,6 +879,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Business License",
         "slug": "business-license",
+        "aliases": [],
         "description": "The supplier's current business or operating license. Part of the universal baseline (rules table F7): owed by every approved supplier, whatever it sells or claims.",
         "sort_order": 200,
         "owner": "Purchasing",
@@ -800,6 +891,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "FDA Food Facility Registration",
         "slug": "fda-food-facility-registration",
+        "aliases": [],
         "description": "The supplier facility's FDA food facility registration. Renews inside a fixed window, October 1 to December 31 of every even-numbered year (21 CFR 1.230(b)), so it is due when the next window closes whatever date it prints (rules table G3). Part of the universal baseline (F7).",
         "sort_order": 210,
         "owner": "Food Safety",
@@ -811,6 +903,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "HACCP Plan",
         "slug": "haccp-plan",
+        "aliases": [],
         "description": "Hazard analysis and critical control point plan.",
         "sort_order": 220,
         "owner": "Food Safety",
@@ -822,6 +915,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Food Safety Plan",
         "slug": "food-safety-plan",
+        "aliases": [],
         "description": "Preventive controls / FSMA food safety plan.",
         "sort_order": 230,
         "owner": "Food Safety",
@@ -833,6 +927,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Food Defense Plan",
         "slug": "food-defense-plan",
+        "aliases": [],
         "description": "Intentional adulteration / food defense plan.",
         "sort_order": 240,
         "owner": "Food Safety",
@@ -844,6 +939,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Recall Program",
         "slug": "recall-program",
+        "aliases": [],
         "description": "Recall and traceability program, including mock recall results.",
         "sort_order": 250,
         "owner": "Food Safety",
@@ -855,6 +951,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Pest Control Program",
         "slug": "pest-control-program",
+        "aliases": [],
         "description": "Pest control program and service records.",
         "sort_order": 260,
         "owner": "Food Safety",
@@ -866,6 +963,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Sanitation Program",
         "slug": "sanitation-program",
+        "aliases": [],
         "description": "SSOPs and sanitation schedules.",
         "sort_order": 270,
         "owner": "Food Safety",
@@ -877,6 +975,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "GMP Self Audit",
         "slug": "gmp-self-audit",
+        "aliases": [],
         "description": "Internal good-manufacturing-practice self audit.",
         "sort_order": 280,
         "owner": "Food Safety",
@@ -888,6 +987,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Process Flow Diagram",
         "slug": "process-flow-diagram",
+        "aliases": [],
         "description": "Production process flow for the supplied product.",
         "sort_order": 290,
         "owner": "Food Safety",
@@ -901,6 +1001,10 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Specification Sheet on file",
         "slug": "spec-sheet",
+        "aliases": [
+          "Specification Sheet",
+          "Spec Sheet on file"
+        ],
         "description": "A current product specification is on file.",
         "checklist": "Product Specification",
         "sort_order": 10,
@@ -909,6 +1013,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Microbiological Limits",
         "slug": "micro-limits",
+        "aliases": [],
         "description": "Micro limits stated for the product.",
         "checklist": "Product Specification",
         "sort_order": 20,
@@ -917,6 +1022,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Pack Size / Case Configuration",
         "slug": "pack-size",
+        "aliases": [],
         "description": null,
         "checklist": "Product Specification",
         "sort_order": 30,
@@ -925,6 +1031,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "100g Nutritionals",
         "slug": "nutritionals-100g",
+        "aliases": [],
         "description": "Nutrition values per 100g.",
         "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 40,
@@ -933,6 +1040,10 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Allergen Matrix",
         "slug": "allergen-matrix",
+        "aliases": [
+          "Allergen Statement",
+          "Allergen Statement on file"
+        ],
         "description": "Allergen declaration covering the big-9.",
         "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 50,
@@ -941,6 +1052,10 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Country of Origin",
         "slug": "country-of-origin",
+        "aliases": [
+          "Country of Origin Statement",
+          "Country of Origin Statement on file"
+        ],
         "description": null,
         "checklist": "Product Specification",
         "sort_order": 60,
@@ -949,6 +1064,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "GTIN / UPC",
         "slug": "gtin",
+        "aliases": [],
         "description": null,
         "checklist": "Product Specification",
         "sort_order": 70,
@@ -957,6 +1073,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Shelf Life & Storage",
         "slug": "shelf-life",
+        "aliases": [],
         "description": null,
         "checklist": "Product Specification",
         "sort_order": 80,
@@ -965,6 +1082,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Ingredient Statement",
         "slug": "ingredient-statement",
+        "aliases": [],
         "description": null,
         "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 90,
@@ -973,6 +1091,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Certificate of Analysis on file",
         "slug": "coa-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Certificates of Analysis",
         "sort_order": 100,
@@ -981,6 +1100,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Safety Data Sheet on file",
         "slug": "sds-on-file",
+        "aliases": [],
         "description": "Required for chemicals and sanitation products.",
         "checklist": "Regulatory Registrations & Statements",
         "sort_order": 110,
@@ -989,6 +1109,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Letter of Guarantee on file",
         "slug": "letter-of-guarantee",
+        "aliases": [],
         "description": null,
         "checklist": "Commercial & Legal",
         "sort_order": 120,
@@ -997,6 +1118,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Certificate of Insurance on file",
         "slug": "certificate-of-insurance",
+        "aliases": [],
         "description": null,
         "checklist": "Commercial & Legal",
         "sort_order": 130,
@@ -1005,6 +1127,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "W-9 on file",
         "slug": "w9-on-file",
+        "aliases": [],
         "description": null,
         "checklist": "Commercial & Legal",
         "sort_order": 140,
@@ -1013,6 +1136,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Business License on file",
         "slug": "business-license",
+        "aliases": [],
         "description": "A current business or operating license. Universal baseline (F7): required of every approved supplier regardless of what it claims.",
         "checklist": "Commercial & Legal",
         "sort_order": 150,
@@ -1021,6 +1145,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "FDA Food Facility Registration on file",
         "slug": "fda-food-facility-registration",
+        "aliases": [],
         "description": "A current FDA food facility registration. Universal baseline (F7). Goes stale when the biennial renewal window closes (G3).",
         "checklist": "Regulatory Registrations & Statements",
         "sort_order": 160,
@@ -1029,6 +1154,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "3rd Party Audit REPORT on file",
         "slug": "third-party-audit-report",
+        "aliases": [],
         "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings.",
         "checklist": "Audit & Certification",
         "sort_order": 170,
@@ -1037,6 +1163,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "3rd Party Audit CERTIFICATE on file",
         "slug": "third-party-audit-certificate",
+        "aliases": [],
         "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking.",
         "checklist": "Audit & Certification",
         "sort_order": 180,
@@ -1045,6 +1172,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "HACCP Plan on file",
         "slug": "haccp-plan",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 190,
@@ -1053,6 +1181,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Food Safety Plan on file",
         "slug": "food-safety-plan",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 200,
@@ -1061,6 +1190,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Food Defense Plan on file",
         "slug": "food-defense-plan",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 210,
@@ -1069,6 +1199,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Recall Program on file",
         "slug": "recall-program",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 220,
@@ -1077,6 +1208,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Pest Control Program on file",
         "slug": "pest-control-program",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 230,
@@ -1085,6 +1217,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Sanitation Program on file",
         "slug": "sanitation-program",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 240,
@@ -1093,6 +1226,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "GMP Self Audit on file",
         "slug": "gmp-self-audit",
+        "aliases": [],
         "description": null,
         "checklist": "Audit & Certification",
         "sort_order": 250,
@@ -1101,6 +1235,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Process Flow Diagram on file",
         "slug": "process-flow-diagram",
+        "aliases": [],
         "description": null,
         "checklist": "Food Safety Plans & Programs",
         "sort_order": 260,
@@ -1109,6 +1244,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Product Label on file",
         "slug": "product-label",
+        "aliases": [],
         "description": null,
         "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 270,
@@ -1117,6 +1253,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Organic Certificate on file",
         "slug": "organic-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 280,
@@ -1125,6 +1262,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Kosher Certificate on file",
         "slug": "kosher-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 290,
@@ -1133,6 +1271,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Halal Certificate on file",
         "slug": "halal-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 300,
@@ -1141,6 +1280,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Gluten-Free Certificate on file",
         "slug": "gluten-free-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 310,
@@ -1149,6 +1289,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Non-GMO Certificate on file",
         "slug": "non-gmo-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 320,
@@ -1157,6 +1298,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Animal Welfare Certificate on file",
         "slug": "animal-welfare-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 330,
@@ -1165,6 +1307,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Sustainability Certificate on file",
         "slug": "sustainability-certificate",
+        "aliases": [],
         "description": null,
         "checklist": "Claim Substantiation",
         "sort_order": 340,
@@ -1175,6 +1318,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Organic",
         "slug": "organic",
+        "aliases": [],
         "description": "The document states the product is organic.",
         "subject_grain": "product",
         "sort_order": 10
@@ -1182,6 +1326,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Kosher",
         "slug": "kosher",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 20
@@ -1189,6 +1334,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Halal",
         "slug": "halal",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 30
@@ -1196,6 +1342,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Gluten-Free",
         "slug": "gluten-free",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 40
@@ -1203,6 +1350,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Non-GMO",
         "slug": "non-gmo",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 50
@@ -1210,6 +1358,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Certified Humane / Animal Welfare",
         "slug": "animal-welfare",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 60
@@ -1217,6 +1366,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Fair Trade / Rainforest Alliance",
         "slug": "sustainably-sourced",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 70
@@ -1224,6 +1374,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Contains Major Allergens",
         "slug": "contains-allergens",
+        "aliases": [],
         "description": "The document names one or more of the big-9 allergens.",
         "subject_grain": "product",
         "sort_order": 80
@@ -1231,6 +1382,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Made in USA",
         "slug": "made-in-usa",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 90
@@ -1238,6 +1390,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "rBST-Free",
         "slug": "rbst-free",
+        "aliases": [],
         "description": null,
         "subject_grain": "product",
         "sort_order": 100
@@ -1245,6 +1398,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "GFSI-Certified Facility",
         "slug": "gfsi-certified",
+        "aliases": [],
         "description": "SQF, BRCGS, FSSC 22000 or another GFSI-benchmarked scheme. Claimed about the SUPPLIER, not a product.",
         "subject_grain": "supplier",
         "sort_order": 110
@@ -1252,6 +1406,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Chemical / Non-Food Product",
         "slug": "chemical-product",
+        "aliases": [],
         "description": "Sanitizer, lubricant or other non-food chemical — pulls in the SDS.",
         "subject_grain": "product",
         "sort_order": 120

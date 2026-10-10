@@ -6,7 +6,7 @@ import {
   NotFoundError,
   errorToResponse,
 } from '../../lib/permissions';
-import { applyStarterPack } from '../../lib/starter-packs';
+import { applyStarterPack, starterPackApplyRefusal } from '../../lib/starter-packs';
 import { getStarterPack } from '../../lib/starterPacks.generated';
 import { getRunById, stampApplied } from '../../lib/tenant-setup';
 import type { Env, User } from '../../lib/types';
@@ -21,11 +21,16 @@ import type {
  * POST /api/starter-packs/apply — screen 1 of the setup wizard, doing the thing.
  *
  * This is the SAME seeding `bin/create-tenant --pack fsqa` performs, from
- * inside the portal: the same tables, the same deterministic `packRowId()`s and
- * the same `INSERT OR IGNORE`. Which means a tenant created with `--pack fsqa`
- * and then walked through the wizard collides on every key and inserts nothing,
- * and screen 1 can honestly tell somebody that re-running adds what is missing
- * and overwrites nothing.
+ * inside the portal: literally the same statements (`shared/packItems.ts`).
+ * A tenant created with `--pack fsqa` and then walked through the wizard
+ * collides on every `(tenant_id, slug)` and inserts nothing, and screen 1 can
+ * honestly tell somebody that re-running adds what is missing and overwrites
+ * nothing.
+ *
+ * IT NEVER UPDATES A ROW, AND IT NEVER MOVES AN ORGANISATION TO A NEW PACK
+ * VERSION. Applying records the version the first time only (`tenant_packs`);
+ * a later pack version reaches an organisation through
+ * POST /api/starter-packs/roll-forward, which previews first.
  *
  * IT WRITES THROUGH, IMMEDIATELY, RATHER THAN STAGING. Screen 1's rows are what
  * screens 2-6 have to show. A staged pack would leave every later screen
@@ -65,8 +70,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const pack = getStarterPack(packName);
     if (!pack) throw new NotFoundError(`Unknown starter pack: ${packName}`);
 
-    // The tenant SLUG is half of every deterministic row id, so a missing
-    // tenant is a hard stop rather than something to invent a default for.
+    // The tenant slug seeds the id of every row this INSERTS (nothing is looked
+    // up by it any more -- a changed slug breaks nothing), so a tenant without
+    // one is a hard stop rather than something to invent a default for.
     const tenant = await context.env.DB.prepare('SELECT id, slug FROM tenants WHERE id = ?')
       .bind(tenantId)
       .first<{ id: string; slug: string | null }>();
@@ -77,7 +83,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    const result = await applyStarterPack(context.env.DB, pack, tenantId, tenant.slug);
+    // Two organisations are refused, with the reason: one on ANOTHER VERSION
+    // of this pack (a new version is previewed and rolled forward), and one
+    // that holds the pack's rows with no record of taking it (seeded before the
+    // ledger; it is baselined first). See `starterPackApplyRefusal`.
+    const refusal = await starterPackApplyRefusal(context.env.DB, pack, tenantId);
+    if (refusal) {
+      return json({ error: refusal.message, code: refusal.code, ...refusal.detail }, refusal.status);
+    }
+
+    const result = await applyStarterPack(context.env.DB, pack, tenantId, tenant.slug, user.id);
 
     let run: TenantSetupRun | null = null;
     if (body.run_id) {
@@ -111,12 +126,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'starter_pack.apply',
       'tenant',
       tenantId,
-      JSON.stringify({ pack: pack.pack, inserted: result.inserted, counts: result.counts }),
+      JSON.stringify({ pack: pack.pack, version: pack.version, inserted: result.inserted, counts: result.counts }),
       getClientIp(context.request),
     );
 
     const response: ApplyStarterPackResponse = {
       pack: result.pack,
+      version: pack.version,
       counts: { ...result.counts },
       inserted: result.inserted,
       run,

@@ -7926,6 +7926,8 @@ export interface StarterPackSection {
 
 export interface StarterPackCatalogEntry {
   pack: string;
+  /** The pack's version (migration 0141): a whole number, raised whenever the pack changes. */
+  version: number;
   label: string;
   description: string;
   sections: StarterPackSection[];
@@ -8011,10 +8013,123 @@ export interface ApplyStarterPackRequest {
 
 export interface ApplyStarterPackResponse {
   pack: string;
+  /** The pack version that was applied. */
+  version: number;
   counts: Record<string, number>;
   inserted: number;
   /** The run row, re-read with its ledger updated, when `run_id` was sent. */
   run: TenantSetupRun | null;
+}
+
+// ---------------------------------------------------------------------------
+// Starter pack versions and roll-forward (migration 0141)
+// ---------------------------------------------------------------------------
+
+export type {
+  PackAccept,
+  PackFieldAction,
+  PackFieldReason,
+  PackItemOutcome,
+  PackPlanField,
+  PackPlanSummary,
+} from './packRollForward';
+import type { PackAccept, PackItemOutcome, PackPlanField, PackPlanSummary } from './packRollForward';
+
+/** One pack an organisation is on, for Settings > Starter pack. */
+export interface TenantPackStatus {
+  pack: string;
+  label: string;
+  /** The version the organisation is on (the highest `tenant_packs.version`). */
+  version: number;
+  /** The version this build ships, or null when the build no longer has the pack. */
+  available_version: number | null;
+  update_available: boolean;
+  applied_at: string;
+  applied_by_name: string | null;
+  /** 'apply' / 'cli' / 'baseline' / 'roll_forward'. */
+  source: string;
+  history: Array<{ version: number; applied_at: string; source: string; applied_by_name: string | null }>;
+}
+
+/** GET /api/starter-packs/status */
+export interface TenantPackStatusResponse {
+  tenant_id: string;
+  packs: TenantPackStatus[];
+  /**
+   * Set when the organisation has pack rows but no ledger: it was set up before
+   * pack versions existed and has not been baselined. Names the pack its setup
+   * run chose, if any.
+   */
+  not_ledgered: { pack: string | null } | null;
+}
+
+/** POST /api/starter-packs/roll-forward */
+export interface PackRollForwardRequest {
+  tenant_id?: string;
+  /** Required only when the organisation is on more than one pack. */
+  pack?: string;
+  /** Default TRUE: a request that does not say `false` writes nothing. */
+  dry_run?: boolean;
+  /**
+   * Required when `dry_run` is false: the `plan_fingerprint` of the preview
+   * that was read. 409 `preview_required` without it, 409 `plan_changed` when
+   * the plan has moved since.
+   */
+  fingerprint?: string;
+  /**
+   * Items where the organisation's own value is to be replaced by the pack's.
+   * `{ kind, key }` takes every kept column of the item; `{ kind, key, field }`
+   * one column. A looser sharing rule is never applied, accepted or not.
+   */
+  accept?: PackAccept[];
+}
+
+export interface PackRollForwardItem {
+  kind: string;
+  key: string;
+  label: string;
+  /** "document type", "requirement", "acceptance limit" ... */
+  noun: string;
+  row_id: string | null;
+  outcome: PackItemOutcome;
+  /** False when an earlier run already recorded this outcome. */
+  news: boolean;
+  fields: PackPlanField[];
+  conflict?: { id: string; name: string; slug: string; active: boolean; supplier_scoped?: boolean };
+  missing?: string;
+}
+
+export interface PackRollForwardResponse {
+  dry_run: boolean;
+  tenant_id: string;
+  pack: string;
+  label: string;
+  from_version: number | null;
+  to_version: number;
+  ledgered: boolean;
+  /** Nothing to WRITE: the same version, and no row or ledger entry would change. */
+  up_to_date: boolean;
+  /**
+   * Something is waiting on a PERSON: a conflict, a rename held because the
+   * name is taken, a sharing rule only a person may loosen. Separate from
+   * `up_to_date` on purpose -- a plan can have nothing left to write and still
+   * not be finished.
+   */
+  needs_attention: boolean;
+  summary: PackPlanSummary;
+  /** Every item with something to say. Items the pack and the row agree on are left out. */
+  items: PackRollForwardItem[];
+  /**
+   * Apply only: what the plan said and the database did not do, with why.
+   * `changed_since_preview` = somebody edited the row in between, and their
+   * edit won.
+   */
+  not_applied: Array<{ kind: string; key: string; label: string; reason: string; detail?: string }>;
+  /**
+   * The fingerprint of this plan as it stands WITHOUT `accept`. Send it back as
+   * `fingerprint` to apply what was previewed.
+   */
+  plan_fingerprint: string;
 }
 
 /**

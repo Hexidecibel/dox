@@ -186,6 +186,7 @@ describe('finance pack — minimal and honest', () => {
 describe('starter packs — validation catches editing mistakes', () => {
   const base = () => ({
     pack: 'test',
+    version: 1,
     document_types: [],
     requirements: [{ name: 'Thing on file', slug: 'thing' }],
     claim_types: [{ name: 'Claimy', slug: 'claimy' }],
@@ -224,11 +225,17 @@ describe('starter packs — validation catches editing mistakes', () => {
 
   it('rejects a pack with no pack name', () => {
     expect(() => normalizePack({ requirements: [] } as any)).toThrow(/"pack" name/);
+    // Migration 0141: a pack with no version could be applied and never updated.
+    expect(() => normalizePack({ pack: 'test' } as any)).toThrow(/"version": a positive whole number/);
+    expect(() => normalizePack({ pack: 'test', version: 0 } as any)).toThrow(/"version"/);
+    expect(() => normalizePack({ pack: 'test', version: 1.5 } as any)).toThrow(/"version"/);
+    expect(() => normalizePack({ pack: 'test', version: '2' } as any)).toThrow(/"version"/);
   });
 
   it('derives a slug from the name when none is given', () => {
     const norm = normalizePack({
       pack: 'test',
+      version: 1,
       requirements: [{ name: '100g Nutritionals!' }],
     } as any);
     expect(norm.requirements[0].slug).toBe('100g-nutritionals');
@@ -256,20 +263,24 @@ describe('starter packs — SQL generation', () => {
     expect(count('spec_tests')).toBe(summary.spec_tests);
     expect(count('spec_limits')).toBe(summary.spec_limits);
     expect(count('tenant_modules')).toBe(summary.modules_on + summary.modules_off);
-    // Nothing else: every statement belongs to one of the ten tables above.
-    expect(statements.length).toBe(
+    // Nothing else writes a row: every other statement is the ledger
+    // (migration 0141) -- one `pack_applied_items` entry per row statement, and
+    // one `tenant_packs` version stamp.
+    const rows =
       summary.document_types +
-        summary.requirements +
-        summary.claim_types +
-        summary.claim_rules +
-        summary.owner_labels +
-        summary.document_type_requirements +
-        summary.extraction_instructions +
-        summary.spec_tests +
-        summary.spec_limits +
-        summary.modules_on +
-        summary.modules_off,
-    );
+      summary.requirements +
+      summary.claim_types +
+      summary.claim_rules +
+      summary.owner_labels +
+      summary.document_type_requirements +
+      summary.extraction_instructions +
+      summary.spec_tests +
+      summary.spec_limits +
+      summary.modules_on +
+      summary.modules_off;
+    expect(count('pack_applied_items')).toBe(rows);
+    expect(count('tenant_packs')).toBe(1);
+    expect(statements.length).toBe(rows * 2 + 1);
   });
 
   it('writes NOTHING for the two things a pack only DEFINES', () => {
@@ -303,21 +314,28 @@ describe('starter packs — SQL generation', () => {
     const statements = packToStatements(fsqa, TENANT).filter((s) =>
       s.includes('INTO claim_type_requirements '),
     );
-    const organic = statements.find((s) => s.includes('clm_acme-foods_organic'));
-    expect(organic).toMatch(/'req_acme-foods_organic-certificate', 1,/);
-    const rbst = statements.find((s) => s.includes('clm_acme-foods_rbst-free'));
-    expect(rbst).toMatch(/'req_acme-foods_letter-of-guarantee', 0,/);
+    // Both ends are found BY SLUG, in this tenant -- never by a computed id
+    // (decision C-158): `ct.id, r.id` are whatever rows really hold the slugs.
+    const organic = statements.find((s) => s.includes("ct.slug = 'organic' AND r.slug = 'organic-certificate'"));
+    expect(organic).toMatch(/ct\.id, r\.id, 1, /);
+    const rbst = statements.find((s) => s.includes("ct.slug = 'rbst-free' AND r.slug = 'letter-of-guarantee'"));
+    expect(rbst).toMatch(/ct\.id, r\.id, 0, /);
+    for (const s of statements) expect(s).not.toMatch(/'(req|clm)_acme-foods_/);
   });
 
   it('escapes apostrophes in seeded text', () => {
     const statements = packToStatements(
       {
         pack: 'test',
+        version: 1,
         requirements: [{ name: "Supplier's letter", slug: 'letter' }],
       } as any,
       TENANT,
     );
-    expect(statements[0]).toContain("'Supplier''s letter'");
+    // statements[0] is the version stamp (the gate every other statement
+    // requires); the first ROW statement follows it.
+    expect(statements[0]).toMatch(/^INSERT OR IGNORE INTO tenant_packs /);
+    expect(statements[1]).toContain("'Supplier''s letter'");
   });
 
   it('requires a tenant id and slug', () => {
@@ -588,6 +606,7 @@ describe('extraction instructions — one copy, in the pack', () => {
 describe('starter packs — the new keys are validated for the JSON editor', () => {
   const base = () => ({
     pack: 'test',
+    version: 1,
     owner_labels: [{ label: 'QA' }],
     document_types: [{ name: 'Thing Sheet', slug: 'thing-sheet', owner: 'QA', closes: ['thing'] }],
     requirements: [
@@ -737,6 +756,7 @@ describe('starter packs — the new keys are validated for the JSON editor', () 
     // Every existing pack must stay valid: additive means additive.
     const norm = normalizePack({
       pack: 'legacy',
+      version: 1,
       document_types: [{ name: 'Invoice' }],
       requirements: [{ name: 'Invoice on file' }],
     } as any);
@@ -746,7 +766,10 @@ describe('starter packs — the new keys are validated for the JSON editor', () 
     expect(norm.spec_tests).toEqual([]);
     expect(norm.teach).toBeNull();
     expect(norm.modules).toEqual({ default_on: [], default_off: [] });
-    expect(packToStatements({ pack: 'legacy', requirements: [{ name: 'X' }] } as any, TENANT).length).toBe(1);
+    // One row statement, its ledger entry, and the version stamp (migration 0141).
+    expect(
+      packToStatements({ pack: 'legacy', version: 1, requirements: [{ name: 'X' }] } as any, TENANT).length,
+    ).toBe(3);
   });
 });
 
@@ -828,16 +851,14 @@ describe('starter packs — the CLI summary stays truthful', () => {
 // The two implementations of "apply a pack"
 // ---------------------------------------------------------------------------
 /**
- * There are two, and there have to be: `bin/lib/starter-packs.mjs` emits SQL
- * TEXT for `wrangler d1 execute --file`, while the setup wizard runs inside a
- * Worker where values belong in bound parameters, not interpolated into a
- * string. What must never differ is the ROW IDENTITY: both write
- * `packRowId(prefix, tenantSlug, slug)`, so a tenant seeded by the CLI and then
- * walked through the wizard collides on every primary key and inserts nothing.
- *
- * If those ids ever drift, nothing fails loudly — the wizard simply inserts a
- * complete second copy of the vocabulary under fresh keys. That is the failure
- * these assertions exist to make impossible.
+ * There USED to be two, hand-written: `bin/lib/starter-packs.mjs` emitting SQL
+ * text for `wrangler d1 execute --file`, and the setup wizard binding
+ * parameters inside a Worker. Since migration 0141 both run the statements
+ * `packApplyStatements` (shared/packItems.ts) writes once -- the CLI inlines
+ * them, the portal binds them -- so these assertions now pin that the CLI is
+ * still reading the SAME compiled module (a stale `bin/lib/shared/packItems.js`
+ * is the one way the two can still differ) and that the id a pack gives a row
+ * it inserts has not moved for the organisations that already have those ids.
  */
 describe('starter packs — the CLI and the in-portal applier agree', () => {
   /**
@@ -983,7 +1004,7 @@ describe('fsqa pack — requirement scope (0123)', () => {
   it('the SQL applier writes the scope', () => {
     const sql = packToStatements(fsqa, TENANT).join('\n');
     expect(sql).toMatch(
-      /INSERT OR IGNORE INTO requirements \([^)]*scope\) VALUES \([^;]*'spec-sheet'[^;]*'product'\);/,
+      /INSERT OR IGNORE INTO requirements \([^)]*scope\) SELECT [^;]*'spec-sheet'[^;]*'product' WHERE NOT EXISTS/,
     );
   });
 

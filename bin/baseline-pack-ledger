@@ -1,0 +1,427 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/baseline-pack-ledger — give an organisation that was seeded before
+ * migration 0141 a starter-pack ledger, so a pack update can reach it.
+ *
+ * THE GAP THIS CLOSES
+ *
+ * A starter pack can now be rolled forward (POST /api/starter-packs/roll-forward):
+ * a row that still holds what the pack wrote is updated, a row the organisation
+ * changed is kept. That needs a record of what the pack wrote, per row
+ * (`pack_applied_items`), and of which version the organisation is on
+ * (`tenant_packs`). Both appliers write that record now. An organisation seeded
+ * BEFORE the record existed has the pack's rows and nothing else -- and the
+ * roll-forward door refuses it (409 `not_ledgered`), because with no record
+ * every pack item it lacks would look "new" and be inserted, including the ones
+ * it deleted on purpose.
+ *
+ * WHAT A BASELINE RECORDS, per pack item (bin/lib/packLedgerBaseline.js):
+ *
+ *   pack       the row equals what the pack writes today. Recorded as the
+ *              pack's, at today's version; a later version may update it.
+ *   differs    the row is there and some column is not the pack's. Those
+ *              columns are marked "origin unknown" and treated as a person's
+ *              edit: a later version REPORTS the difference and never
+ *              overwrites it on a guess.
+ *   inactive   the row is switched off. It stays off.
+ *   absent     the organisation has no such row: it removed it, or the pack
+ *              gained it after the organisation was set up. The data cannot say
+ *              which, so it is recorded as absent and NO later version adds it
+ *              by itself; a person may tick it on Settings > Starter pack.
+ *
+ * IT CHANGES NO ROW OF THE ORGANISATION'S. It writes ledger entries, one
+ * `tenant_packs` row and one audit row (`starter_pack.baseline`). INSERT OR
+ * IGNORE throughout: a second run adds nothing, and an entry an applier or a
+ * roll-forward already wrote is kept.
+ *
+ * WHICH PACK
+ *
+ *   1. --pack NAME, when you say so;
+ *   2. the pack the organisation's setup wizard chose (tenant_setup_runs.pack);
+ *   3. otherwise INFERRED from the organisation's own rows -- the pack whose
+ *      document types, requirements and claims it mostly holds, by slug -- and
+ *      the inference is PRINTED with its numbers. An organisation created by
+ *      bin/create-tenant has no setup run, and assuming the default pack for it
+ *      would ledger a finance tenant as food safety.
+ *   An organisation that matches no pack well enough, or two packs, is skipped
+ *   and said so. Baseline it with --pack once you know.
+ *
+ * READ THE DRY RUN FIRST. It is the default, and for a production run it is the
+ * whole point: every "differs" line is a place this organisation has diverged
+ * from the pack, and every "absent" line is something a roll-forward will now
+ * never add. If one of those is wrong (a row somebody deleted by mistake), fix
+ * the row BEFORE applying -- afterwards the ledger says the absence is a
+ * decision.
+ *
+ * Usage:
+ *   bin/baseline-pack-ledger --all                       # dry run, LOCAL, every organisation
+ *   bin/baseline-pack-ledger --all --remote              # dry run, PRODUCTION
+ *   bin/baseline-pack-ledger --tenant <id>               # dry run, LOCAL, one organisation in detail
+ *   bin/baseline-pack-ledger --tenant <id> --apply       # LOCAL write
+ *   bin/baseline-pack-ledger --tenant <id> --remote --apply   # prompts first
+ *
+ * Flags:
+ *   --tenant ID       organisation to baseline (required unless --all)
+ *   --all             every organisation in the database (REPORTING ONLY)
+ *   --pack NAME       the pack to baseline against, instead of the setup run / the inference
+ *   --apply           actually write. Without it this is a dry run.
+ *   --remote, -r      target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --persist-to DIR  LOCAL only: use the local D1 state under DIR (a git
+ *                     worktree has no .wrangler state of its own)
+ *   --yes, -y         skip the production confirmation prompt
+ *   --json            emit the plan as JSON instead of prose
+ *   -h, --help        this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { PACK_KIND_SPECS, PACK_ITEM_KINDS, sqlLiteral } = require('./lib/shared/packItems.js');
+const { planBaseline, inferPack, baselineToSql } = require('./lib/packLedgerBaseline');
+
+const PACK_DIR = path.join(PROJECT_ROOT, 'starter-packs');
+
+function parseArgs(argv) {
+  const opts = { tenant: null, all: false, pack: null, apply: false, remote: false, yes: false, json: false, persistTo: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--all': opts.all = true; break;
+      case '--pack': opts.pack = argv[++i]; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--persist-to': opts.persistTo = argv[++i]; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant && !opts.all) {
+    console.error('--tenant <id> is required (or --all). Run with --help for usage.');
+    process.exit(2);
+  }
+  if (opts.tenant && !/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  if (opts.pack !== null && !/^[a-z0-9-]+$/.test(String(opts.pack))) {
+    console.error('--pack must be a pack name such as fsqa.');
+    process.exit(2);
+  }
+  if (opts.all && opts.apply) {
+    // Writing every organisation at once removes the one moment where somebody
+    // reads the report for the organisation they meant. Apply is per tenant.
+    console.error('--all is a reporting mode. Re-run with --tenant <id> --apply to write one organisation.');
+    process.exit(2);
+  }
+  if (opts.persistTo !== null && (!opts.persistTo || opts.persistTo.startsWith('--'))) {
+    console.error('--persist-to requires a directory.');
+    process.exit(2);
+  }
+  if (opts.persistTo && opts.remote) {
+    console.error('--persist-to is for LOCAL D1 only.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l, i) => i > 2 && l.trim() === '*/');
+  console.log(lines.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+function read(sql, opts) {
+  return query(sql, { remote: opts.remote, persistTo: opts.persistTo });
+}
+
+function execSql(statements, opts, label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-pack-ledger-baseline-'));
+  const file = path.join(dir, `${label}.sql`);
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  const target = opts.remote ? ['--remote'] : opts.persistTo ? ['--local', `--persist-to=${opts.persistTo}`] : ['--local'];
+  try {
+    execFileSync('npx', ['wrangler', 'd1', 'execute', DEFAULT_DB, ...target, `--file=${file}`], {
+      cwd: PROJECT_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.trim();
+}
+
+function hasTable(table, opts) {
+  const rows = read(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ${sqlLiteral(table)}`, opts);
+  return Number((rows || [])[0]?.n ?? 0) > 0;
+}
+
+/** Every row of one organisation that a pack could have written, by kind. */
+function loadRows(tenantId, opts) {
+  const rows = {};
+  for (const kind of PACK_ITEM_KINDS) {
+    const sql = PACK_KIND_SPECS[kind].readSql.replace(/\?/g, sqlLiteral(tenantId));
+    rows[kind] = read(sql, opts);
+  }
+  return rows;
+}
+
+async function loadPacks() {
+  // The compiler is an ES module; this script is CommonJS like its siblings.
+  const { normalizePack } = await import('./lib/starter-packs.mjs');
+  const packs = {};
+  for (const file of fs.readdirSync(PACK_DIR).filter((f) => f.endsWith('.json')).sort()) {
+    const name = path.basename(file, '.json');
+    packs[name] = normalizePack(JSON.parse(fs.readFileSync(path.join(PACK_DIR, file), 'utf8')));
+  }
+  return packs;
+}
+
+function show(value) {
+  if (value === null || value === undefined) return '(empty)';
+  const text = String(value).replace(/\s+/g, ' ');
+  return text.length > 70 ? `${text.slice(0, 67)}...` : text;
+}
+
+function printTenant(result, detail) {
+  const { tenant, choice, plan, ledgered } = result;
+  console.log('');
+  console.log(`${tenant.name}  (${tenant.id}${tenant.slug ? `, slug ${tenant.slug}` : ''})`);
+  if (ledgered.length > 0) {
+    console.log(`  already has a pack record: ${ledgered.map((l) => `${l.pack} version ${l.version}`).join(', ')}`);
+  }
+  if (!plan) {
+    console.log(`  NOT BASELINED: ${choice.reason}.`);
+    if (choice.scores && choice.scores.length > 0) {
+      console.log(`  closest: ${choice.scores.map((s) => `${s.pack} ${s.held}/${s.of}`).join(', ')}.  Use --pack NAME once you know.`);
+    }
+    return;
+  }
+  console.log(`  pack: ${plan.pack} version ${plan.version}  (${choice.how}: ${choice.reason})`);
+  console.log('');
+  console.log('    kind                           the pack\'s   differs   switched off   absent   already recorded   yours (not in the pack)');
+  for (const kind of PACK_ITEM_KINDS) {
+    const c = plan.counts[kind];
+    if (c.total === 0 && c.extra === 0) continue;
+    console.log(
+      `    ${PACK_KIND_SPECS[kind].noun.padEnd(30)} ${String(c.pack).padStart(10)} ${String(c.differs).padStart(9)} ` +
+        `${String(c.inactive).padStart(14)} ${String(c.absent).padStart(8)} ${String(c.already).padStart(18)} ${String(c.extra).padStart(25)}`,
+    );
+  }
+  const differs = plan.entries.filter((e) => e.state === 'differs' || (e.state === 'inactive' && Object.keys(e.differing).length > 0));
+  const inactive = plan.entries.filter((e) => e.state === 'inactive');
+  const absent = plan.entries.filter((e) => e.state === 'absent');
+  const cap = detail ? Infinity : 8;
+
+  if (differs.length > 0) {
+    console.log('');
+    console.log(`  DIFFERS FROM THE PACK (${differs.length}) - origin unknown; a later version reports these and never overwrites them:`);
+    for (const e of differs.slice(0, cap)) {
+      console.log(`    ${PACK_KIND_SPECS[e.kind].noun} "${e.label}" [${e.key}]`);
+      for (const field of Object.keys(e.differing)) {
+        console.log(`        ${field}: has ${show(e.current[field])}  |  the pack writes ${show(e.written[field])}`);
+      }
+    }
+    if (differs.length > cap) console.log(`    ... and ${differs.length - cap} more (--tenant ${tenant.id} lists them all)`);
+  }
+  if (inactive.length > 0) {
+    console.log('');
+    console.log(`  SWITCHED OFF (${inactive.length}) - stays off:`);
+    for (const e of inactive.slice(0, cap)) console.log(`    ${PACK_KIND_SPECS[e.kind].noun} "${e.label}" [${e.key}]`);
+    if (inactive.length > cap) console.log(`    ... and ${inactive.length - cap} more`);
+  }
+  if (absent.length > 0) {
+    console.log('');
+    console.log(`  ABSENT (${absent.length}) - not in this organisation. A roll-forward will NOT add them by itself;`);
+    console.log('  a person may tick any of them on Settings > Starter pack. (Removed on purpose, or newer than this organisation?');
+    console.log('  The data cannot say. Check any you expected to see BEFORE applying.)');
+    for (const e of absent.slice(0, cap)) console.log(`    ${PACK_KIND_SPECS[e.kind].noun} "${e.label}" [${e.key}]`);
+    if (absent.length > cap) console.log(`    ... and ${absent.length - cap} more (--tenant ${tenant.id} lists them all)`);
+  }
+  if (plan.scoped.length > 0) {
+    console.log('');
+    console.log(`  ONE SUPPLIER'S OWN TYPE AT A PACK SLUG (${plan.scoped.length}) - not the pack's type, recorded as absent, never written by an update:`);
+    for (const e of plan.scoped) console.log(`    document type "${e.name}" [${e.key}] belongs to one supplier`);
+  }
+  if (plan.entries.length === 0) {
+    console.log('');
+    console.log('  Nothing to record: every item of the pack is already in this organisation\'s ledger.');
+  }
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const targetLabel = opts.remote ? 'PRODUCTION' : opts.persistTo ? `local (${opts.persistTo})` : 'local';
+
+  const packs = await loadPacks();
+  if (opts.pack && !packs[opts.pack]) {
+    console.error(`Unknown pack "${opts.pack}". Available: ${Object.keys(packs).join(', ')}`);
+    process.exit(2);
+  }
+
+  const ledgerExists = hasTable('pack_applied_items', opts) && hasTable('tenant_packs', opts);
+  if (!ledgerExists && opts.apply) {
+    console.error(
+      'This database has no pack ledger yet. Apply migrations/0141_pack_ledger.sql on the target first\n' +
+        '(./bin/migrate --only 0141_pack_ledger.sql locally; bin/migrate-prod-one for production).',
+    );
+    process.exit(1);
+  }
+
+  const tenants = opts.all
+    ? read('SELECT id, name, slug FROM tenants ORDER BY name', opts)
+    : read(`SELECT id, name, slug FROM tenants WHERE id = ${sqlLiteral(opts.tenant)}`, opts);
+  if (tenants.length === 0) {
+    console.error(
+      opts.all
+        ? 'No organisations in this database. Check the --remote flag.'
+        : `No organisation "${opts.tenant}" in this database. Check the id, or the --remote flag.`,
+    );
+    process.exit(1);
+  }
+
+  const results = [];
+  for (const tenant of tenants) {
+    const rows = loadRows(tenant.id, opts);
+    const ledgered = ledgerExists
+      ? read(`SELECT pack, MAX(version) AS version FROM tenant_packs WHERE tenant_id = ${sqlLiteral(tenant.id)} GROUP BY pack`, opts)
+      : [];
+
+    let choice;
+    if (opts.pack) {
+      choice = { pack: opts.pack, how: '--pack', reason: 'you said so' };
+    } else {
+      const run = read(
+        `SELECT pack FROM tenant_setup_runs WHERE tenant_id = ${sqlLiteral(tenant.id)} AND pack IS NOT NULL ORDER BY updated_at DESC LIMIT 1`,
+        opts,
+      )[0];
+      if (run && packs[run.pack]) {
+        choice = { pack: run.pack, how: 'setup run', reason: 'the pack its setup wizard chose' };
+      } else {
+        const inferred = inferPack(Object.values(packs), rows);
+        choice = { ...inferred, how: 'INFERRED' };
+      }
+    }
+
+    let plan = null;
+    if (choice.pack) {
+      const existing = ledgerExists
+        ? read(
+            `SELECT kind, item_key FROM pack_applied_items WHERE tenant_id = ${sqlLiteral(tenant.id)} AND pack = ${sqlLiteral(choice.pack)}`,
+            opts,
+          )
+        : [];
+      plan = planBaseline(packs[choice.pack], rows, existing);
+    }
+    results.push({ tenant, choice, plan, ledgered });
+  }
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          target: targetLabel,
+          applied: opts.apply,
+          ledger_table_present: ledgerExists,
+          tenants: results.map((r) => ({
+            id: r.tenant.id,
+            name: r.tenant.name,
+            already: r.ledgered,
+            pack: r.choice.pack,
+            how: r.choice.how,
+            reason: r.choice.reason,
+            scores: r.choice.scores,
+            counts: r.plan ? r.plan.counts : null,
+            entries: r.plan ? r.plan.entries : [],
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.log(`Starter-pack ledger baseline - ${targetLabel} - ${opts.apply ? 'APPLY' : 'DRY RUN (nothing is written)'}`);
+    if (!ledgerExists) {
+      console.log('NOTE: this database does not have migration 0141 yet, so every organisation is reported as unrecorded.');
+    }
+    for (const r of results) printTenant(r, !opts.all);
+    console.log('');
+    const ready = results.filter((r) => r.plan && r.plan.entries.length > 0).length;
+    const skipped = results.filter((r) => !r.plan).length;
+    console.log(
+      `${results.length} organisation(s): ${ready} with something to record, ${skipped} not baselined, ` +
+        `${results.length - ready - skipped} already complete.`,
+    );
+    console.log('A baseline changes none of an organisation\'s own rows. It records what is there.');
+  }
+
+  if (!opts.apply) {
+    if (!opts.json && !opts.all) console.log('DRY RUN - re-run with --apply to write this organisation\'s ledger.');
+    return;
+  }
+
+  const result = results[0];
+  if (!result.plan) {
+    console.error(`Nothing written: ${result.choice.reason}. Use --pack NAME.`);
+    process.exit(1);
+  }
+  if (result.plan.entries.length === 0) {
+    console.log('Nothing to write.');
+    return;
+  }
+  if (opts.remote && !opts.yes) {
+    const typed = promptSync(
+      `\nThis writes ${result.plan.entries.length} ledger entries for "${result.tenant.name}" on PRODUCTION.\n` +
+        `Type the tenant id (${result.tenant.id}) to continue: `,
+    );
+    if (typed !== result.tenant.id) {
+      console.error('Not confirmed. Nothing written.');
+      process.exit(1);
+    }
+  }
+  const statements = baselineToSql(result.plan, result.tenant.id);
+  for (let i = 0; i < statements.length; i += 200) {
+    execSql(statements.slice(i, i + 200), opts, `baseline-${result.tenant.id}-${i}`);
+  }
+  console.log(`Wrote ${result.plan.entries.length} ledger entries for "${result.tenant.name}" (${result.plan.pack} version ${result.plan.version}).`);
+  console.log('Re-run without --apply to confirm it now reports nothing to record.');
+}
+
+main().catch((err) => {
+  console.error(err.message || err);
+  process.exit(1);
+});

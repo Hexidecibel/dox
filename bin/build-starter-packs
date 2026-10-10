@@ -66,11 +66,13 @@ function readModuleKeys() {
 function project(pack) {
   return {
     pack: pack.pack,
+    version: pack.version,
     label: pack.label,
     description: pack.description,
     document_types: pack.document_types.map((d) => ({
       name: d.name,
       slug: d.slug,
+      aliases: d.aliases,
       description: d.description,
       sort_order: d.sort_order,
       owner: d.owner,
@@ -80,6 +82,7 @@ function project(pack) {
     requirements: pack.requirements.map((r) => ({
       name: r.name,
       slug: r.slug,
+      aliases: r.aliases,
       description: r.description,
       checklist: r.checklist,
       sort_order: r.sort_order,
@@ -88,6 +91,7 @@ function project(pack) {
     claim_types: pack.claim_types.map((c) => ({
       name: c.name,
       slug: c.slug,
+      aliases: c.aliases,
       description: c.description,
       subject_grain: c.subject_grain,
       sort_order: c.sort_order,
@@ -132,6 +136,12 @@ const TYPES = `/**
 export interface StarterPackDocumentType {
   name: string;
   slug: string;
+  /**
+   * Other names for the same thing ("Spec Sheet"). Nothing is written from
+   * them: they are how a second copy of the concept is recognised and refused
+   * (shared/duplicateConcept.ts).
+   */
+  aliases: string[];
   description: string | null;
   sort_order: number;
   /** A declared \`owner_labels\` label, or null. Becomes \`document_types.default_owner\`. */
@@ -145,6 +155,12 @@ export interface StarterPackDocumentType {
 export interface StarterPackRequirement {
   name: string;
   slug: string;
+  /**
+   * Other names for the same thing ("Spec Sheet"). Nothing is written from
+   * them: they are how a second copy of the concept is recognised and refused
+   * (shared/duplicateConcept.ts).
+   */
+  aliases: string[];
   description: string | null;
   checklist: string | null;
   sort_order: number;
@@ -155,6 +171,12 @@ export interface StarterPackRequirement {
 export interface StarterPackClaimType {
   name: string;
   slug: string;
+  /**
+   * Other names for the same thing ("Spec Sheet"). Nothing is written from
+   * them: they are how a second copy of the concept is recognised and refused
+   * (shared/duplicateConcept.ts).
+   */
+  aliases: string[];
   description: string | null;
   subject_grain: string;
   sort_order: number;
@@ -253,6 +275,13 @@ export interface StarterPackModules {
 
 export interface StarterPack {
   pack: string;
+  /**
+   * A positive whole number, raised by one whenever the pack changes
+   * (migration 0141). An organisation's ledger records the version it was
+   * seeded from; a higher one here is what "an update is available" means.
+   * tests/unit/starterPackVersions.test.ts pins version -> content hash.
+   */
+  version: number;
   label: string;
   description: string;
   document_types: StarterPackDocumentType[];

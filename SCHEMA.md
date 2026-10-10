@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 152 tables, 2 views, 279 indexes, 54 triggers.
+Objects: 154 tables, 2 views, 282 indexes, 54 triggers.
 
 ## Core documents & versions
 
@@ -1984,6 +1984,27 @@ Indexes: `idx_order_sends_order`, `idx_order_sends_sender`, `idx_order_sends_ten
 
 Indexes: `idx_owner_routes_by_user`, `idx_owner_routes_lookup`, `idx_owner_routes_unique`
 
+### `pack_applied_items`
+
+```sql
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  pack TEXT NOT NULL
+  kind TEXT NOT NULL
+  item_key TEXT NOT NULL
+  row_id TEXT
+  pack_version INTEGER NOT NULL CHECK (pack_version >= 1)
+  written TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(written))
+  differing TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(differing))
+  state TEXT NOT NULL
+  source TEXT NOT NULL
+  applied_by TEXT
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  PRIMARY KEY (tenant_id, pack, kind, item_key)
+```
+
+Indexes: `idx_pack_applied_items_row`
+
 ### `product_requirements`
 
 ```sql
@@ -2360,6 +2381,22 @@ Triggers: `trg_tenant_brands_logo_not_withdrawn_insert`, `trg_tenant_brands_logo
   updated_by TEXT
   PRIMARY KEY (tenant_id, module_key)
 ```
+
+### `tenant_packs`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  pack TEXT NOT NULL
+  version INTEGER NOT NULL CHECK (version >= 1)
+  from_version INTEGER
+  source TEXT NOT NULL
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  applied_by TEXT
+  summary TEXT CHECK (summary IS NULL OR json_valid(summary))
+```
+
+Indexes: `idx_tenant_packs_step`, `idx_tenant_packs_tenant`
 
 ### `tenant_setup_runs`
 
