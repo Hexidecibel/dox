@@ -17,7 +17,7 @@
  * 404 instead of 403 on offline/non-public forms; never echo back the
  * server-side row id; rate limit even before auth-equivalent work.
  */
-import { logAudit, getClientIp } from '../../../../lib/db';
+import { logAudit } from '../../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../../lib/ratelimit';
 import { errorToResponse } from '../../../../lib/permissions';
 import {
@@ -32,7 +32,10 @@ import {
   loadLivePublicForm,
   publicFormFields,
 } from '../../../../lib/records/forms';
-import { publicNotFound } from '../../../../lib/records/publicView';
+import {
+  publicClientIp,
+  publicNotFound,
+} from '../../../../lib/records/publicView';
 import type { Env } from '../../../../lib/types';
 import type {
   PublicFormSubmitRequest,
@@ -54,7 +57,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const slug = context.params.slug as string;
     if (!slug) return publicNotFound('Form not found');
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
 
     // Parse the body early — we'll need turnstile token + data + we
     // want to fail fast on malformed JSON.

@@ -139,23 +139,33 @@ const getApproval = async (token: string, init: CallInit = {}) =>
 const postApproval = async (token: string, body: unknown, init: CallInit = {}) =>
   read(await approvalPost(ctx(`/api/workflow-approvals/public/${token}`, { ...init, method: 'POST', json: body, params: { token } })));
 
-/** Every object key in a payload, at any depth. */
-function allKeys(value: unknown, into: Set<string> = new Set()): Set<string> {
+/**
+ * Every key in a payload AS A PATH from the root: `fields[].config.options[].value`.
+ * A flat "this key name is allowed somewhere" list would let `id`, `name` or
+ * `value` appear anywhere once it was allowed in one place; a path says where.
+ */
+function allPaths(value: unknown, prefix = '', into: Set<string> = new Set()): Set<string> {
   if (Array.isArray(value)) {
-    for (const v of value) allKeys(v, into);
+    for (const v of value) allPaths(v, `${prefix}[]`, into);
   } else if (value && typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
-      into.add(k);
-      allKeys(v, into);
+      const path = prefix ? `${prefix}.${k}` : k;
+      into.add(path);
+      allPaths(v, path, into);
     }
   }
   return into;
 }
 
+/** Paths in the payload that the allow-list does not name. */
 function extraKeys(body: unknown, allowed: readonly string[]): string[] {
   const set = new Set(allowed);
-  return [...allKeys(body)].filter((k) => !set.has(k)).sort();
+  return [...allPaths(body)].filter((k) => !set.has(k)).sort();
 }
+
+/** A real PNG signature: the upload route decides a file's type from its bytes. */
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+const pngFile = (name = 'photo.png') => new File([PNG_BYTES], name, { type: 'image/png' });
 
 function expectNone(text: string, forbidden: Record<string, string>): void {
   const found = Object.entries(forbidden)
@@ -244,6 +254,13 @@ async function makeWorld(tenantId: string, tag: string): Promise<World> {
   const unusedSupplierId = generateTestId();
   await db.prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)').bind(unusedSupplierId, tenantId, `Unlisted Supplier ${T}`, `sup2-${tag}-${unusedSupplierId.slice(0, 6)}`).run();
 
+  // A supplier the organisation stopped using: never offered, never accepted.
+  const retiredSupplierId = generateTestId();
+  await db
+    .prepare('INSERT INTO suppliers (id, tenant_id, name, slug, active) VALUES (?, ?, ?, ?, 0)')
+    .bind(retiredSupplierId, tenantId, `RETIRED-SUPPLIER-SECRET-${T}`, `sup3-${tag}-${retiredSupplierId.slice(0, 6)}`)
+    .run();
+
   const customerId = generateTestId();
   const customerName = `Customer Name ${T}`;
   await db
@@ -283,11 +300,21 @@ async function makeWorld(tenantId: string, tag: string): Promise<World> {
   // A second sheet: the target of the record_ref / rollup columns.
   const otherSheetId = generateTestId();
   await db.prepare('INSERT INTO records_sheets (id, tenant_id, name, slug, created_by) VALUES (?, ?, ?, ?, ?)').bind(otherSheetId, tenantId, `OTHER-SHEET-SECRET-${T}`, `other-${tag}-${otherSheetId.slice(0, 6)}`, creatorId).run();
+  await db
+    .prepare(`INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, is_title, display_order) VALUES (?, ?, ?, 'name', 'Name', 'text', 1, 0)`)
+    .bind(generateTestId(), otherSheetId, tenantId)
+    .run();
+  await db
+    .prepare(`INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, is_title, display_order) VALUES (?, ?, ?, 'secret', 'Secret', 'text', 0, 1)`)
+    .bind(generateTestId(), otherSheetId, tenantId)
+    .run();
   const otherRowId = generateTestId();
   const linkedName = `Linked Row ${T}`;
+  // The stored display_title is deliberately NOT the title: what leaves is
+  // computed from the title cell, never read from this column.
   await db
     .prepare('INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, created_by) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(otherRowId, otherSheetId, tenantId, linkedName, JSON.stringify({ secret: `OTHER-SHEET-ROW-SECRET-${T}` }), creatorId)
+    .bind(otherRowId, otherSheetId, tenantId, `STORED-DISPLAY-TITLE-SECRET-${T}`, JSON.stringify({ name: linkedName, secret: `OTHER-SHEET-ROW-SECRET-${T}` }), creatorId)
     .run();
 
   const sheetId = generateTestId();
@@ -367,7 +394,10 @@ async function makeWorld(tenantId: string, tag: string): Promise<World> {
       customer_number: `CUSTNUM-SECRET-${T}`,
       customer_email: `customer@cust-secret-${tag}.example`,
       product_description: `PRODUCT-DESC-SECRET-${T}`,
+      retired_supplier: `RETIRED-SUPPLIER-SECRET-${T}`,
+      retired_supplier_id: retiredSupplierId,
       other_sheet: `OTHER-SHEET-SECRET-${T}`,
+      stored_display_title: `STORED-DISPLAY-TITLE-SECRET-${T}`,
       other_sheet_row: `OTHER-SHEET-ROW-SECRET-${T}`,
       tenant_id: tenantId,
       creator_id: creatorId,
@@ -530,28 +560,55 @@ afterEach(async () => {
 // The allow-lists. A key that is not here cannot be in a response.
 // ---------------------------------------------------------------------------
 
-const FIELD_KEYS = ['key', 'type', 'label', 'help_text', 'required', 'config', 'position', 'picker'];
-const CONFIG_KEYS = ['options', 'value', 'color', 'allow_custom', 'precision', 'format', 'currency_code', 'include_time', 'multiple'];
+// Paths, not key names: `id` is allowed at `entity_options.supplier[].id` and
+// nowhere else; `name` at `form.name` but not on a field; `value` inside a
+// dropdown option but not on a field.
+const FIELD_PATHS = (withPicker: boolean) => [
+  'fields',
+  'fields[].key',
+  'fields[].type',
+  'fields[].label',
+  'fields[].help_text',
+  'fields[].required',
+  'fields[].position',
+  ...(withPicker ? ['fields[].picker'] : []),
+  'fields[].config',
+  'fields[].config.options',
+  'fields[].config.options[].value',
+  'fields[].config.options[].label',
+  'fields[].config.options[].color',
+  'fields[].config.allow_custom',
+  'fields[].config.precision',
+  'fields[].config.format',
+  'fields[].config.currency_code',
+  'fields[].config.include_time',
+  'fields[].config.multiple',
+];
 
 const FORM_GET_ALLOWED = [
-  'form', 'name', 'description', 'accent_color', 'logo_url',
-  'fields', ...FIELD_KEYS, ...CONFIG_KEYS,
+  'form', 'form.name', 'form.description', 'form.accent_color', 'form.logo_url',
+  ...FIELD_PATHS(true),
   'turnstile_site_key',
-  'entity_options', 'customer', 'supplier', 'product', 'id',
-  'attachments', 'enabled', 'max_attachments', 'max_file_size_mb', 'allowed_mime_types',
+  'entity_options',
+  'entity_options.customer', 'entity_options.customer[].id', 'entity_options.customer[].name',
+  'entity_options.supplier', 'entity_options.supplier[].id', 'entity_options.supplier[].name',
+  'entity_options.product', 'entity_options.product[].id', 'entity_options.product[].name',
+  'attachments', 'attachments.enabled', 'attachments.max_attachments', 'attachments.max_file_size_mb', 'attachments.allowed_mime_types',
 ];
 const FORM_SUBMIT_ALLOWED = ['success', 'thank_you_message', 'redirect_url'];
 const FORM_UPLOAD_ALLOWED = ['attachment_id', 'pending_token', 'filename', 'mime_type', 'size_bytes', 'expires_at'];
 const FORM_DELETE_ALLOWED = ['success'];
 const UPDATE_GET_ALLOWED = [
-  'request', 'sheet_name', 'row_title', 'sender_name', 'message', 'due_date', 'expires_at',
-  'fields', ...FIELD_KEYS.filter((k) => k !== 'picker'), ...CONFIG_KEYS,
+  'request', 'request.sheet_name', 'request.row_title', 'request.sender_name', 'request.message', 'request.due_date', 'request.expires_at',
+  ...FIELD_PATHS(false),
+  // Keyed by column key; the keys are checked against the requested fields.
   'current_values',
 ];
 const UPDATE_POST_ALLOWED = ['success', 'fields_updated'];
 const APPROVAL_GET_ALLOWED = [
-  'step', 'name', 'message', 'workflow_name', 'sender_name', 'expires_at',
-  'row', 'sheet_name', 'title', 'fields', 'label', 'type', 'value',
+  'step', 'step.name', 'step.message', 'step.workflow_name', 'step.sender_name', 'step.expires_at',
+  'row', 'row.sheet_name', 'row.title',
+  'row.fields', 'row.fields[].label', 'row.fields[].type', 'row.fields[].value',
 ];
 const APPROVAL_POST_ALLOWED = ['success', 'decision'];
 
@@ -723,7 +780,7 @@ describe('public form: what an outsider can send', () => {
 
   it('answers an upload with six fields and no storage key', async () => {
     const { slug, formId } = await makeForm(A, ['title'], { settings: { allow_attachments: true } });
-    const res = await uploadToForm(slug, new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' }));
+    const res = await uploadToForm(slug, pngFile('photo.png'));
     expect(res.status).toBe(200);
     expect(extraKeys(res.body, FORM_UPLOAD_ALLOWED)).toEqual([]);
     const att = await db.prepare('SELECT r2_key FROM records_row_attachments WHERE id = ?').bind(res.body.attachment_id as string).first<{ r2_key: string }>();
@@ -761,7 +818,7 @@ describe('public form: what an outsider can send', () => {
 
   it('SUSPICION 9: a pending upload can be removed only through a LIVE form', async () => {
     const { slug, formId } = await makeForm(A, ['title'], { settings: { allow_attachments: true } });
-    const up = await uploadToForm(slug, new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' }));
+    const up = await uploadToForm(slug, pngFile('photo.png'));
     const attachmentId = up.body.attachment_id as string;
     const pendingToken = up.body.pending_token as string;
 
@@ -784,7 +841,7 @@ describe('public form: what an outsider can send', () => {
   it("cannot remove another form's pending upload, in this tenant or another", async () => {
     const mine = await makeForm(A, ['title'], { settings: { allow_attachments: true } });
     const theirs = await makeForm(B, ['title'], { settings: { allow_attachments: true } });
-    const up = await uploadToForm(theirs.slug, new File([new Uint8Array([9])], 'b.png', { type: 'image/png' }));
+    const up = await uploadToForm(theirs.slug, pngFile('b.png'));
     const res = await deleteAttachment(mine.slug, up.body.attachment_id as string, up.body.pending_token as string);
     expect(res.status).toBe(404);
     expect(await db.prepare('SELECT id FROM records_row_attachments WHERE id = ?').bind(up.body.attachment_id as string).first()).not.toBeNull();
@@ -1288,7 +1345,7 @@ describe('SUSPICION 6: a link whose parts belong to different tenants resolves t
     expect(s.text).toBe(unknown.text);
     const rowsAfter = await db.prepare('SELECT COUNT(*) AS n FROM records_rows WHERE sheet_id = ?').bind(B.sheetId).first<{ n: number }>();
     expect(rowsAfter!.n).toBe(rowsBefore!.n);
-    const u = await uploadToForm(slug, new File([new Uint8Array([1])], 'a.png', { type: 'image/png' }));
+    const u = await uploadToForm(slug, pngFile('a.png'));
     expect(u.status).toBe(404);
   });
 });
@@ -1300,14 +1357,14 @@ describe('SUSPICION 6: a link whose parts belong to different tenants resolves t
 describe('SUSPICION 8: nothing is served for an inactive organisation or with Records switched off', () => {
   async function allEight(): Promise<Array<{ name: string; call: () => Promise<{ status: number; text: string }> }>> {
     const form = await makeForm(A, ['title'], { settings: { allow_attachments: true } });
-    const up = await uploadToForm(form.slug, new File([new Uint8Array([1, 2])], 'a.png', { type: 'image/png' }));
+    const up = await uploadToForm(form.slug, pngFile('a.png'));
     expect(up.status).toBe(200);
     const update = await makeUpdateRequest(A, ['notes']);
     const approval = await makeApproval(A);
     return [
       { name: 'form GET', call: () => getForm(form.slug) },
       { name: 'form submit', call: () => submitForm(form.slug, { title: 'x' }) },
-      { name: 'form upload', call: () => uploadToForm(form.slug, new File([new Uint8Array([1])], 'b.png', { type: 'image/png' })) },
+      { name: 'form upload', call: () => uploadToForm(form.slug, pngFile('b.png')) },
       { name: 'form attachment DELETE', call: () => deleteAttachment(form.slug, up.body.attachment_id as string, up.body.pending_token as string) },
       { name: 'update request GET', call: () => getUpdate(update.token) },
       { name: 'update request POST', call: () => postUpdate(update.token, { notes: 'x' }) },

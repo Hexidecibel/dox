@@ -9,6 +9,14 @@
  * names which one did, so a failure says what leaked rather than "expected
  * string not to contain".
  *
+ * A ROW SITTING ELSEWHERE PROVES LITTLE. The other tenant's supplier is in
+ * the database, but nothing the surface reads points at it, so a join that
+ * forgot its tenant predicate would still pass. `pointAtOtherTenant` therefore
+ * makes the record under test REFERENCE it -- the document's (or the ask's)
+ * own `supplier_id` is set to the other tenant's supplier, the way one bad
+ * write somewhere else would leave it -- and the surface must still show
+ * nothing of that supplier: not its name, not its id.
+ *
  * Used by the four outside surfaces that predate the Records leak tests
  * (supplier request page, export page, document-order links, COA order
  * sends); `tests/api/records-public-leak.test.ts` plants its own, richer
@@ -125,6 +133,25 @@ export async function plantNeverSee(db: D1Database, o: PlantOptions): Promise<Pl
   planted.other_tenant_id = o.otherTenantId;
 
   return planted;
+}
+
+/**
+ * Make one record of the tenant under test point at the OTHER tenant's
+ * supplier. `table` is the table whose row the surface reads (`documents`,
+ * `document_requests`); only those two are accepted, and the column is always
+ * `supplier_id`.
+ */
+export async function pointAtOtherTenant(
+  db: D1Database,
+  planted: Planted,
+  target: { table: 'documents' | 'document_requests'; id: string },
+): Promise<void> {
+  const res = await db
+    .prepare(`UPDATE ${target.table} SET supplier_id = ? WHERE id = ?`)
+    .bind(planted.other_tenant_supplier_id, target.id)
+    .run();
+  // `changes` counts rows touched by triggers too (the search reindex), so "at least one".
+  expect(res.meta?.changes ?? 0).toBeGreaterThanOrEqual(1);
 }
 
 /** Fails naming every planted thing found in `text`. */

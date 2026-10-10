@@ -17,9 +17,14 @@
  * mid-run doesn't break the next-step pointers stored on each step_run.
  */
 
-import { generateId } from '../db';
+import { generateId, logAudit } from '../db';
 import { logRecordsActivity, parseRowData, computeDisplayTitle, rebuildRowRefs, refTypeForColumn } from './helpers';
-import { sendEmail, buildApprovalRequestEmail, buildUpdateRequestEmail } from '../email';
+import {
+  sendEmail,
+  buildApprovalRequestEmail,
+  buildUpdateRequestEmail,
+  buildWorkflowStepFailedEmail,
+} from '../email';
 import {
   generateUpdateRequestToken,
   computeExpiresAt,
@@ -27,7 +32,13 @@ import {
   requestFillFields,
 } from './updateRequests';
 import { BadRequestError } from '../permissions';
-import { publicCellValue, publicSenderName, recordsPublicAvailable } from './publicView';
+import {
+  loadPublicRowTitle,
+  publicCellValue,
+  publicRowTitle,
+  publicSenderName,
+  recordsPublicAvailable,
+} from './publicView';
 import type {
   ApprovalStepConfig,
   RecordColumnRow,
@@ -146,7 +157,9 @@ export function normalizeWorkflowSteps(
         }
         for (const key of cfg.visible_fields) {
           const col = typeof key === 'string' ? columns.find((c) => c.key === key && c.archived === 0) : undefined;
-          if (!col || col.type === 'attachment') {
+          // A file is never shown; a computed column has no stored value, so
+          // it would always be a dash on the page (C-139).
+          if (!col || col.type === 'attachment' || col.type === 'formula' || col.type === 'rollup') {
             throw new BadRequestError(`steps[${i}].config.visible_fields: "${String(key)}" is not a column that can be shown`);
           }
         }
@@ -362,7 +375,7 @@ export async function startWorkflowRun(
     },
   });
 
-  await executeStep(env, { workflow, runId, stepIndex: 0, rowId });
+  await startStep(env, { workflow, runId, stepIndex: 0, rowId });
   return { runId };
 }
 
@@ -514,10 +527,9 @@ export async function executeStep(
           .prepare('SELECT name FROM records_sheets WHERE id = ?')
           .bind(workflow.sheet_id)
           .first<{ name: string }>();
-        const row = await env.DB
-          .prepare('SELECT display_title FROM records_rows WHERE id = ?')
-          .bind(rowId)
-          .first<{ display_title: string | null }>();
+        // The title that leaves is the public projection of the title cell,
+        // never the grid's stored display_title (C-133).
+        const rowTitle = await loadPublicRowTitle(env.DB, workflow.tenant_id, rowId);
         const sender = await env.DB
           .prepare('SELECT name, email FROM users WHERE id = ?')
           .bind(workflow.created_by_user_id)
@@ -530,7 +542,7 @@ export async function executeStep(
           stepName: step.name,
           message: cfg.message ?? null,
           sheetName: sheet?.name || '',
-          rowTitle: row?.display_title ?? null,
+          rowTitle,
           publicUrl: `${env.appOrigin}/a/${token}`,
           // The organisation's brand (0140), from the workflow's own tenant.
           brand: await loadPublicBrand(env.DB, workflow.tenant_id, 'records_approval', { origin: env.appOrigin }),
@@ -555,6 +567,16 @@ export async function executeStep(
     // rather than failing a run that is already under way; what is left is
     // validated as before.
     const requestable = requestFillFields(columns, Array.isArray(cfg.fields_requested) ? cfg.fields_requested : []);
+    if (requestable.length === 0) {
+      // Nothing left to ask for. The step cannot be sent; `startStep` stops
+      // the run and tells the owner this sentence (C-135). It is never shown
+      // to anybody outside.
+      throw new BadRequestError(
+        'None of the fields this step asks for can be requested from somebody outside the organization ' +
+          '(a document, another record, a contact, a file or a computed column cannot be, and an archived column is gone). ' +
+          'Pick other fields for the step.',
+      );
+    }
     const fields = normalizeFieldsRequested(requestable.map((f) => f.column.key), columns);
     const urId = generateId();
     const urToken = generateApproverToken();
@@ -621,10 +643,7 @@ export async function executeStep(
           .prepare('SELECT name FROM records_sheets WHERE id = ?')
           .bind(workflow.sheet_id)
           .first<{ name: string }>();
-        const row = await env.DB
-          .prepare('SELECT display_title FROM records_rows WHERE id = ?')
-          .bind(rowId)
-          .first<{ display_title: string | null }>();
+        const rowTitle = await loadPublicRowTitle(env.DB, workflow.tenant_id, rowId);
         const sender = await env.DB
           .prepare('SELECT name, email FROM users WHERE id = ?')
           .bind(workflow.created_by_user_id)
@@ -634,7 +653,7 @@ export async function executeStep(
           senderName: sender?.name || sender?.email || 'A teammate',
           senderEmail: sender?.email || '',
           sheetName: sheet?.name || '',
-          rowTitle: row?.display_title ?? null,
+          rowTitle,
           message: cfg.message ?? null,
           dueDate: null,
           fieldCount: fields.length,
@@ -716,7 +735,7 @@ export async function advanceWorkflow(
     .prepare(`UPDATE records_workflow_runs SET current_step_id = ? WHERE id = ?`)
     .bind(next, runId)
     .run();
-  await executeStep(env, { workflow, runId, stepIndex: nextIdx, rowId });
+  await startStep(env, { workflow, runId, stepIndex: nextIdx, rowId });
 }
 
 /** Mark the run terminal (completed/rejected/cancelled). */
@@ -737,12 +756,186 @@ export async function markRunComplete(
 }
 
 // ---------------------------------------------------------------------
+// A step that cannot be started
+// ---------------------------------------------------------------------
+
+/**
+ * Start a step, and if it cannot be started, SAY SO and stop the run (C-135).
+ *
+ * Every path that begins a step goes through here -- the first step of a new
+ * run, and the next step after a decision or an answered request. Nothing a
+ * step throws while starting escapes to the caller, because the caller is
+ * often the PUBLIC decision route, by which point the approver's decision is
+ * already recorded: an exception there used to leave the step approved, the
+ * run "in progress" with no step waiting on anybody, no record of why, and a
+ * builder's validation sentence in the outsider's browser.
+ */
+async function startStep(
+  env: EngineEnv,
+  params: { workflow: RecordWorkflow; runId: string; stepIndex: number; rowId: string },
+): Promise<void> {
+  try {
+    await executeStep(env, params);
+  } catch (err) {
+    await failRun(env, { ...params, error: err });
+  }
+}
+
+/** What the owner is told. A validation sentence is theirs to read; anything else is not quoted. */
+function failureReason(err: unknown): string {
+  if (err instanceof BadRequestError && err.message) return err.message;
+  return 'The step could not be started because of an unexpected error.';
+}
+
+/**
+ * End a run whose step could not be started, visibly:
+ *
+ *   - the step's run row ends `skipped` with the reason in `response_comment`
+ *     (the run view prints it) and `{ failed: true, reason }` in
+ *     `response_value`. There is no `failed` status: the two status columns
+ *     are CHECKed enums from migration 0045 and this change adds no migration;
+ *   - the run ends `cancelled`, once (the UPDATE is conditional), so nothing
+ *     later in the workflow proceeds on a step that never happened and no
+ *     link of the run stays open;
+ *   - the row's activity feed and the audit log say which step and why;
+ *   - the workflow's owner is mailed, when mail is configured.
+ *
+ * Each of those is tried on its own. The owner corrects the step and starts
+ * the workflow again on the record.
+ */
+async function failRun(
+  env: EngineEnv,
+  params: { workflow: RecordWorkflow; runId: string; stepIndex: number; rowId: string; error: unknown },
+): Promise<void> {
+  const { workflow, runId, stepIndex, rowId } = params;
+  const step = workflow.steps[stepIndex];
+  const reason = failureReason(params.error);
+  console.error(`Workflow run ${runId}: step ${step?.id ?? stepIndex} could not be started:`, params.error);
+
+  const note = `Could not be started: ${reason}`.slice(0, 1000);
+  const marker = JSON.stringify({ failed: true, reason });
+  try {
+    if (step) {
+      const open = await env.DB
+        .prepare(
+          `UPDATE records_workflow_step_runs
+              SET status = 'skipped', response_comment = ?, response_value = ?, completed_at = datetime('now')
+            WHERE run_id = ? AND step_id = ? AND status IN ('pending', 'awaiting_response')`,
+        )
+        .bind(note, marker, runId, step.id)
+        .run();
+      if ((open.meta?.changes ?? 0) < 1) {
+        await env.DB
+          .prepare(
+            `INSERT INTO records_workflow_step_runs
+               (id, run_id, step_id, step_index, step_type, status, response_comment, response_value, started_at, completed_at)
+             VALUES (?, ?, ?, ?, ?, 'skipped', ?, ?, datetime('now'), datetime('now'))`,
+          )
+          .bind(generateId(), runId, step.id, stepIndex, step.type, note, marker)
+          .run();
+      }
+    }
+  } catch (err) {
+    console.error('Recording the failed step failed:', err);
+  }
+
+  let ended = false;
+  try {
+    const res = await env.DB
+      .prepare(
+        `UPDATE records_workflow_runs
+            SET status = 'cancelled', completed_at = datetime('now'), current_step_id = 'complete'
+          WHERE id = ? AND status IN ('pending', 'in_progress')`,
+      )
+      .bind(runId)
+      .run();
+    ended = (res.meta?.changes ?? 0) > 0;
+  } catch (err) {
+    console.error('Ending the run after a failed step failed:', err);
+  }
+  // Already ended by somebody else: it has been said once.
+  if (!ended) return;
+
+  // A request an earlier step of this run sent must not stay answerable.
+  try {
+    await env.DB
+      .prepare(
+        `UPDATE records_workflow_step_runs
+            SET status = 'skipped', completed_at = datetime('now')
+          WHERE run_id = ? AND status = 'awaiting_response'`,
+      )
+      .bind(runId)
+      .run();
+  } catch (err) {
+    console.error('Closing open steps of a failed run failed:', err);
+  }
+
+  await logRecordsActivity(env.DB, {
+    tenantId: workflow.tenant_id,
+    sheetId: workflow.sheet_id,
+    rowId,
+    actorId: null,
+    kind: 'workflow_step_failed',
+    details: {
+      workflow_id: workflow.id,
+      workflow_name: workflow.name,
+      run_id: runId,
+      step_id: step?.id ?? null,
+      step_name: step?.name ?? null,
+      reason,
+    },
+  });
+
+  try {
+    await logAudit(
+      env.DB,
+      null,
+      workflow.tenant_id,
+      'records_workflow_run.step_failed',
+      'records_workflow_run',
+      runId,
+      JSON.stringify({ workflow_id: workflow.id, step_id: step?.id ?? null, step_name: step?.name ?? null, reason, run_status: 'cancelled' }),
+      null,
+    );
+  } catch (err) {
+    console.error('Auditing the failed step failed:', err);
+  }
+
+  if (!env.RESEND_API_KEY) return;
+  try {
+    const owner = await env.DB
+      .prepare('SELECT email FROM users WHERE id = ? AND tenant_id = ? AND active = 1')
+      .bind(workflow.created_by_user_id, workflow.tenant_id)
+      .first<{ email: string | null }>();
+    if (!owner?.email) return;
+    const tmpl = buildWorkflowStepFailedEmail({
+      workflowName: workflow.name,
+      stepName: step?.name ?? `step ${stepIndex + 1}`,
+      reason,
+      sheetUrl: `${env.appOrigin}/records/${workflow.sheet_id}`,
+    });
+    await sendEmail(env.RESEND_API_KEY, { to: owner.email, subject: tmpl.subject, html: tmpl.html });
+  } catch (err) {
+    console.error('Mailing the workflow owner about a failed step failed:', err);
+  }
+}
+
+// ---------------------------------------------------------------------
 // Response handlers (called by approval public endpoint + UR submit)
 // ---------------------------------------------------------------------
 
 /**
- * Apply an approve/reject decision to a step_run. Idempotent: a second
- * call after the run has already moved on is a no-op.
+ * Apply an approve/reject decision to a step_run.
+ *
+ * ONE DECISION WINS (C-138). The step is claimed by a conditional UPDATE and
+ * the count it changed is what is believed: of two decisions arriving
+ * together, exactly one changes the row. The other gets `recorded: false`
+ * and nothing else happens for it -- no activity entry, no second advance of
+ * the run. (The UPDATE was already conditional; its result was not read, so
+ * both callers went on to advance.)
+ *
+ * NOTHING THROWN WHILE ADVANCING ESCAPES (C-135): once `recorded` is true the
+ * decision stands and the run is either moved on or stopped with a reason.
  */
 export async function handleApprovalResponse(
   env: EngineEnv,
@@ -752,20 +945,20 @@ export async function handleApprovalResponse(
     comment: string | null;
     responder: { kind: 'user'; id: string } | { kind: 'email'; email: string };
   },
-): Promise<{ advanced: boolean }> {
+): Promise<{ recorded: boolean; advanced: boolean }> {
   const { stepRunId, decision, comment, responder } = params;
   const sr = await env.DB
     .prepare(`SELECT * FROM records_workflow_step_runs WHERE id = ?`)
     .bind(stepRunId)
     .first<WorkflowStepRunDbRow>();
-  if (!sr) return { advanced: false };
-  if (sr.status !== 'awaiting_response') return { advanced: false };
+  if (!sr) return { recorded: false, advanced: false };
+  if (sr.status !== 'awaiting_response') return { recorded: false, advanced: false };
 
   const nextStatus: WorkflowStepRunStatus = decision === 'approve' ? 'approved' : 'rejected';
   const responderKey =
     responder.kind === 'user' ? responder.id : responder.email;
 
-  await env.DB
+  const claim = await env.DB
     .prepare(
       `UPDATE records_workflow_step_runs
          SET status = ?, response_comment = ?, responded_at = datetime('now'),
@@ -774,19 +967,21 @@ export async function handleApprovalResponse(
     )
     .bind(nextStatus, comment, responderKey, stepRunId)
     .run();
+  // Somebody else decided this step between the read above and this write.
+  if ((claim.meta?.changes ?? 0) < 1) return { recorded: false, advanced: false };
 
   // Reload the run + workflow snapshot so we can advance.
   const run = await env.DB
     .prepare(`SELECT * FROM records_workflow_runs WHERE id = ?`)
     .bind(sr.run_id)
     .first<{ id: string; tenant_id: string; workflow_id: string; sheet_id: string; row_id: string; status: string }>();
-  if (!run) return { advanced: false };
+  if (!run) return { recorded: true, advanced: false };
 
   const wfRow = await env.DB
     .prepare(`SELECT * FROM records_workflows WHERE id = ?`)
     .bind(run.workflow_id)
     .first<WorkflowDbRow>();
-  if (!wfRow) return { advanced: false };
+  if (!wfRow) return { recorded: true, advanced: false };
   const workflow = hydrateWorkflow(wfRow);
 
   await logRecordsActivity(env.DB, {
@@ -804,14 +999,22 @@ export async function handleApprovalResponse(
     },
   });
 
-  await advanceWorkflow(env, {
-    workflow,
-    runId: sr.run_id,
-    fromStepIndex: sr.step_index,
-    outcome: decision,
-    rowId: run.row_id,
-  });
-  return { advanced: true };
+  try {
+    await advanceWorkflow(env, {
+      workflow,
+      runId: sr.run_id,
+      fromStepIndex: sr.step_index,
+      outcome: decision,
+      rowId: run.row_id,
+    });
+  } catch (err) {
+    // Starting the next step cannot throw (`startStep`); this is the engine
+    // itself failing to move the run. The decision stands; the run is stopped
+    // with a reason rather than left in progress with nobody to wait for.
+    await failRun(env, { workflow, runId: sr.run_id, stepIndex: sr.step_index + 1, rowId: run.row_id, error: err });
+    return { recorded: true, advanced: false };
+  }
+  return { recorded: true, advanced: true };
 }
 
 /**
@@ -827,14 +1030,16 @@ export async function handleUpdateRequestResponse(
     .bind(updateRequestId)
     .first<WorkflowStepRunDbRow>();
   if (!sr) return;
-  await env.DB
+  const claim = await env.DB
     .prepare(
       `UPDATE records_workflow_step_runs
          SET status = 'completed', responded_at = datetime('now'), completed_at = datetime('now')
-       WHERE id = ?`,
+       WHERE id = ? AND status = 'awaiting_response'`,
     )
     .bind(sr.id)
     .run();
+  // Two answers arriving together: one of them moves the run on (C-138).
+  if ((claim.meta?.changes ?? 0) < 1) return;
 
   const run = await env.DB
     .prepare(`SELECT * FROM records_workflow_runs WHERE id = ?`)
@@ -848,13 +1053,17 @@ export async function handleUpdateRequestResponse(
   if (!wfRow) return;
   const workflow = hydrateWorkflow(wfRow);
 
-  await advanceWorkflow(env, {
-    workflow,
-    runId: sr.run_id,
-    fromStepIndex: sr.step_index,
-    outcome: 'approve',
-    rowId: run.row_id,
-  });
+  try {
+    await advanceWorkflow(env, {
+      workflow,
+      runId: sr.run_id,
+      fromStepIndex: sr.step_index,
+      outcome: 'approve',
+      rowId: run.row_id,
+    });
+  } catch (err) {
+    await failRun(env, { workflow, runId: sr.run_id, stepIndex: sr.step_index + 1, rowId: run.row_id, error: err });
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -891,7 +1100,6 @@ export interface PublicApprovalContext {
   workflowName: string;
   step: RecordWorkflowStep;
   sheetName: string;
-  rowTitle: string | null;
   rowData: RecordRowData;
   /** The workflow creator's NAME (a user of this tenant), or null. Never an email. */
   senderName: string | null;
@@ -929,7 +1137,7 @@ export async function loadPublicApprovalContext(
               run.tenant_id AS run_tenant_id, run.sheet_id AS run_sheet_id, run.row_id AS run_row_id,
               wf.name AS workflow_name, wf.steps AS workflow_steps,
               s.name AS sheet_name,
-              rr.display_title AS row_title, rr.data AS row_data,
+              rr.data AS row_data,
               u.name AS sender_name
          FROM records_workflow_step_runs sr
          JOIN records_workflow_runs run
@@ -955,7 +1163,6 @@ export async function loadPublicApprovalContext(
         workflow_name: string;
         workflow_steps: string | null;
         sheet_name: string;
-        row_title: string | null;
         row_data: string | null;
         sender_name: string | null;
       }
@@ -994,7 +1201,6 @@ export async function loadPublicApprovalContext(
     workflowName: found.workflow_name,
     step,
     sheetName: found.sheet_name,
-    rowTitle: found.row_title,
     rowData: parseRowData(found.row_data),
     senderName: found.sender_name,
   };
@@ -1023,7 +1229,8 @@ export async function buildPublicApprovalView(
   const fields: PublicApprovalView['row']['fields'] = [];
   for (const key of approvalVisibleFields(cfg)) {
     const col = colsByKey.get(key);
-    if (!col || col.type === 'attachment') continue;
+    // A step saved before computed columns were refused may still name one.
+    if (!col || col.type === 'attachment' || col.type === 'formula' || col.type === 'rollup') continue;
     fields.push({
       label: col.label,
       type: col.type,
@@ -1042,7 +1249,9 @@ export async function buildPublicApprovalView(
     },
     row: {
       sheet_name: ctx.sheetName,
-      title: ctx.rowTitle,
+      // The title cell through the public projection -- never the stored
+      // display_title, which for a reference title is the cell's JSON (C-133).
+      title: await publicRowTitle(db, ctx.tenantId, columns, ctx.rowData),
       fields,
     },
   };

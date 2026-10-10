@@ -25,9 +25,12 @@
  * is recoverable by the sweeper but the inverse isn't.)
  */
 
-import { logAudit, getClientIp } from '../../../../../lib/db';
+import { logAudit } from '../../../../../lib/db';
 import { loadLivePublicForm } from '../../../../../lib/records/forms';
-import { publicNotFound } from '../../../../../lib/records/publicView';
+import {
+  publicClientIp,
+  publicNotFound,
+} from '../../../../../lib/records/publicView';
 import type { Env } from '../../../../../lib/types';
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -98,7 +101,7 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
       .bind(attachmentId, form.tenant_id, form.id)
       .run();
 
-    const ip = getClientIp(context.request);
+    const ip = publicClientIp(context.request);
     await logAudit(
       context.env.DB,
       null,

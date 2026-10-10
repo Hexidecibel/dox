@@ -18,14 +18,19 @@
  *
  * Every view is rate limited per (form, address) and audited (C-130).
  */
-import { logAudit, getClientIp } from '../../../lib/db';
+import { logAudit } from '../../../lib/db';
 import {
   buildPublicFormView,
   entityKindsReferencedByForm,
   fetchPublicEntityOptions,
   loadLivePublicForm,
 } from '../../../lib/records/forms';
-import { publicNotFound, rateLimited, takePublicView } from '../../../lib/records/publicView';
+import {
+  publicClientIp,
+  publicNotFound,
+  rateLimited,
+  takePublicView,
+} from '../../../lib/records/publicView';
 import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
 
@@ -43,7 +48,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!found) return notFound();
     const { form, columns } = found;
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
     if (!(await takePublicView(context.env.DB, 'records_form_view', form.id, ip, VIEWS_PER_HOUR))) {
       return rateLimited();
     }

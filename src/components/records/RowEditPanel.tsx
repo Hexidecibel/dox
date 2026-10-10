@@ -97,6 +97,7 @@ function activityKindLabel(kind: string): string {
     case 'workflow_rejected': return 'rejected a workflow step';
     case 'workflow_completed': return 'completed a workflow';
     case 'workflow_cancelled': return 'cancelled a workflow';
+    case 'workflow_step_failed': return 'could not start a workflow step, so the workflow was stopped';
     default: return kind.replace(/_/g, ' ');
   }
 }

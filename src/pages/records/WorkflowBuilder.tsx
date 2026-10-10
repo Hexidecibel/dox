@@ -692,9 +692,11 @@ function ApprovalConfigEditor({
     ? users.find((u) => u.id === config.assignee_user_id) ?? null
     : null;
   // What the sign-off page shows of the row: its title, plus ONLY the
-  // columns picked here. A file column is never shown.
+  // columns picked here. A file column is never shown, and a computed one
+  // has no stored value to show (it would always be a dash), so neither is
+  // offered; the server refuses both.
   const showable = useMemo(
-    () => columns.filter((c) => c.archived === 0 && c.type !== 'attachment'),
+    () => columns.filter((c) => c.archived === 0 && !NON_FILLABLE_TYPES.has(c.type)),
     [columns],
   );
   const shown = config.visible_fields ?? [];

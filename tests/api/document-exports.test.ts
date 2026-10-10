@@ -21,7 +21,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { unzipSync, strFromU8 } from 'fflate';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
+import { plantNeverSee, expectNothingPlanted, pointAtOtherTenant } from '../helpers/never-see';
 import { fnContext, readJson } from '../helpers/requests';
 import type { TestUser } from '../helpers/requests';
 import { onRequestPost as exportZip } from '../../functions/api/document-exports/zip';
@@ -593,6 +593,24 @@ describe('GET /api/document-exports/public/:token', () => {
     const one = await exportLandingFile(landingCtx(token, { index: '0' }));
     expect(one.status).toBe(200);
     expectNothingPlanted(one.headers.get('Content-Disposition') ?? '', planted);
+    await one.arrayBuffer();
+
+    // Now the document on the link REFERENCES the other tenant's supplier.
+    // The page, the manifest and the generated file names are built from the
+    // document's supplier; none of them may name that one.
+    await pointAtOtherTenant(db, planted, { table: 'documents', id: a.id });
+    const crossedPage = await exportLanding(landingCtx(token));
+    expectNothingPlanted(await crossedPage.text(), planted);
+    const crossedZip = await exportLandingZip(landingCtx(token));
+    if (crossedZip.status === 200) {
+      const crossedFiles = unzip(await crossedZip.arrayBuffer());
+      expectNothingPlanted(Object.keys(crossedFiles).join('\n') + '\n' + (crossedFiles['manifest.csv'] ?? ''), planted);
+    } else {
+      expectNothingPlanted(await crossedZip.text(), planted);
+    }
+    const crossedOne = await exportLandingFile(landingCtx(token, { index: '0' }));
+    expectNothingPlanted(crossedOne.headers.get('Content-Disposition') ?? '', planted);
+    await crossedOne.arrayBuffer();
   });
 
   it('audits every view', async () => {

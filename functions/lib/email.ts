@@ -429,6 +429,33 @@ export function buildApprovalRequestEmail(params: {
 }
 
 /** Minimal HTML escape for interpolated strings in emails. */
+/**
+ * "A step of your workflow could not be started" -- to the workflow's OWNER,
+ * a portal user (C-135). Internal mail: not branded (C-101), plain, and it
+ * carries no link an outsider could use. The reason is the engine's own
+ * sentence about the step's configuration.
+ */
+export function buildWorkflowStepFailedEmail(params: {
+  workflowName: string;
+  stepName: string;
+  reason: string;
+  /** The sheet in the portal (a login is needed to open it). */
+  sheetUrl: string;
+}): { subject: string; html: string } {
+  const subject = `A workflow step could not be started: ${params.workflowName}`;
+  const html = `<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#222;">
+  <h2 style="margin:0 0 12px;font-size:18px;">A workflow step could not be started</h2>
+  <p style="margin:0 0 12px;line-height:1.6;">The step <strong>${escapeHtml(params.stepName)}</strong> of the workflow <strong>${escapeHtml(params.workflowName)}</strong> could not be started, so this run of the workflow was stopped. Nothing after that step ran, and nobody outside your organization was sent anything for it.</p>
+  <p style="margin:0 0 12px;line-height:1.6;"><strong>Why:</strong> ${escapeHtml(params.reason)}</p>
+  <p style="margin:0 0 12px;line-height:1.6;">Correct the step in the workflow builder, then start the workflow again on the record.</p>
+  <p style="margin:0;line-height:1.6;"><a href="${escapeHtml(params.sheetUrl)}">Open the sheet</a></p>
+</body>
+</html>`;
+  return { subject, html };
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')

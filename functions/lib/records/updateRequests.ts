@@ -19,7 +19,7 @@ import {
   refTypeForColumn,
 } from './helpers';
 import { BadRequestError, NotFoundError } from '../permissions';
-import { validatePublicValues, verifyEntityRefIds, type PublicFillField } from './forms';
+import { validatePublicValues, type PublicFillField } from './forms';
 import {
   isReferenceType,
   isUpdateRequestFieldType,
@@ -188,9 +188,9 @@ export async function publicCurrentValues(
  *
  *   1. only requested, fillable columns are read; each value is coerced by
  *      column type, and a wrong shape is a 400;
- *   2. a reference id is accepted only when it is this tenant's
- *      (`verifyEntityRefIds`, the public form's own check), and the name
- *      stored with it is the tenant's;
+ *   2. a reference field takes TYPED TEXT ONLY (C-136). A request never
+ *      publishes a list, so there is no id its recipient could have been
+ *      offered: any `{ id }` is a 400, the same whether or not the id exists;
  *   3. a value the recipient did not touch is NOT a change, and is not
  *      judged. The page pre-fills every field with what it showed, and the
  *      whole form comes back; a field sent back exactly as shown is dropped
@@ -229,8 +229,9 @@ export async function cleanUpdateRequestSubmission(
     touched[key] = raw[key];
   }
 
+  // No field of a request has `pickerKind`, so an `{ id }` is refused here
+  // without a lookup: a request never published a list to pick one from.
   const clean = validatePublicValues(touched, fields, { onlyPresent: true });
-  await verifyEntityRefIds(db, params.tenantId, fields, clean);
 
   // The same for a reference whose name came back in another shape
   // (`{ name }` rather than the bare string).

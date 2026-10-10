@@ -23,7 +23,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
+import { plantNeverSee, expectNothingPlanted, pointAtOtherTenant } from '../helpers/never-see';
 import { fnContext, readJson } from '../helpers/requests';
 import type { TestUser } from '../helpers/requests';
 import { onRequestPost as createOrder } from '../../functions/api/orders/index';
@@ -813,6 +813,12 @@ describe('sending a document order', () => {
     const page = await exportLanding(fnContext(`http://localhost/api/document-exports/public/${link.token}`, { params: { token: link.token } }));
     expect(page.status).toBe(200);
     expectNothingPlanted(await page.text(), planted);
+
+    // Now the document on the link REFERENCES the other tenant's supplier; the
+    // link re-reads the document on every open.
+    await pointAtOtherTenant(db, planted, { table: 'documents', id: spec.id });
+    const crossed = await exportLanding(fnContext(`http://localhost/api/document-exports/public/${link.token}`, { params: { token: link.token } }));
+    expectNothingPlanted(await crossed.text(), planted);
   });
 
   it('a certificate of analysis on a document line goes attached, like a COA pick', async () => {

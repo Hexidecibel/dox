@@ -6739,13 +6739,15 @@ paths:
       description: |
         Only the form's own fields are read; every value is coerced by column
         type and a value of the wrong shape is a 400. A customer / supplier /
-        product field accepts either typed text -- stored as
+        product field takes typed text -- stored as
         `{ name, unmatched: true }` for a person to match, never as a
-        reference -- or `{ id }`, which is accepted only when the id is this
-        tenant's and is stored with the tenant's own name for it. An id of
-        another tenant and an id that never existed are the same 400. The
-        created row's id is never returned. 10 submissions an hour per
-        (form, IP).
+        reference. `{ id }` is accepted ONLY on a field that publishes its
+        list (`picker: true`) and only for an id that list offers (this
+        tenant's, active); it is stored with the tenant's own name for it. On
+        a field without the opt-in an id is refused before any lookup, so a
+        real id, a retired one, another tenant's and one that never existed
+        are the same 400. The created row's id is never returned. 10
+        submissions an hour per (form, IP).
       security: []
       parameters:
         - name: slug
@@ -6787,8 +6789,11 @@ paths:
       description: |
         Multipart, one `file`. The form is resolved FIRST: without a live form
         that allows uploads, a file that is too large or of the wrong type is
-        the same 404 as anything else. The 415 body does not repeat the type
-        the client declared. The response names no storage key.
+        the same 404 as anything else. The stored type is decided from the
+        file's BYTES: a file that claims to be a PNG / JPEG / GIF / WebP / PDF
+        and is not, and anything that is markup (SVG, HTML, XML), is a 415
+        whatever the form allows. The 415 body does not repeat the type the
+        client declared. The response names no storage key.
       security: []
       parameters:
         - name: slug
@@ -6889,11 +6894,13 @@ paths:
       summary: Answer an update request (public, token-gated)
       description: |
         Only requested fields are read. Each value is coerced by column type (a
-        wrong shape is a 400 and the request stays open); a reference id is
-        accepted only when it is this tenant's; typed text in a reference field
-        is stored as `{ name, unmatched: true }`; a reference sent back exactly
-        as the page showed it is not a change. 5 answers an hour per
-        (request, IP).
+        wrong shape is a 400 and the request stays open). A reference field
+        takes typed text only, stored as `{ name, unmatched: true }`: a request
+        never publishes a list, so any `{ id }` is a 400, the same whether or
+        not the id exists. A value sent back exactly as the page showed it is
+        not a change. 5 answers an hour per (request, IP), and a refused
+        answer counts. A request a workflow sent is closed (404) once its run
+        is cancelled or its workflow is paused or archived.
       security: []
       parameters:
         - name: token
@@ -6931,7 +6938,8 @@ paths:
       description: |
         An allow-list: `step` (`name`, `message`, `workflow_name`,
         `sender_name`, `expires_at`) and `row` (`sheet_name`, `title`,
-        `fields`). `row.fields` holds ONLY the columns the step names in its
+        `fields`). `row.title` is the title cell as an outsider may read it (a
+        reference is a name, never an id). `row.fields` holds ONLY the columns the step names in its
         `visible_fields` config -- none by default, so the approver sees the
         record's title and nothing else -- each as `{ label, type, value }`
         where a reference is a name, never an id. `sender_name` is never an
@@ -6963,7 +6971,11 @@ paths:
       summary: Approve or reject (public, token-gated)
       description: |
         Passes through the same gate as the GET: a decision is refused exactly
-        where the page is refused. 5 decisions an hour per (step, IP).
+        where the page is refused. Of two decisions arriving together one is
+        recorded; the other changes nothing and gets the 404. If the workflow's
+        next step cannot be started, the decision still stands and is answered
+        200; the run is stopped and its owner told. 5 decisions an hour per
+        (step, IP).
       security: []
       parameters:
         - name: token

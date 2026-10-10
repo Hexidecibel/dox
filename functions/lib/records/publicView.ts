@@ -176,14 +176,20 @@ export function isReferenceType(type: RecordColumnType): boolean {
  *   from a public page); it is shown as typed. A bare string is an ID for
  *   every reference type except `contact`, which has no picker: there a bare
  *   string is what a person typed into the cell.
- * - A portal user's name that looks like an email address is not a name (it
- *   was never set), and is left out: a login address never leaves this way.
+ * - A CONTACT IS NEVER AN ADDRESS, whatever shape the cell has (C-134): a
+ *   portal user's name that is their email, a bare string that is an email,
+ *   an id-less `{ name }` that is an email -- each is left out. The rule is
+ *   applied to the NAME about to leave, not to one branch of how it was found.
+ * - A reference to ANOTHER RECORD is that record's title as an outsider may
+ *   read it (`publicRowTitle`), not its stored `display_title`, which for a
+ *   reference title column is the cell's raw JSON (C-133).
  */
 async function referenceNames(
   db: D1Database,
   tenantId: string,
   type: RecordColumnType,
   value: unknown,
+  depth: number,
 ): Promise<string[]> {
   const source = REF_NAME_SOURCE[type];
   if (!source || value == null) return [];
@@ -201,17 +207,66 @@ async function referenceNames(
       else if (typeof o.name === 'string') typed = o.name;
     }
     let name: string | null = typed;
-    if (id) {
+    if (id && type === 'record_ref') {
+      name = await linkedRowTitle(db, tenantId, id, depth);
+    } else if (id) {
       const row = await db
         .prepare(`SELECT ${source.column} AS name FROM ${source.table} WHERE id = ? AND tenant_id = ?`)
         .bind(id, tenantId)
         .first<{ name: string | null }>();
       name = row?.name ?? null;
-      if (type === 'contact' && name && name.includes('@')) name = null;
     }
+    if (type === 'contact' && name && name.includes('@')) name = null;
     if (typeof name === 'string' && name.trim()) names.push(name.trim());
   }
   return names;
+}
+
+/** How many records deep a title may be followed (a record titled by a record). */
+const LINKED_TITLE_DEPTH = 2;
+
+/**
+ * The title of a record another record points at: the tenant's own row, not
+ * archived, titled through the same projection as any other cell. Past
+ * `LINKED_TITLE_DEPTH` (records titled by records titled by records) it is
+ * nothing rather than a loop.
+ */
+async function linkedRowTitle(
+  db: D1Database,
+  tenantId: string,
+  rowId: string,
+  depth: number,
+): Promise<string | null> {
+  if (depth >= LINKED_TITLE_DEPTH) return null;
+  const row = await db
+    .prepare('SELECT sheet_id, data FROM records_rows WHERE id = ? AND tenant_id = ? AND archived = 0')
+    .bind(rowId, tenantId)
+    .first<{ sheet_id: string; data: string | null }>();
+  if (!row) return null;
+  const titleColumn = await db
+    .prepare(
+      `SELECT key, type FROM records_columns
+        WHERE sheet_id = ? AND tenant_id = ? AND is_title = 1 AND archived = 0
+        ORDER BY display_order ASC LIMIT 1`,
+    )
+    .bind(row.sheet_id, tenantId)
+    .first<{ key: string; type: RecordColumnType }>();
+  if (!titleColumn) return null;
+  return publicRowTitle(
+    db,
+    tenantId,
+    [{ key: titleColumn.key, type: titleColumn.type, is_title: 1, archived: 0 }],
+    parseObject(row.data) ?? {},
+    depth + 1,
+  );
+}
+
+/**
+ * A record's public title by its id: for the mail that carries a link, which
+ * has the row's id and not its data. Null for a row that is not the tenant's.
+ */
+export function loadPublicRowTitle(db: D1Database, tenantId: string, rowId: string): Promise<string | null> {
+  return linkedRowTitle(db, tenantId, rowId, 0);
 }
 
 function primitive(value: unknown): string | number | boolean | null {
@@ -231,11 +286,12 @@ export async function publicCellValue(
   tenantId: string,
   column: Pick<RecordColumnRow, 'type'>,
   value: unknown,
+  depth = 0,
 ): Promise<PublicRecordValue> {
   if (value == null || isComputedOrFile(column.type)) return null;
 
   if (isReferenceType(column.type)) {
-    const names = await referenceNames(db, tenantId, column.type, value);
+    const names = await referenceNames(db, tenantId, column.type, value, depth);
     return names.length ? names.join(', ') : null;
   }
 
@@ -255,6 +311,49 @@ export async function publicCellValue(
     default:
       return primitive(value);
   }
+}
+
+/**
+ * A record's TITLE as somebody outside may read it (C-133): the title
+ * column's cell through `publicCellValue`, as text.
+ *
+ * NEVER `records_rows.display_title`. That column is written for the signed-in
+ * grid, and for a title column that is a reference it has held the cell's raw
+ * JSON -- `{"id":"...","name":"..."}` -- so printing it put an internal id (and,
+ * for an id of another tenant sitting in the cell, that id and its label) on
+ * the update-request page, the sign-off page and the mail that carries the
+ * link. Every title that leaves is computed here from the row's data instead.
+ * No title column, or a title that resolves to nothing, is null and the page
+ * says "this record".
+ */
+export async function publicRowTitle(
+  db: D1Database,
+  tenantId: string,
+  columns: Array<Pick<RecordColumnRow, 'key' | 'type' | 'is_title' | 'archived'>>,
+  data: Record<string, unknown>,
+  depth = 0,
+): Promise<string | null> {
+  const titleColumn = columns.find((c) => c.is_title === 1 && !c.archived);
+  if (!titleColumn) return null;
+  const value = await publicCellValue(db, tenantId, titleColumn, data[titleColumn.key], depth);
+  if (value == null) return null;
+  const text = Array.isArray(value)
+    ? value.join(', ')
+    : typeof value === 'boolean'
+      ? (value ? 'Yes' : 'No')
+      : String(value);
+  return text.trim() ? text.trim().slice(0, 300) : null;
+}
+
+/**
+ * The address a public Records route counts a caller by: the one Cloudflare
+ * itself reports. `X-Forwarded-For` is the caller's own header and is NOT
+ * read here -- a limiter keyed on it is reset by changing a string. With no
+ * `CF-Connecting-IP` (only possible off Cloudflare) every caller shares one
+ * bucket, which is the safe direction.
+ */
+export function publicClientIp(request: Request): string {
+  return request.headers.get('CF-Connecting-IP')?.trim() || 'unknown';
 }
 
 // ---------------------------------------------------------------------------

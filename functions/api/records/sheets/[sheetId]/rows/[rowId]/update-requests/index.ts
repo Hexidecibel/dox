@@ -29,6 +29,7 @@ import {
   hydrateUpdateRequest,
 } from '../../../../../../../lib/records/updateRequests';
 import { sendEmail, buildUpdateRequestEmail } from '../../../../../../../lib/email';
+import { loadPublicRowTitle } from '../../../../../../../lib/records/publicView';
 import type { Env, User } from '../../../../../../../lib/types';
 import type {
   CreateUpdateRequestRequest,
@@ -212,7 +213,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           senderName: user.name || user.email,
           senderEmail: user.email,
           sheetName: sheet.name,
-          rowTitle: row.display_title,
+          // What leaves is the public projection of the title cell, never the
+          // grid's stored display_title (C-133).
+          rowTitle: await loadPublicRowTitle(context.env.DB, sheet.tenant_id, row.id),
           message,
           dueDate,
           fieldCount: fieldsRequested.length,

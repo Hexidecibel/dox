@@ -1854,14 +1854,26 @@ Anyone holding the form's link can read that list.
 type; a value of the wrong shape is a `400`. In a customer / supplier / product field:
 
 - text (`"Alpha Dairy"`) is stored as text for a person to match. It is never turned into a reference;
-- `{ "id": "..." }` is accepted only when the id belongs to the organization, and is stored with
-  the organization's own name for it. Any other id is a `400` that does not say why.
+- `{ "id": "..." }` is accepted only on a field that publishes its list (`picker: true`), and only
+  for an id that list offers; it is stored with the organization's own name for it. On any other
+  field, and on every field of an update request, an id is a `400` -- the same answer whether or
+  not the id exists.
+
+**Uploads.** The type stored for a file is decided from its bytes. A file that claims to be a PNG,
+JPEG, GIF, WebP or PDF and is not, and anything that is markup (SVG, HTML, XML), is a `415`.
+
+**Titles.** `row_title` / `row.title` is the record's title cell as an outsider may read it: a
+reference is a name, a contact is a name and never an address. It is never an id.
 
 **An update request** returns the requested fields and their `current_values`; a reference is
-shown as its name. Document, record, contact, file and computed columns cannot be requested.
+shown as its name. Document, record, contact, file and computed columns cannot be requested. A
+refused answer counts against the limit of 5 an hour. A request a workflow sent closes when its
+run is cancelled or its workflow is paused or archived.
 
 **A sign-off page** returns the record's title and only the columns the workflow step names in
-`visible_fields` (none by default), each as `{ "label", "type", "value" }`.
+`visible_fields` (none by default; never a file or a computed column), each as
+`{ "label", "type", "value" }`. Of two decisions sent together, one is recorded and the other gets
+the page's `404`.
 
 **One `404` for every unusable state** on each page: unknown link, not live, expired, already
 answered, archived, an inactive organization, or the Records module switched off. Each `GET` is

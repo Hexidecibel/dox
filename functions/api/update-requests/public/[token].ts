@@ -20,7 +20,7 @@
  * Rate limit: 30 reads and 5 submits per IP per request per hour. Every read
  * is audited (C-130).
  */
-import { logAudit, getClientIp } from '../../../lib/db';
+import { logAudit } from '../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../lib/ratelimit';
 import { errorToResponse, BadRequestError, NotFoundError } from '../../../lib/permissions';
 import {
@@ -35,7 +35,9 @@ import {
 } from '../../../lib/records/updateRequests';
 import { logRecordsActivity } from '../../../lib/records/helpers';
 import {
+  publicClientIp,
   publicNotFound,
+  publicRowTitle,
   publicSenderName,
   rateLimited,
   recordsPublicAvailable,
@@ -86,7 +88,6 @@ async function loadRequestContext(
 ): Promise<{
   request: RecordUpdateRequestRow;
   sheetName: string;
-  rowDisplayTitle: string | null;
   rowData: string | null;
   senderName: string | null;
   columns: RecordColumnRow[];
@@ -97,7 +98,7 @@ async function loadRequestContext(
               r.fields_requested, r.message, r.due_date, r.status, r.responded_at, r.expires_at,
               r.created_at, r.created_by_user_id,
               s.name AS sheet_name,
-              rr.display_title AS row_display_title, rr.data AS row_data,
+              rr.data AS row_data,
               u.name AS sender_name
          FROM records_update_requests r
          JOIN records_sheets s
@@ -112,13 +113,50 @@ async function loadRequestContext(
     .first<
       RecordUpdateRequestRow & {
         sheet_name: string;
-        row_display_title: string | null;
         row_data: string | null;
         sender_name: string | null;
       }
     >();
   if (!req) return null;
   if (!(await recordsPublicAvailable(db, req.tenant_id))) return null;
+
+  // A request a WORKFLOW sent lives and dies with its run (C-137), exactly as
+  // a sign-off link does (C-128): the step must still be waiting, the run in
+  // progress, the workflow active and not archived, all of the request's own
+  // tenant. Cancelling the run or pausing the workflow closes the link for
+  // the read and the write; a request somebody sent by hand has no such row
+  // and is unaffected.
+  const step = await db
+    .prepare(
+      `SELECT sr.status AS step_status, run.status AS run_status, run.tenant_id AS run_tenant_id,
+              wf.status AS workflow_status, wf.archived AS workflow_archived, wf.tenant_id AS workflow_tenant_id
+         FROM records_workflow_step_runs sr
+         LEFT JOIN records_workflow_runs run ON run.id = sr.run_id
+         LEFT JOIN records_workflows wf ON wf.id = run.workflow_id
+        WHERE sr.update_request_id = ?`,
+    )
+    .bind(req.id)
+    .first<{
+      step_status: string;
+      run_status: string | null;
+      run_tenant_id: string | null;
+      workflow_status: string | null;
+      workflow_archived: number | null;
+      workflow_tenant_id: string | null;
+    }>();
+  if (
+    step &&
+    !(
+      step.step_status === 'awaiting_response' &&
+      step.run_status === 'in_progress' &&
+      step.workflow_status === 'active' &&
+      step.workflow_archived === 0 &&
+      step.run_tenant_id === req.tenant_id &&
+      step.workflow_tenant_id === req.tenant_id
+    )
+  ) {
+    return null;
+  }
 
   const cols = await db
     .prepare(
@@ -134,7 +172,6 @@ async function loadRequestContext(
   return {
     request: req,
     sheetName: req.sheet_name,
-    rowDisplayTitle: req.row_display_title,
     rowData: req.row_data,
     senderName: req.sender_name,
     columns: cols.results ?? [],
@@ -167,7 +204,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return notFound();
     }
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
     if (!(await takePublicView(context.env.DB, 'records_update_request_view', ctx.request.id, ip, VIEWS_PER_HOUR))) {
       return rateLimited();
     }
@@ -186,7 +223,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const view: PublicUpdateRequestView = {
       request: {
         sheet_name: ctx.sheetName,
-        row_title: ctx.rowDisplayTitle,
+        // The title cell through the public projection -- never the stored
+        // display_title, which for a reference title is the cell's JSON (C-133).
+        row_title: await publicRowTitle(context.env.DB, tenantId, ctx.columns, parseRowData(ctx.rowData)),
         // A name, or the organisation's. Never an address.
         sender_name: await publicSenderName(context.env.DB, tenantId, ctx.senderName),
         message: ctx.request.message,
@@ -232,7 +271,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const token = context.params.token as string;
     if (!token) return notFound();
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
 
     // Resolve before rate-limiting so we don't burn limiter budget on
     // 404s (those are cheap and not abuse-prone).
@@ -258,26 +297,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    let body: PublicUpdateRequestSubmitRequest;
+    // Coerce by column type BEFORE anything is written. A refusal here is a
+    // 400 that leaves the request pending, so the recipient can correct it
+    // and send again -- and it COUNTS against the limit (C-141): a refused
+    // attempt used to cost nothing, so the write path could be probed without
+    // end.
+    let submittedData;
     try {
-      body = (await context.request.json()) as PublicUpdateRequestSubmitRequest;
-    } catch {
-      return jsonResponse({ error: 'Invalid JSON' }, 400);
+      let body: PublicUpdateRequestSubmitRequest;
+      try {
+        body = (await context.request.json()) as PublicUpdateRequestSubmitRequest;
+      } catch {
+        throw new BadRequestError('Invalid JSON');
+      }
+      if (!body || !body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
+        throw new BadRequestError('data must be an object');
+      }
+      submittedData = await cleanUpdateRequestSubmission(context.env.DB, {
+        tenantId: ctx.request.tenant_id,
+        columns: ctx.columns,
+        requestedKeys: parseFieldsRequested(ctx.request.fields_requested),
+        rawData: body.data,
+        currentData: parseRowData(ctx.rowData),
+      });
+    } catch (err) {
+      if (err instanceof BadRequestError) {
+        await recordAttempt(context.env.DB, rlKey, RATE_LIMIT_WINDOW_SECONDS);
+      }
+      throw err;
     }
-    if (!body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
-      throw new BadRequestError('data must be an object');
-    }
-
-    // Coerce by column type and check every id against the tenant BEFORE
-    // anything is written. A refusal here is a 400 that leaves the request
-    // pending, so the recipient can correct it and send again.
-    const submittedData = await cleanUpdateRequestSubmission(context.env.DB, {
-      tenantId: ctx.request.tenant_id,
-      columns: ctx.columns,
-      requestedKeys: parseFieldsRequested(ctx.request.fields_requested),
-      rawData: body.data,
-      currentData: parseRowData(ctx.rowData),
-    });
 
     // Apply changes (server enforces fields_requested whitelist).
     const { changes } = await applyUpdateRequestSubmission(context.env.DB, {

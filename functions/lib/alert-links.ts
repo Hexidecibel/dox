@@ -247,8 +247,8 @@ export async function buildAlertLandingView(
                 dt.name       AS document_type_name,
                 d.created_at  AS received_date
            FROM documents d
-           LEFT JOIN suppliers s      ON s.id  = d.supplier_id
-           LEFT JOIN document_types dt ON dt.id = d.document_type_id
+           LEFT JOIN suppliers s      ON s.id  = d.supplier_id AND s.tenant_id = d.tenant_id
+           LEFT JOIN document_types dt ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
           WHERE d.id = ? AND d.tenant_id = ? AND d.status != 'deleted'`
       )
       .bind(link.document_id, link.tenant_id)

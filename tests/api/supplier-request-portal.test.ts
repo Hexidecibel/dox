@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
+import { plantNeverSee, expectNothingPlanted, pointAtOtherTenant } from '../helpers/never-see';
 import { onRequestGet as portalGet } from '../../functions/api/supplier-requests/public/[token]';
 import { onRequestPost as portalUpload } from '../../functions/api/supplier-requests/public/[token]/upload';
 import { onRequest as middleware } from '../../functions/api/_middleware';
@@ -435,7 +435,7 @@ describe('the response is an allow-list', () => {
       authorId: seed.orgAdminId,
       supplierId,
     });
-    const { token, lineIds } = await makeRequest(['Allergen Statement', 'Kosher Certificate']);
+    const { token, lineIds, requestId } = await makeRequest(['Allergen Statement', 'Kosher Certificate']);
 
     const page = await get(token);
     expect(page.status).toBe(200);
@@ -445,6 +445,12 @@ describe('the response is an allow-list', () => {
     expectNothingPlanted(JSON.stringify(body), planted);
     // And the page again, now that an arrival sits on the ask.
     expectNothingPlanted(JSON.stringify((await get(token)).body), planted);
+
+    // Now the ask itself REFERENCES the other tenant's supplier. Whatever the
+    // page answers, it is nothing of that supplier.
+    await pointAtOtherTenant(db, planted, { table: 'document_requests', id: requestId });
+    const crossed = await get(token);
+    expectNothingPlanted(JSON.stringify(crossed.body), planted);
   });
 
   it('carries no internal id — not the request, tenant, supplier, line or requirement', async () => {

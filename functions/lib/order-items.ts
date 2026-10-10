@@ -164,8 +164,8 @@ export async function loadOrderLines(
          FROM order_items oi
          LEFT JOIN products p        ON p.id  = oi.product_id
          LEFT JOIN documents d       ON d.id  = oi.coa_document_id AND d.tenant_id = ?
-         LEFT JOIN document_types dt ON dt.id = d.document_type_id
-         LEFT JOIN suppliers s       ON s.id  = d.supplier_id
+         LEFT JOIN document_types dt ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
+         LEFT JOIN suppliers s       ON s.id  = d.supplier_id AND s.tenant_id = d.tenant_id
          LEFT JOIN document_versions dv
                 ON dv.document_id = d.id AND dv.version_number = d.current_version
          LEFT JOIN lots l            ON l.id  = oi.lot_id AND l.tenant_id = ?

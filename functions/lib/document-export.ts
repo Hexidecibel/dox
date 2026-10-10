@@ -205,7 +205,7 @@ export async function loadExportDocuments(
               dv.mime_type    AS mime_type,
               dv.file_size    AS file_size
          FROM documents d
-         LEFT JOIN suppliers s       ON s.id  = d.supplier_id
+         LEFT JOIN suppliers s       ON s.id  = d.supplier_id AND s.tenant_id = d.tenant_id
          LEFT JOIN document_types dt
                 ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
          INNER JOIN document_versions dv

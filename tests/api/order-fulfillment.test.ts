@@ -28,7 +28,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { PDFDocument } from 'pdf-lib';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { plantNeverSee, expectNothingPlanted } from '../helpers/never-see';
+import { plantNeverSee, expectNothingPlanted, pointAtOtherTenant } from '../helpers/never-see';
 import { fnContext, readJson } from '../helpers/requests';
 import type { TestUser } from '../helpers/requests';
 import { onRequestPost as createOrder } from '../../functions/api/orders/index';
@@ -718,6 +718,23 @@ describe('GET /api/orders/:id/send-preview + POST /api/orders/:id/send', () => {
     const { attachments, ...rest } = mail[0];
     expectNothingPlanted(JSON.stringify(rest), planted);
     expectNothingPlanted((attachments ?? []).map((x) => x.filename).join('\n'), planted);
+
+    // A second certificate that REFERENCES the other tenant's supplier when it
+    // is sent: the attachment's generated name and the mail are built from
+    // the certificate's supplier, and may not name that one.
+    const b = await makeDocument({ title: 'Cert pointing next door', lots: [{ number: '77700002' }] });
+    const order2 = await orderId({ po_number: 'PO-PLANT-2' });
+    await pick(order2, [b.id]);
+    await pointAtOtherTenant(db, planted, { table: 'documents', id: b.id });
+    const plan2 = await preview(order2);
+    expectNothingPlanted(JSON.stringify(plan2), planted);
+    const mail2 = stubMail();
+    await send(order2, { fingerprint: plan2.fingerprint });
+    for (const m of mail2) {
+      const { attachments: files, ...body2 } = m;
+      expectNothingPlanted(JSON.stringify(body2), planted);
+      expectNothingPlanted((files ?? []).map((x) => x.filename).join('\n'), planted);
+    }
   });
 
   it('attaches each certificate under a generated name, from the organization, reply-to the sender', async () => {

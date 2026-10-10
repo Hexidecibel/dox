@@ -20,15 +20,19 @@
  * Rate limit: 30 reads and 5 decisions per IP per step per hour. Every read
  * is audited (C-130).
  */
-import { logAudit, getClientIp } from '../../../lib/db';
+import { logAudit } from '../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../lib/ratelimit';
-import { errorToResponse, BadRequestError } from '../../../lib/permissions';
 import {
   buildPublicApprovalView,
   handleApprovalResponse,
   loadPublicApprovalContext,
 } from '../../../lib/records/workflows';
-import { publicNotFound, rateLimited, takePublicView } from '../../../lib/records/publicView';
+import {
+  publicClientIp,
+  publicNotFound,
+  rateLimited,
+  takePublicView,
+} from '../../../lib/records/publicView';
 import { loadPublicBrand } from '../../../lib/tenant-brand';
 import type { Env } from '../../../lib/types';
 import type { PublicApprovalSubmitRequest, PublicApprovalSubmitResponse } from '../../../../shared/types';
@@ -55,7 +59,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const ctx = await loadPublicApprovalContext(context.env.DB, token);
     if (!ctx) return notFound();
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
     if (!(await takePublicView(context.env.DB, 'records_approval_view', ctx.stepRun.id, ip, VIEWS_PER_HOUR))) {
       return rateLimited();
     }
@@ -93,7 +97,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const token = context.params.token as string;
     if (!token) return notFound();
 
-    const ip = getClientIp(context.request) ?? 'unknown';
+    const ip = publicClientIp(context.request);
 
     // The same gate the page passed through. A decision is refused exactly
     // where the page is refused.
@@ -112,13 +116,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Invalid JSON' }, 400);
     }
     if (!body || (body.decision !== 'approve' && body.decision !== 'reject')) {
-      throw new BadRequestError('decision must be approve or reject');
+      return jsonResponse({ error: 'decision must be approve or reject' }, 400);
     }
     const comment = typeof body.comment === 'string' ? body.comment.trim().slice(0, 2000) : null;
 
     const origin = new URL(context.request.url).origin;
     const responderEmail = sr.assignee_email || 'unknown@external';
-    await handleApprovalResponse(
+    const outcome = await handleApprovalResponse(
       { DB: context.env.DB, RESEND_API_KEY: context.env.RESEND_API_KEY ?? null, appOrigin: origin },
       {
         stepRunId: sr.id,
@@ -127,6 +131,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         responder: { kind: 'email', email: responderEmail },
       },
     );
+    // Another decision reached this step first (two tabs, a double click, a
+    // forwarded link). This one changed nothing and is answered as the link
+    // now answers everybody: it is no longer open (C-138).
+    if (!outcome.recorded) return notFound();
 
     await recordAttempt(context.env.DB, rlKey, RATE_LIMIT_WINDOW_SECONDS);
 
@@ -145,8 +153,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const response: PublicApprovalSubmitResponse = { success: true, decision: body.decision };
     return jsonResponse(response, 200);
   } catch (err) {
-    const httpErr = errorToResponse(err);
-    if (httpErr) return httpErr;
+    // No error object is turned into a response here. The engine's errors are
+    // written for the people who build workflows ("pick at least one field
+    // ..."), and this is the approver's browser (C-135).
     console.error('Public approval submit error:', err);
     return jsonResponse({ error: 'Submission failed' }, 500);
   }

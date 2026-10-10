@@ -427,6 +427,13 @@ export interface PublicFillField {
   column: RecordColumnRow;
   label: string;
   required: boolean;
+  /**
+   * The kind whose list this field PUBLISHES, when its form builder opted it
+   * in (C-120). Only such a field accepts an id, and only an id that list
+   * offers. Null / absent -- every field without the opt-in, and every field
+   * of an update request -- is typed text only (C-136).
+   */
+  pickerKind?: PublicEntityKind | null;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -469,20 +476,25 @@ export function validatePublicValues(
       if (opts.onlyPresent) out[key] = null;
       continue;
     }
-    out[key] = coercePublicValue(field.column, value, field.label);
+    out[key] = coercePublicValue(field.column, value, field.label, { acceptIds: !!field.pickerKind });
   }
   return out;
 }
 
 /**
- * Verify every reference id in cleaned public data belongs to THIS tenant,
- * and replace what the outsider sent beside it with the tenant's own row:
- * the stored cell becomes `{ id, name }` with the name read from the table,
- * so an outsider cannot attach a label of their choosing to a real id.
+ * Verify every reference id in cleaned public data is one THE PUBLISHED LIST
+ * OFFERS, and replace what the outsider sent beside it with the tenant's own
+ * row (C-136, which tightens C-125 / C-126).
  *
- * Throws `BadRequestError` for the first id that is not the tenant's, with a
- * message that does not say which id or why -- an id from another tenant and
- * an id that never existed read the same.
+ * An id can only be in the data for a field that opted its list in
+ * (`coercePublicValue` refuses one everywhere else, before any lookup). For
+ * such a field the id must be in the very list the form GET published --
+ * `fetchPublicEntityOptions`, the same query and the same cap -- so an id is
+ * accepted exactly when the page could have offered it: this tenant's, ACTIVE,
+ * and within the first 500 by name. A deactivated supplier, another tenant's
+ * id and an id that never existed are the same 400, which does not say which
+ * id or why. The stored cell is `{ id, name }` with the name from the list,
+ * so an outsider cannot attach a label of their choosing to a real id.
  *
  * Text an outsider typed (`{ name, unmatched: true }`, no id) is left as it
  * is: it references nothing, and nothing is matched for them.
@@ -493,9 +505,10 @@ export async function verifyEntityRefIds(
   fields: PublicFillField[],
   data: RecordRowData,
 ): Promise<void> {
+  const offered = new Map<PublicEntityKind, Map<string, string>>();
   for (const field of fields) {
-    const table = entityRefTable(field.column.type);
-    if (!table) continue;
+    const kind = field.pickerKind;
+    if (!kind) continue;
     const value = data[field.column.key];
     if (value == null) continue;
     const items = Array.isArray(value) ? value : [value];
@@ -506,30 +519,19 @@ export async function verifyEntityRefIds(
         verified.push(item);
         continue;
       }
-      const row = await db
-        .prepare(`SELECT id, name FROM ${table} WHERE id = ? AND tenant_id = ?`)
-        .bind(id, tenantId)
-        .first<{ id: string; name: string }>();
-      if (!row) {
+      let list = offered.get(kind);
+      if (!list) {
+        const options = await fetchPublicEntityOptions(db, tenantId, new Set([kind]));
+        list = new Map((options?.[kind] ?? []).map((o) => [o.id, o.name]));
+        offered.set(kind, list);
+      }
+      const name = list.get(id);
+      if (name === undefined) {
         throw new BadRequestError(`Field "${field.label}" has an invalid selection`);
       }
-      verified.push({ id: row.id, name: row.name });
+      verified.push({ id, name });
     }
     data[field.column.key] = Array.isArray(value) ? verified : verified[0];
-  }
-}
-
-/** Map a column type to its tenant-scoped table for ref verification. */
-function entityRefTable(columnType: string): 'customers' | 'suppliers' | 'products' | null {
-  switch (columnType) {
-    case 'customer_ref':
-      return 'customers';
-    case 'supplier_ref':
-      return 'suppliers';
-    case 'product_ref':
-      return 'products';
-    default:
-      return null;
   }
 }
 
@@ -547,14 +549,16 @@ function typedReference(text: string): { name: string; unmatched: true } {
   return { name: text.trim().slice(0, PUBLIC_NAME_MAX), unmatched: true };
 }
 
-function coerceReferenceItem(item: unknown, allowId: boolean, label: string): unknown {
+function coerceReferenceItem(item: unknown, acceptIds: boolean, label: string): unknown {
   if (typeof item === 'string' && item.trim()) return typedReference(item);
   if (item && typeof item === 'object' && !Array.isArray(item)) {
     const o = item as { id?: unknown; name?: unknown };
-    // An id is kept as an id ONLY -- `verifyEntityRefIds` checks it against
-    // the tenant and supplies the name. Whatever else was in the object is
-    // dropped here.
-    if (allowId && typeof o.id === 'string' && o.id) return { id: o.id };
+    // An id is kept as an id ONLY, and only on a field that publishes its
+    // list -- `verifyEntityRefIds` then checks it against that list and
+    // supplies the name. Whatever else was in the object is dropped here.
+    // On any other field an id is refused RIGHT HERE, with no lookup, so the
+    // answer is the same whether or not the id exists.
+    if (acceptIds && typeof o.id === 'string' && o.id) return { id: o.id };
     if (o.id == null && typeof o.name === 'string' && o.name.trim()) return typedReference(o.name);
   }
   throw new BadRequestError(`Field "${label}" has an invalid selection`);
@@ -565,7 +569,12 @@ function coerceReferenceItem(item: unknown, allowId: boolean, label: string): un
  * shape the type allows is refused with the field's label; nothing an
  * outsider sends is stored as sent.
  */
-export function coercePublicValue(column: RecordColumnRow, value: unknown, label: string): unknown {
+export function coercePublicValue(
+  column: RecordColumnRow,
+  value: unknown,
+  label: string,
+  opts: { acceptIds?: boolean } = {},
+): unknown {
   const type = column.type;
   switch (type) {
     case 'number':
@@ -617,13 +626,14 @@ export function coercePublicValue(column: RecordColumnRow, value: unknown, label
     case 'product_ref':
     case 'customer_ref':
     case 'contact': {
-      // A contact has no public list, so it is only ever typed text.
-      const allowId = type !== 'contact';
+      // An id only where the field's own list is published (never a contact,
+      // which has no list; never an update request, which publishes none).
+      const acceptIds = type !== 'contact' && opts.acceptIds === true;
       if (Array.isArray(value)) {
         if (value.length > PUBLIC_LIST_MAX) throw new BadRequestError(`Field "${label}" has an invalid selection`);
-        return value.map((item) => coerceReferenceItem(item, allowId, label));
+        return value.map((item) => coerceReferenceItem(item, acceptIds, label));
       }
-      return coerceReferenceItem(value, allowId, label);
+      return coerceReferenceItem(value, acceptIds, label);
     }
     default:
       // Computed, file, document and record columns are never fillable from
