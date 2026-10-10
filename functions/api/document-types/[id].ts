@@ -15,11 +15,13 @@ import {
   parseSharingRule,
   type SharingRule,
 } from '../../../shared/sharingRule';
+import {
+  checkDuplicateConcept,
+  duplicateConceptResponse,
+  slugChangeRefusal,
+} from '../../lib/duplicate-concepts';
+import type { DuplicateConcept } from '../../../shared/duplicateConcept';
 import type { Env, User } from '../../lib/types';
-
-function slugify(text: string): string {
-  return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
 
 function parseExtractionFields(docType: Record<string, unknown>): void {
   if (docType.extraction_fields && typeof docType.extraction_fields === 'string') {
@@ -74,7 +76,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 /**
  * PUT /api/document-types/:id
  * Update a document type. org_admin+ for own tenant.
- * Fields: name, description, active. If name changes, slug is updated too.
+ * Fields: name, description, active, and the renewal / sharing settings.
+ *
+ * A RENAME DOES NOT TOUCH THE SLUG (decision C-154). It used to: every rename
+ * re-derived the slug from the new name, so a renamed type stopped being the
+ * row a starter-pack update, the classifier's slug match or a saved
+ * `?slug=` link was looking for. The slug is set once, at create. Sending a
+ * different `slug` is a 400 that says so.
+ *
+ * Renaming INTO another concept's name (an existing type, or an item or alias
+ * of the organisation's starter pack) is refused with 409 `duplicate_concept`;
+ * `allow_duplicate: true` overrides, and is audited.
  */
 export const onRequestPut: PagesFunction<Env> = async (context) => {
   try {
@@ -112,7 +124,15 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       sharing_rule?: string | null;
       /** Days of renewal-alert warning for this type; null = the organization's setting (0111). */
       renewal_alert_lead_days?: number | null;
+      /** Refused unless it is the slug the type already has. */
+      slug?: string;
+      /** Rename although the new name is another concept's. Audited. */
+      allow_duplicate?: boolean;
     };
+
+    const slugRefusal = slugChangeRefusal(body.slug, documentType.slug as string);
+    if (slugRefusal) return slugRefusal;
+    let duplicateOverride: DuplicateConcept | null = null;
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
@@ -128,34 +148,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           { status: 400, headers: { 'Content-Type': 'application/json' } }
         );
       }
+      // THE SLUG STAYS. Only a name that actually changes is compared with
+      // the other concepts, so re-saving the dialog is never refused.
+      if (name !== documentType.name) {
+        const dup = await checkDuplicateConcept(context.env.DB, {
+          tenantId: documentType.tenant_id as string,
+          vocabulary: 'document_types',
+          name,
+          slug: documentType.slug as string,
+          excludeId: docTypeId,
+        });
+        if (dup) {
+          if (body.allow_duplicate !== true) return duplicateConceptResponse(dup);
+          duplicateOverride = dup.duplicate;
+        }
+      }
       updates.push('name = ?');
       params.push(name);
-
-      // Update slug when name changes
-      const newSlug = slugify(name);
-      if (!newSlug) {
-        return new Response(
-          JSON.stringify({ error: 'Could not generate a valid slug from name' }),
-          { status: 400, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-
-      // Check slug uniqueness within tenant (exclude current record)
-      const existing = await context.env.DB.prepare(
-        'SELECT id FROM document_types WHERE slug = ? AND tenant_id = ? AND id != ?'
-      )
-        .bind(newSlug, documentType.tenant_id, docTypeId)
-        .first();
-
-      if (existing) {
-        return new Response(
-          JSON.stringify({ error: 'A document type with this slug already exists for this tenant' }),
-          { status: 409, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-
-      updates.push('slug = ?');
-      params.push(newSlug);
     }
 
     if (body.description !== undefined) {
@@ -361,6 +370,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         ...(body.renewal_window !== undefined || body.renewal_policy !== undefined
           ? { previous_renewal_window: documentType.renewal_window ?? null }
           : {}),
+        ...(body.name !== undefined && body.name !== documentType.name
+          ? { previous_name: documentType.name, slug_unchanged: documentType.slug }
+          : {}),
+        ...(duplicateOverride ? { duplicate_override: duplicateOverride } : {}),
       }),
       getClientIp(context.request)
     );

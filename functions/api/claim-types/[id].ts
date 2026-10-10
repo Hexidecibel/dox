@@ -14,7 +14,13 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { isValidClaimSubjectGrain, CLAIM_SUBJECT_GRAINS } from '../../lib/registry';
-import { slugifyVocab, listClaimTypeRequirements } from '../../lib/registry-vocab';
+import { listClaimTypeRequirements } from '../../lib/registry-vocab';
+import {
+  checkDuplicateConcept,
+  duplicateConceptResponse,
+  slugChangeRefusal,
+} from '../../lib/duplicate-concepts';
+import type { DuplicateConcept } from '../../../shared/duplicateConcept';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -53,8 +59,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
 /**
  * PUT /api/claim-types/:id
- * Fields: name, slug, description, subject_grain, sort_order, active.
- * As with requirements, renaming does not silently re-slug.
+ * Fields: name, description, subject_grain, sort_order, active.
+ * THE SLUG DOES NOT CHANGE (decision C-154): sending one other than the row's
+ * own is a 400. Renaming into another concept's name is 409
+ * `duplicate_concept` unless `allow_duplicate: true` (audited).
  */
 export const onRequestPut: PagesFunction<Env> = async (context) => {
   try {
@@ -76,7 +84,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       subject_grain?: string;
       sort_order?: number;
       active?: number | boolean;
+      allow_duplicate?: boolean;
     };
+
+    const slugRefusal = slugChangeRefusal(body.slug, claimType.slug as string);
+    if (slugRefusal) return slugRefusal;
+    let duplicateOverride: DuplicateConcept | null = null;
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
@@ -84,23 +97,21 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.name !== undefined) {
       const name = sanitizeString(body.name);
       if (!name) return json({ error: 'name cannot be empty' }, 400);
+      if (name !== claimType.name) {
+        const dup = await checkDuplicateConcept(context.env.DB, {
+          tenantId: claimType.tenant_id as string,
+          vocabulary: 'claim_types',
+          name,
+          slug: claimType.slug as string,
+          excludeId: id,
+        });
+        if (dup) {
+          if (body.allow_duplicate !== true) return duplicateConceptResponse(dup);
+          duplicateOverride = dup.duplicate;
+        }
+      }
       updates.push('name = ?');
       params.push(name);
-    }
-
-    if (body.slug !== undefined) {
-      const slug = slugifyVocab(body.slug);
-      if (!slug) return json({ error: 'Could not generate a valid slug' }, 400);
-      const existing = await context.env.DB.prepare(
-        'SELECT id FROM claim_types WHERE slug = ? AND tenant_id = ? AND id != ?',
-      )
-        .bind(slug, claimType.tenant_id, id)
-        .first();
-      if (existing) {
-        return json({ error: 'A claim type with this slug already exists for this tenant' }, 409);
-      }
-      updates.push('slug = ?');
-      params.push(slug);
     }
 
     if (body.description !== undefined) {
@@ -149,7 +160,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       'claim_type_updated',
       'claim_type',
       id,
-      JSON.stringify({ changes: body }),
+      JSON.stringify({
+        changes: body,
+        ...(duplicateOverride ? { duplicate_override: duplicateOverride } : {}),
+      }),
       getClientIp(context.request),
     );
 

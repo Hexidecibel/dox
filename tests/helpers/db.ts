@@ -134,6 +134,7 @@ import m0137 from '../../migrations/0137_sharing_rule.sql?raw';
 import m0138 from '../../migrations/0138_order_documents.sql?raw';
 import m0139 from '../../migrations/0139_document_holds.sql?raw';
 import m0140 from '../../migrations/0140_tenant_brands.sql?raw';
+import m0141 from '../../migrations/0141_pack_ledger.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -150,7 +151,7 @@ const migrations: string[] = [
   m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112, m0113, m0114,
   m0115, m0116, m0117, m0118, m0119, m0120, m0121, m0122, m0123, m0124,
   m0125, m0126, m0130, m0131, m0132, m0133, m0134, m0135, m0136,
-  m0137, m0138, m0139, m0140,
+  m0137, m0138, m0139, m0140, m0141,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */
@@ -395,6 +396,8 @@ export function generateTestId(): string {
 
 export async function cleanTables(db: D1Database): Promise<void> {
   const tables = [
+    // 0141 pack ledger: both FK tenants only (row_id is a bare pointer).
+    'pack_applied_items', 'tenant_packs',
     // 0140 brand: the brand points at its logo (no action), and both FK users
     // and tenants, so the brand clears first and both clear ahead of those.
     'tenant_brands', 'tenant_brand_logos',

@@ -12,7 +12,12 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
-import { slugifyVocab } from '../../lib/registry-vocab';
+import {
+  checkDuplicateConcept,
+  duplicateConceptResponse,
+  slugChangeRefusal,
+} from '../../lib/duplicate-concepts';
+import type { DuplicateConcept } from '../../../shared/duplicateConcept';
 import {
   REQUIREMENT_SCOPES,
   isRequirementScope,
@@ -50,16 +55,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
 /**
  * PUT /api/requirements/:id
- * Fields: name, slug, description, checklist, sort_order, active, scope.
+ * Fields: name, description, checklist, sort_order, active, scope.
  *
  * `scope` (0123) changes what every supplier this requirement is attached to
  * owes — "once" becomes "once per active product". It is audited on its own
  * (`requirement.scope_changed`, with the previous value) because it is the
  * one field here that moves gap reports; preview the impact first with
  * GET /api/requirements/:id/scope-preview?scope=.
- * Renaming does NOT re-slug automatically — the slug is the stable identifier
- * that starter packs and importers key on, and silently rewriting it would
- * break a re-run of `bin/create-tenant`. Pass `slug` explicitly to change it.
+ * THE SLUG DOES NOT CHANGE (decision C-154). It is the stable identifier that
+ * starter-pack updates, supplier packets and importers key on. There used to
+ * be an explicit `slug` field here that could move it; sending a slug other
+ * than the one the row has is now a 400 that says so.
+ *
+ * Renaming INTO another concept's name is refused with 409
+ * `duplicate_concept`; `allow_duplicate: true` overrides, and is audited.
  */
 export const onRequestPut: PagesFunction<Env> = async (context) => {
   try {
@@ -82,7 +91,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       sort_order?: number;
       active?: number | boolean;
       scope?: string;
+      allow_duplicate?: boolean;
     };
+
+    const slugRefusal = slugChangeRefusal(body.slug, requirement.slug as string);
+    if (slugRefusal) return slugRefusal;
+    let duplicateOverride: DuplicateConcept | null = null;
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
@@ -103,23 +117,21 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.name !== undefined) {
       const name = sanitizeString(body.name);
       if (!name) return json({ error: 'name cannot be empty' }, 400);
+      if (name !== requirement.name) {
+        const dup = await checkDuplicateConcept(context.env.DB, {
+          tenantId: requirement.tenant_id as string,
+          vocabulary: 'requirements',
+          name,
+          slug: requirement.slug as string,
+          excludeId: id,
+        });
+        if (dup) {
+          if (body.allow_duplicate !== true) return duplicateConceptResponse(dup);
+          duplicateOverride = dup.duplicate;
+        }
+      }
       updates.push('name = ?');
       params.push(name);
-    }
-
-    if (body.slug !== undefined) {
-      const slug = slugifyVocab(body.slug);
-      if (!slug) return json({ error: 'Could not generate a valid slug' }, 400);
-      const existing = await context.env.DB.prepare(
-        'SELECT id FROM requirements WHERE slug = ? AND tenant_id = ? AND id != ?',
-      )
-        .bind(slug, requirement.tenant_id, id)
-        .first();
-      if (existing) {
-        return json({ error: 'A requirement with this slug already exists for this tenant' }, 409);
-      }
-      updates.push('slug = ?');
-      params.push(slug);
     }
 
     if (body.description !== undefined) {
@@ -166,7 +178,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       'requirement_updated',
       'requirement',
       id,
-      JSON.stringify({ changes: body }),
+      JSON.stringify({
+        changes: body,
+        ...(duplicateOverride ? { duplicate_override: duplicateOverride } : {}),
+      }),
       getClientIp(context.request),
     );
 

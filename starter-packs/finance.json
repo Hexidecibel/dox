@@ -1,5 +1,6 @@
 {
   "pack": "finance",
+  "version": 1,
   "label": "Financial Records",
   "description": "Minimal starter vocabulary for a financial-records tenant. Deliberately small and generic: it exists to prove the platform is aimed by configuration, not to guess at a client's retention schedule.",
   "_editing": [
@@ -19,7 +20,13 @@
     "teach               = the worked example the setup wizard teaches one concept with.",
     "modules             = which parts of the portal a tenant seeded from this pack starts with.",
     "",
-    "Seeding is additive (INSERT OR IGNORE) — re-running never overwrites edits made in the admin UI."
+    "Every 'slug' is the stable id and is the same in every organisation: never change one.",
+    "aliases (optional, on a document type, a requirement or a claim type) = other names for the same thing; the",
+    "portal uses them to refuse a second copy of something the pack already defines.",
+    "version = a whole number. RAISE IT BY ONE whenever anything else in this file changes, run 'npm run build:packs',",
+    "and add the new hash to tests/fixtures/starter-pack-versions.json (the failing test prints the line).",
+    "Applying is additive (INSERT OR IGNORE) — it never overwrites a row. Only a roll-forward (Settings > Starter pack)",
+    "updates one, and only where the organisation has not changed what the pack wrote."
   ],
   "_deliberately_omitted": [
     "Retention PERIODS (7 years, permanent, ...). We do not know this client's schedule and a wrong number in a compliance tool is worse than no number. Retention is a per-document field, not a vocabulary row, and is parked in backlog.md.",

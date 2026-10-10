@@ -1,5 +1,6 @@
 {
   "pack": "fsqa",
+  "version": 1,
   "label": "Food Safety & Quality Assurance",
   "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which requirements it CLOSES, and which claims OPEN new ones.",
   "_editing": [
@@ -33,8 +34,17 @@
     "teach               = the worked example the setup wizard teaches one concept with.",
     "modules             = which parts of the portal a tenant seeded from this pack starts with.",
     "",
-    "Every 'slug' is the stable id. Change a name freely; change a slug only if you mean to create a new row.",
-    "Seeding is additive (INSERT OR IGNORE) — re-running never overwrites edits made in the admin UI."
+    "Every 'slug' is the stable id, and it is the SAME in every organisation. Change a name freely; NEVER change a slug",
+    "(a changed slug is a new item, and the old one is reported to every organisation as removed from the pack).",
+    "aliases (on a document type, a requirement or a claim type) = other names people give the same thing. Nothing is",
+    "                      written from them: they are how the portal recognises that 'Spec Sheet' is this pack's",
+    "                      'Specification Sheet' and refuses to let an organisation create it a second time.",
+    "version             = a whole number. RAISE IT BY ONE whenever anything else in this file changes, then run",
+    "                      'npm run build:packs' and add the new hash to tests/fixtures/starter-pack-versions.json",
+    "                      (the failing test prints the exact line). An organisation is told a new version is",
+    "                      available and rolls forward to it on Settings > Starter pack; what it changed itself is kept.",
+    "Applying is additive (INSERT OR IGNORE) — it never overwrites a row. Only a roll-forward updates one, and only",
+    "where the organisation has not changed what the pack wrote."
   ],
   "_deliberately_omitted": [
     "supplier_requirements — WHICH requirements apply to WHICH supplier. A brand-new tenant has ZERO suppliers, so there is literally nothing to seed against. Worse, seeding every supplier the same six items is exactly what made the live tenant's checklist uniform-and-wrong: it came from one retroactive bulk write across 21 existing suppliers. Packets below are DEFINED here and applied one supplier at a time, by a human who knows what that supplier sends.",
@@ -69,6 +79,7 @@
     {
       "name": "Specification Sheet",
       "slug": "specification-sheet",
+      "aliases": ["Spec Sheet", "Product Specification", "Product Spec Sheet"],
       "description": "Supplier product spec. Typically closes many requirements at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
       "owner": "QA",
       "closes": [
@@ -96,6 +107,7 @@
     {
       "name": "Certificate of Analysis",
       "slug": "certificate-of-analysis",
+      "aliases": ["COA", "C of A"],
       "description": "Lot-level test results for a specific shipment.",
       "owner": "QA",
       "closes": [
@@ -117,6 +129,7 @@
     {
       "name": "Safety Data Sheet",
       "slug": "safety-data-sheet",
+      "aliases": ["SDS", "MSDS", "Material Safety Data Sheet"],
       "description": "SDS for chemicals and sanitation products.",
       "owner": "QA",
       "closes": [
@@ -447,6 +460,7 @@
     {
       "name": "Specification Sheet on file",
       "slug": "spec-sheet",
+      "aliases": ["Specification Sheet", "Spec Sheet", "Spec Sheet on file"],
       "scope": "product",
       "checklist": "Product Specification",
       "description": "A current product specification is on file."
@@ -472,6 +486,7 @@
     {
       "name": "Allergen Matrix",
       "slug": "allergen-matrix",
+      "aliases": ["Allergen Statement", "Allergen Statement on file"],
       "scope": "product",
       "checklist": "Allergens, Labeling & Nutrition",
       "description": "Allergen declaration covering the big-9."
@@ -479,6 +494,7 @@
     {
       "name": "Country of Origin",
       "slug": "country-of-origin",
+      "aliases": ["Country of Origin Statement", "Country of Origin Statement on file"],
       "checklist": "Product Specification"
     },
     {

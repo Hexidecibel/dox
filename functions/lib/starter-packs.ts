@@ -4,18 +4,36 @@
  * `bin/lib/starter-packs.mjs` compiles a pack JSON into idempotent SQL for
  * `bin/create-tenant`. That path is a shell script run by us. This one is the
  * setup wizard's screen 1, run by a customer's own admin against their own
- * tenant, and it has to produce THE SAME ROWS — same tables, same deterministic
- * ids, same `INSERT OR IGNORE` posture — or a tenant seeded through the wizard
- * and a tenant seeded from the CLI would diverge on their primary keys and every
- * later re-run would double up.
+ * tenant, and it has to produce THE SAME ROWS.
  *
- * WHY THIS IS A SECOND IMPLEMENTATION RATHER THAN A SHARED ONE. The .mjs is
- * deliberately dependency-free and emits SQL as STRINGS with values inlined
- * through `sqlQuote`, because it feeds `wrangler d1 execute --file`. Nothing
- * inside a Worker should be interpolating values into SQL text when D1 takes
- * bound parameters, so this file binds. `tests/unit/starter-packs.test.ts`
- * asserts the two produce the same ids and the same statement count, which is
- * the property that actually matters; the statement text is not the contract.
+ * IT IS NO LONGER A SECOND IMPLEMENTATION (migration 0141). Until then this
+ * file and the .mjs each wrote out every INSERT by hand, one binding values and
+ * one inlining them, with a test pinning that their row ids and statement
+ * counts agreed. Both now take their statements from `packApplyStatements` in
+ * `shared/packItems.ts` -- written once, with `?` placeholders. This file binds
+ * them; the CLI inlines them (`inlineSql`). There is nothing left to drift.
+ *
+ * WHAT CHANGED ABOUT THE ROWS, and why (decisions C-158..C-161):
+ *
+ *   a parent is found by `(tenant_id, slug)`, never by a computed id.
+ *       A junction row used to name its parents as
+ *       `packRowId(prefix, TENANT SLUG, slug)`. INSERT OR IGNORE swallows a
+ *       unique conflict and nothing else, so a tenant holding a pack slug
+ *       under any other id (a hand-made row, an old seed, or a tenant whose
+ *       slug a super admin had changed) ignored the vocabulary insert and then
+ *       failed the WHOLE batch on the junction's foreign key. Now the row that
+ *       is really there is ADOPTED and everything hangs off it.
+ *       `tests/api/starter-pack-adoption.test.ts` failed on every case before.
+ *
+ *   every item is LEDGERED (`pack_applied_items`), and the organisation's pack
+ *   version is stamped (`tenant_packs`).
+ *       What the pack wrote is the base of the three-way comparison a later
+ *       roll-forward makes (`shared/packRollForward.ts`). A row the pack
+ *       ADOPTED is recorded with the columns that were not the pack's marked
+ *       "origin unknown", so they are never overwritten on a guess.
+ *
+ *   an item the ledger already knows is never inserted again.
+ *       Re-applying used to put back a junction row a person had deleted.
  *
  * THE PACK DATA IS ALREADY NORMALIZED. `npm run build:packs` runs `normalizePack`
  * before writing `starterPacks.generated.ts`, so slugs, sort orders and
@@ -37,26 +55,26 @@
  */
 
 import type { StarterPack } from './starterPacks.generated';
-import { defaultRenewalSettingForTypeName } from '../../shared/renewalPeriod';
-import { defaultSharingRuleForTypeName } from '../../shared/sharingRule';
+import {
+  packApplyStatements,
+  packRowId as sharedPackRowId,
+  packSlugify,
+  type PackSection,
+  type PackStatement,
+} from '../../shared/packItems';
 
 /** Same slug rule as `slugify` in bin/lib/starter-packs.mjs and the vocabulary APIs. */
 export function slugify(text: string): string {
-  return String(text)
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
+  return packSlugify(text);
 }
 
 /**
- * The deterministic row id. IDENTICAL to `packRowId` in
- * bin/lib/starter-packs.mjs — that is the whole point: re-running a pack that
- * the CLI already applied must collide on the primary key and do nothing, not
- * insert a duplicate under a fresh UUID.
+ * The id a pack gives a row IT inserts. It is NOT how a row is found: lookups
+ * are by `(tenant_id, slug)`, so a tenant whose slug has changed, or a row a
+ * person made under the same slug, resolves all the same.
  */
 export function packRowId(prefix: string, tenantSlug: string, slug: string): string {
-  return `${prefix}_${slugify(tenantSlug)}_${slug}`;
+  return sharedPackRowId(prefix, tenantSlug, slug);
 }
 
 /**
@@ -95,9 +113,9 @@ export interface StarterPackApplyResult {
   inserted: number;
 }
 
-/** One prepared statement plus the section it counts toward. */
+/** One prepared statement plus the section it counts toward ('ledger' = bookkeeping). */
 interface Tagged {
-  section: keyof StarterPackApplyCounts;
+  section: PackSection | 'ledger';
   stmt: D1PreparedStatement;
 }
 
@@ -163,276 +181,53 @@ export async function sectionCensus(
   return counts;
 }
 
+function bindStatement(db: D1Database, statement: PackStatement): Tagged {
+  return { section: statement.section, stmt: db.prepare(statement.sql).bind(...statement.params) };
+}
+
 /**
- * Build the statements a pack contributes for one tenant, in dependency order.
+ * The statements a pack contributes for one tenant: every row insert in
+ * dependency order (departments, the vocabularies, then every junction that
+ * needs two of them), then one ledger entry per item, then the version stamp.
  *
- * Order is load-bearing and mirrors the CLI's: `owner_labels` first (it has no
- * `id`; its key is `(tenant_id, owner_key)` and `document_types.default_owner`
- * only means something once the department exists), then the vocabularies, then
- * every junction that needs two of them to resolve.
+ * `appliedBy` is recorded on the ledger; null when nobody is signed in.
  */
 export function starterPackStatements(
   db: D1Database,
   pack: StarterPack,
   tenantId: string,
   tenantSlug: string,
+  appliedBy: string | null = null,
 ): Tagged[] {
-  const out: Tagged[] = [];
-  const push = (section: keyof StarterPackApplyCounts, stmt: D1PreparedStatement) =>
-    out.push({ section, stmt });
-
-  for (const owner of pack.owner_labels) {
-    push(
-      'owner_labels',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO owner_labels (tenant_id, owner_key, owner_label)
-           VALUES (?, ?, ?)`,
-        )
-        .bind(tenantId, owner.owner_key, owner.label),
-    );
-  }
-
-  for (const dt of pack.document_types) {
-    // The renewal setting (0096/0097) is NAMED, not left to the column
-    // defaults. Omitting it wrote every type as `inherit`/NULL — annual — and
-    // the 0096/0097 backfills only ever ran against the rows that existed at
-    // migration time, so a tenant seeded afterwards got a Certificate of
-    // Analysis proposed an annual renewal. Same helper as POST
-    // /api/document-types and as the CLI compiler.
-    const renewal = defaultRenewalSettingForTypeName(dt.name);
-    // The sharing rule (0137) is NAMED for the same reason: a type the pack
-    // writes should show a stored rule on the Document Types screen, the same
-    // one POST /api/document-types would have proposed for that name.
-    push(
-      'document_types',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO document_types
-             (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window, sharing_rule)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          packRowId('dt', tenantSlug, dt.slug),
-          tenantId,
-          dt.name,
-          dt.slug,
-          dt.description,
-          dt.owner,
-          renewal.policy,
-          renewal.interval_months,
-          renewal.window === null ? null : JSON.stringify(renewal.window),
-          defaultSharingRuleForTypeName(dt.name),
-        ),
-    );
-  }
-
-  for (const req of pack.requirements) {
-    push(
-      'requirements',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO requirements
-             (id, tenant_id, slug, name, description, checklist, sort_order, scope)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          packRowId('req', tenantSlug, req.slug),
-          tenantId,
-          req.slug,
-          req.name,
-          req.description,
-          req.checklist,
-          req.sort_order,
-          // 0123. INSERT OR IGNORE: an existing tenant's requirement keeps the
-          // scope it has -- this reaches new organisations only.
-          req.scope,
-        ),
-    );
-  }
-
-  for (const ct of pack.claim_types) {
-    push(
-      'claim_types',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO claim_types
-             (id, tenant_id, slug, name, description, subject_grain, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          packRowId('clm', tenantSlug, ct.slug),
-          tenantId,
-          ct.slug,
-          ct.name,
-          ct.description,
-          ct.subject_grain,
-          ct.sort_order,
-        ),
-    );
-  }
-
-  for (const rule of pack.claim_rules) {
-    const emit = (reqSlug: string, isRequired: number) =>
-      push(
-        'claim_rules',
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO claim_type_requirements
-               (id, tenant_id, claim_type_id, requirement_id, is_required, notes)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            `ctr_${slugify(tenantSlug)}_${rule.claim}__${reqSlug}`,
-            tenantId,
-            packRowId('clm', tenantSlug, rule.claim),
-            packRowId('req', tenantSlug, reqSlug),
-            isRequired,
-            rule.notes,
-          ),
-      );
-    for (const reqSlug of rule.requires) emit(reqSlug, 1);
-    for (const reqSlug of rule.recommends) emit(reqSlug, 0);
-  }
-
-  // The default that makes an approved document mean something (0100). After
-  // both document_types and requirements, because both FKs must resolve.
-  for (const dt of pack.document_types) {
-    for (const reqSlug of dt.closes) {
-      push(
-        'document_type_requirements',
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO document_type_requirements
-               (id, tenant_id, document_type_id, requirement_id, source)
-             VALUES (?, ?, ?, ?, 'pack')`,
-          )
-          .bind(
-            `dtr_${slugify(tenantSlug)}_${dt.slug}__${reqSlug}`,
-            tenantId,
-            packRowId('dt', tenantSlug, dt.slug),
-            packRowId('req', tenantSlug, reqSlug),
-          ),
-      );
-    }
-  }
-
-  // Type-level extraction guidance (0098). INSERT OR IGNORE collides on both
-  // the deterministic id and that table's UNIQUE(tenant_id, document_type_id),
-  // so guidance somebody has edited is never overwritten by a re-run.
-  for (const dt of pack.document_types) {
-    if (!dt.extraction_instructions) continue;
-    push(
-      'extraction_instructions',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO document_type_extraction_instructions
-             (id, tenant_id, document_type_id, instructions)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .bind(
-          packRowId('dtei', tenantSlug, dt.slug),
-          tenantId,
-          packRowId('dt', tenantSlug, dt.slug),
-          dt.extraction_instructions,
-        ),
-    );
-  }
-
-  for (const test of pack.spec_tests) {
-    push(
-      'spec_tests',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO spec_tests (id, tenant_id, name, aliases, default_unit, notes)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          packRowId('spt', tenantSlug, test.slug),
-          tenantId,
-          test.name,
-          JSON.stringify(test.aliases),
-          test.default_unit,
-          test.notes,
-        ),
-    );
-  }
-
-  for (const test of pack.spec_tests) {
-    const limit = test.limit;
-    if (!limit) continue;
-    // All three scope columns are written as literal NULLs because "tenant-wide"
-    // IS the claim: 0086's expression index COALESCEs them so exactly one
-    // default can exist per analyte, and `resolveSpecLimits` scores an all-NULL
-    // row as the least specific match — the one that works on day one, before a
-    // single supplier or product exists.
-    push(
-      'spec_limits',
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO spec_limits
-             (id, tenant_id, spec_test_id, supplier_id, document_type_id, product_id,
-              operator, value_min, value_max, unit, severity, criticality, notes)
-           VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          packRowId('spl', tenantSlug, test.slug),
-          tenantId,
-          packRowId('spt', tenantSlug, test.slug),
-          limit.operator,
-          limit.value_min,
-          limit.value_max,
-          limit.unit ?? test.default_unit,
-          limit.severity,
-          limit.criticality,
-          limit.notes,
-        ),
-    );
-  }
-
-  // Both sides of the module decision are written, not only the off ones: a
-  // missing row means "whatever the code default is today", and the pack made a
-  // DECISION. Recording it means a later change to a module's `defaultEnabled`
-  // cannot silently move a tenant whose pack had already answered.
-  for (const key of pack.modules.default_on) {
-    push(
-      'tenant_modules',
-      db
-        .prepare(`INSERT OR IGNORE INTO tenant_modules (tenant_id, module_key, enabled) VALUES (?, ?, 1)`)
-        .bind(tenantId, key),
-    );
-  }
-  for (const key of pack.modules.default_off) {
-    push(
-      'tenant_modules',
-      db
-        .prepare(`INSERT OR IGNORE INTO tenant_modules (tenant_id, module_key, enabled) VALUES (?, ?, 0)`)
-        .bind(tenantId, key),
-    );
-  }
-
-  return out;
+  const { rows, ledger } = packApplyStatements(pack, { tenantId, tenantSlug, source: 'apply', appliedBy });
+  return [...rows, ...ledger].map((s) => bindStatement(db, s));
 }
 
 /**
  * Apply a pack to a tenant and report what was actually inserted.
  *
- * Run as one `db.batch()`, which D1 wraps in a transaction: a pack that fails
- * halfway would otherwise leave a tenant with requirements but no document
- * types, and screen 1 would then render as "already seeded" over a half-empty
- * vocabulary.
+ * TWO TRANSACTIONS, in this order. The ROWS run as one `db.batch()`: a pack
+ * that fails halfway would otherwise leave a tenant with requirements but no
+ * document types, and screen 1 would then render as "already seeded" over a
+ * half-empty vocabulary. The LEDGER runs as a second batch. It is separate
+ * because it is separable: if it fails, the organisation is seeded and merely
+ * unledgered, and applying again writes it (every row insert is then ignored
+ * and every ledger entry lands). One batch of twice the size would have made
+ * the seeding itself depend on bookkeeping that only a later version reads.
  */
 export async function applyStarterPack(
   db: D1Database,
   pack: StarterPack,
   tenantId: string,
   tenantSlug: string,
+  appliedBy: string | null = null,
 ): Promise<StarterPackApplyResult> {
-  const tagged = starterPackStatements(db, pack, tenantId, tenantSlug);
-  if (tagged.length === 0) return { pack: pack.pack, counts: emptyCounts(), inserted: 0 };
+  const { rows, ledger } = packApplyStatements(pack, { tenantId, tenantSlug, source: 'apply', appliedBy });
+  if (rows.length === 0) return { pack: pack.pack, counts: emptyCounts(), inserted: 0 };
 
   const before = await sectionCensus(db, tenantId);
-  await db.batch(tagged.map((t) => t.stmt));
+  await db.batch(rows.map((s) => bindStatement(db, s).stmt));
+  await db.batch(ledger.map((s) => bindStatement(db, s).stmt));
   const after = await sectionCensus(db, tenantId);
 
   const counts = emptyCounts();

@@ -157,6 +157,7 @@ export function catalogEntry(pack: StarterPack): StarterPackCatalogEntry {
   const sections = sectionsFor(pack);
   return {
     pack: pack.pack,
+    version: pack.version,
     label: pack.label,
     description: pack.description,
     sections,

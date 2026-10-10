@@ -6,7 +6,7 @@ import {
   NotFoundError,
   errorToResponse,
 } from '../../lib/permissions';
-import { packRowId } from '../../lib/starter-packs';
+import { loadRequirementVocab } from '../../lib/requirement-derivation';
 import { getStarterPack } from '../../lib/starterPacks.generated';
 import { findOrCreateSupplier, ImplausibleSupplierNameError } from '../../lib/suppliers';
 import { getRunById, stampApplied } from '../../lib/tenant-setup';
@@ -83,32 +83,32 @@ interface AttachOutcome {
 /**
  * Write one packet's rows for one supplier.
  *
- * Requirement ids are resolved the way the pack wrote them — the deterministic
- * `packRowId('req', tenantSlug, slug)` — and then CONFIRMED to exist against
- * this tenant. Both halves matter: deriving the id avoids a join per slug, and
- * the existence check is what turns "the pack names a requirement this tenant
- * never seeded" into a reported divergence instead of an FK error 400 that
- * takes the whole call down.
+ * Requirements are resolved BY SLUG, against this tenant's own rows
+ * (`loadRequirementVocab`, the same resolver the admin screens' packet applier
+ * uses). They used to be resolved by recomputing the id the pack would have
+ * written, `packRowId('req', TENANT SLUG, slug)` -- which reported EVERY line
+ * of the packet as unknown for a tenant whose slug had been changed, and for
+ * any requirement a person had made by hand under the pack's slug. The slug is
+ * the thing that is the same everywhere; the id is not (decision C-159).
+ *
+ * A slug the tenant has no ACTIVE row for is reported, not attached: a
+ * switched-off requirement is not owed by anybody.
  */
 async function attachPacket(
   db: D1Database,
   tenantId: string,
-  tenantSlug: string,
   supplierId: string,
   packetSlug: string,
   tiers: ReadonlyArray<{ tier: 'required' | 'recommended'; slugs: readonly string[] }>,
   actorId: string,
 ): Promise<AttachOutcome> {
   const outcome: AttachOutcome = { attached: { required: 0, recommended: 0 }, unknown: [] };
+  const vocab = await loadRequirementVocab(db, tenantId);
 
   for (const { tier, slugs } of tiers) {
     for (const slug of slugs) {
-      const requirementId = packRowId('req', tenantSlug, slug);
-      const exists = await db
-        .prepare('SELECT id FROM requirements WHERE id = ? AND tenant_id = ?')
-        .bind(requirementId, tenantId)
-        .first<{ id: string }>();
-      if (!exists) {
+      const requirementId = vocab.bySlug.get(slug)?.id;
+      if (!requirementId) {
         if (!outcome.unknown.includes(slug)) outcome.unknown.push(slug);
         continue;
       }
@@ -190,15 +190,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('supplier_id or supplier_name is required');
     }
 
-    const tenant = await context.env.DB.prepare('SELECT id, slug FROM tenants WHERE id = ?')
+    // The tenant's slug is not read: a packet resolves requirements by their
+    // own slug, so a tenant with a changed (or missing) slug attaches the same.
+    const tenant = await context.env.DB.prepare('SELECT id FROM tenants WHERE id = ?')
       .bind(tenantId)
-      .first<{ id: string; slug: string | null }>();
+      .first<{ id: string }>();
     if (!tenant) throw new NotFoundError('Tenant not found');
-    if (!tenant.slug) {
-      throw new BadRequestError(
-        'This tenant has no slug, and a pack row id is derived from it. Set a slug first.',
-      );
-    }
 
     let supplierId: string;
     let supplierCreated = false;
@@ -247,7 +244,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const outcome = await attachPacket(
       context.env.DB,
       tenantId,
-      tenant.slug,
       supplierId,
       packet.slug,
       [

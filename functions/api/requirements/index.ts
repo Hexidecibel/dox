@@ -18,6 +18,8 @@ import {
   REQUIREMENT_SCOPES,
   isRequirementScope,
 } from '../../../shared/requirementScope';
+import { checkDuplicateConcept, duplicateConceptResponse } from '../../lib/duplicate-concepts';
+import type { DuplicateConcept } from '../../../shared/duplicateConcept';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -133,6 +135,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
  * Create a checklist line item. org_admin+ for their own tenant; super_admin
  * must pass tenant_id. `slug` may be supplied explicitly (importers and
  * starter packs need stable slugs); otherwise it is derived from the name.
+ * Either way it is set ONCE: PUT refuses to change it (decision C-154).
+ *
+ * A name that is another name for a requirement the organisation already has,
+ * or for an item of its starter pack, is refused with 409 `duplicate_concept`
+ * (shared/duplicateConcept.ts). `allow_duplicate: true` creates it anyway
+ * (audited); `adopt_pack_slug: true` creates the pack's item under its slug.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -148,6 +156,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       tenant_id?: string;
       /** 0123: 'supplier' (default) / 'product' / 'lot'. */
       scope?: string;
+      /** Create it although it duplicates an existing row or a pack item. Audited. */
+      allow_duplicate?: boolean;
+      /** The name is a pack item this organisation lacks: create it under the pack's slug. */
+      adopt_pack_slug?: boolean;
     };
 
     if (!body.name || !body.name.trim()) {
@@ -164,7 +176,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const name = sanitizeString(body.name);
     const description = body.description ? sanitizeString(body.description) : null;
     const checklist = body.checklist ? sanitizeString(body.checklist) : null;
-    const slug = slugifyVocab(body.slug || name);
+    let slug = slugifyVocab(body.slug || name);
 
     if (!slug) {
       return json({ error: 'Could not generate a valid slug from name' }, 400);
@@ -178,6 +190,28 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (existing) {
       return json({ error: 'A requirement with this slug already exists for this tenant' }, 409);
+    }
+
+    // The same concept under a second slug is what a starter-pack update can
+    // never reach (shared/duplicateConcept.ts). Asked after the exact-slug
+    // check, so an identical name keeps the answer it always had.
+    let duplicateOverride: DuplicateConcept | null = null;
+    let adoptedPackSlug: string | null = null;
+    const dup = await checkDuplicateConcept(context.env.DB, {
+      tenantId,
+      vocabulary: 'requirements',
+      name,
+      slug,
+    });
+    if (dup) {
+      if (dup.duplicate.source === 'pack' && body.adopt_pack_slug === true) {
+        slug = dup.duplicate.slug;
+        adoptedPackSlug = slug;
+      } else if (body.allow_duplicate === true) {
+        duplicateOverride = dup.duplicate;
+      } else {
+        return duplicateConceptResponse(dup);
+      }
     }
 
     const id = generateId();
@@ -197,7 +231,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'requirement_created',
       'requirement',
       id,
-      JSON.stringify({ name, slug, checklist, scope }),
+      JSON.stringify({
+        name,
+        slug,
+        checklist,
+        scope,
+        ...(adoptedPackSlug ? { adopted_pack_slug: adoptedPackSlug } : {}),
+        ...(duplicateOverride ? { duplicate_override: duplicateOverride } : {}),
+      }),
       getClientIp(context.request),
     );
 
