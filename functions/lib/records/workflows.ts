@@ -336,7 +336,7 @@ export async function startWorkflowRun(
     rowId: string;
     triggeredByUserId: string | null;
   },
-): Promise<{ runId: string }> {
+): Promise<{ runId: string; failed: string | null }> {
   const { workflow, rowId, triggeredByUserId } = params;
   if (workflow.status !== 'active') {
     throw new BadRequestError('Workflow is not active');
@@ -375,8 +375,11 @@ export async function startWorkflowRun(
     },
   });
 
-  await startStep(env, { workflow, runId, stepIndex: 0, rowId });
-  return { runId };
+  // `failed` is the reason the FIRST step could not be started, in which case
+  // the run already ended `cancelled` (C-135). The caller is a signed-in
+  // builder and is told so (C-147), rather than "started".
+  const failed = await startStep(env, { workflow, runId, stepIndex: 0, rowId });
+  return { runId, failed };
 }
 
 /**
@@ -687,6 +690,18 @@ export async function executeStep(
 /**
  * Move the run from a just-completed step to the next one (or terminate).
  * `outcome` decides which next-pointer to follow.
+ *
+ * THE MOVE IS A COMPARE-AND-SWAP ON THE RUN (C-146). The run's pointer is
+ * moved -- or the run finished -- by one UPDATE that requires the run to be
+ * STILL `in_progress` and STILL pointing at the step being left. So:
+ *
+ *   - a cancel that lands between a decision being recorded and this call
+ *     makes the UPDATE change nothing, and nothing is started: no step, and
+ *     no mail carrying a link to a run that is already cancelled;
+ *   - two callers trying to move the same run from the same step (a decision
+ *     and the self-heal below, or two heals) cannot both do it.
+ *
+ * Returns whether THIS call moved the run.
  */
 export async function advanceWorkflow(
   env: EngineEnv,
@@ -697,45 +712,169 @@ export async function advanceWorkflow(
     outcome: 'approve' | 'reject';
     rowId: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   const { workflow, runId, fromStepIndex, outcome, rowId } = params;
+  const fromStepId = workflow.steps[fromStepIndex]?.id ?? null;
   const next = resolveNextStep(workflow.steps, fromStepIndex, outcome);
+  const nextIdx = next === 'complete' || next === 'rejected' ? -1 : indexOfStep(workflow.steps, next);
 
-  if (next === 'complete') {
-    await markRunComplete(env.DB, runId, 'completed');
-    await logRecordsActivity(env.DB, {
-      tenantId: workflow.tenant_id,
-      sheetId: workflow.sheet_id,
-      rowId,
-      actorId: null,
-      kind: 'workflow_completed',
-      details: { workflow_id: workflow.id, run_id: runId },
-    });
-    return;
-  }
-  if (next === 'rejected') {
-    await markRunComplete(env.DB, runId, 'rejected');
-    await logRecordsActivity(env.DB, {
-      tenantId: workflow.tenant_id,
-      sheetId: workflow.sheet_id,
-      rowId,
-      actorId: null,
-      kind: 'workflow_rejected',
-      details: { workflow_id: workflow.id, run_id: runId },
-    });
-    return;
-  }
-  const nextIdx = indexOfStep(workflow.steps, next);
   if (nextIdx < 0) {
-    // Pointer to a non-existent step -- treat as completed for safety.
-    await markRunComplete(env.DB, runId, 'completed');
-    return;
+    // 'complete', 'rejected', or a pointer to a step that no longer exists
+    // (treated as completed for safety).
+    const status = next === 'rejected' ? 'rejected' : 'completed';
+    if (!(await moveRun(env.DB, runId, fromStepIndex >= 0 ? fromStepId : null, { finish: status }))) return false;
+    if (next === 'complete' || next === 'rejected') {
+      await logRecordsActivity(env.DB, {
+        tenantId: workflow.tenant_id,
+        sheetId: workflow.sheet_id,
+        rowId,
+        actorId: null,
+        kind: next === 'rejected' ? 'workflow_rejected' : 'workflow_completed',
+        details: { workflow_id: workflow.id, run_id: runId },
+      });
+    }
+    return true;
   }
-  await env.DB
-    .prepare(`UPDATE records_workflow_runs SET current_step_id = ? WHERE id = ?`)
-    .bind(next, runId)
-    .run();
+
+  if (!(await moveRun(env.DB, runId, fromStepId, { to: next }))) return false;
   await startStep(env, { workflow, runId, stepIndex: nextIdx, rowId });
+  return true;
+}
+
+/**
+ * The one statement that moves a run on or finishes it: only while it is in
+ * progress and still on the step being left. (A run written before the
+ * pointer was kept has no `current_step_id`; that is accepted as "on it".)
+ */
+async function moveRun(
+  db: D1Database,
+  runId: string,
+  fromStepId: string | null,
+  move: { to: string } | { finish: 'completed' | 'rejected' },
+): Promise<boolean> {
+  const res =
+    'to' in move
+      ? await db
+          .prepare(
+            `UPDATE records_workflow_runs SET current_step_id = ?
+              WHERE id = ? AND status = 'in_progress' AND (current_step_id = ? OR current_step_id IS NULL)`,
+          )
+          .bind(move.to, runId, fromStepId)
+          .run()
+      : await db
+          .prepare(
+            `UPDATE records_workflow_runs
+                SET status = ?, completed_at = datetime('now'), current_step_id = ?
+              WHERE id = ? AND status = 'in_progress' AND (current_step_id = ? OR current_step_id IS NULL)`,
+          )
+          .bind(move.finish, move.finish === 'rejected' ? 'rejected' : 'complete', runId, fromStepId)
+          .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Update requests a run sent that are still open, closed with it (C-148).
+ * The link already answers 404 once the run is not in progress (C-137); this
+ * makes the signed-in list say so instead of going on showing "Pending".
+ */
+export async function cancelRunUpdateRequests(db: D1Database, runId: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE records_update_requests
+          SET status = 'cancelled'
+        WHERE status = 'pending'
+          AND id IN (SELECT update_request_id FROM records_workflow_step_runs
+                      WHERE run_id = ? AND update_request_id IS NOT NULL)`,
+    )
+    .bind(runId)
+    .run();
+}
+
+/** How long a run may sit with nothing waiting before it is taken to be stalled. */
+const STALLED_AFTER_MINUTES = 2;
+
+/**
+ * SELF-HEAL for a run whose worker died between recording a decision and
+ * starting the next step (C-146).
+ *
+ * The decision and the advance cannot be one `db.batch()`: starting a step
+ * reads the sheet's columns, may write a cell and its references, mints a
+ * token, and sends mail, with reads between the writes. So the claim is
+ * committed first and the advance follows -- and if the process dies in
+ * between, the run is `in_progress` with no step waiting on anybody.
+ *
+ * Such a run is found when its record's runs are next listed (the row's
+ * workflow panel) and is resumed: from the decided step it is still pointing
+ * at, or by starting the step it was already moved to but never began. A run
+ * is only touched after `STALLED_AFTER_MINUTES` of nothing happening, so a
+ * decision that is being processed right now is left alone, and the move is
+ * the same compare-and-swap, so a resume racing a live advance cannot start a
+ * step twice. A run that cannot be resumed is failed with a reason (C-135).
+ */
+export async function healStalledRuns(env: EngineEnv, rowId: string): Promise<number> {
+  const stalled = await env.DB
+    .prepare(
+      `SELECT r.id, r.workflow_id, r.row_id, r.current_step_id
+         FROM records_workflow_runs r
+        WHERE r.row_id = ? AND r.status = 'in_progress'
+          AND NOT EXISTS (SELECT 1 FROM records_workflow_step_runs s
+                           WHERE s.run_id = r.id AND s.status IN ('pending', 'awaiting_response'))
+          AND COALESCE(
+                (SELECT MAX(COALESCE(s.completed_at, s.started_at)) FROM records_workflow_step_runs s WHERE s.run_id = r.id),
+                r.started_at, r.created_at
+              ) < datetime('now', ?)`,
+    )
+    .bind(rowId, `-${STALLED_AFTER_MINUTES} minutes`)
+    .all<{ id: string; workflow_id: string; row_id: string; current_step_id: string | null }>();
+
+  let healed = 0;
+  for (const run of stalled.results ?? []) {
+    const wfRow = await env.DB
+      .prepare('SELECT * FROM records_workflows WHERE id = ?')
+      .bind(run.workflow_id)
+      .first<WorkflowDbRow>();
+    if (!wfRow) continue;
+    const workflow = hydrateWorkflow(wfRow);
+    const pointerIdx = run.current_step_id ? indexOfStep(workflow.steps, run.current_step_id) : -1;
+    const onPointer = run.current_step_id
+      ? await env.DB
+          .prepare(
+            `SELECT status FROM records_workflow_step_runs
+              WHERE run_id = ? AND step_id = ? ORDER BY completed_at DESC, rowid DESC LIMIT 1`,
+          )
+          .bind(run.id, run.current_step_id)
+          .first<{ status: string }>()
+      : null;
+
+    try {
+      if (pointerIdx >= 0 && !onPointer) {
+        // Moved to this step and never began it.
+        await startStep(env, { workflow, runId: run.id, stepIndex: pointerIdx, rowId: run.row_id });
+      } else if (pointerIdx >= 0 && onPointer) {
+        // Decided (or done) and never moved on.
+        await advanceWorkflow(env, {
+          workflow,
+          runId: run.id,
+          fromStepIndex: pointerIdx,
+          outcome: onPointer.status === 'rejected' ? 'reject' : 'approve',
+          rowId: run.row_id,
+        });
+      } else {
+        // Pointing at a step the workflow no longer has.
+        await failRun(env, {
+          workflow,
+          runId: run.id,
+          stepIndex: -1,
+          rowId: run.row_id,
+          error: new BadRequestError('The workflow was changed while this run was under way, and the step it had reached no longer exists.'),
+        });
+      }
+      healed += 1;
+    } catch (err) {
+      await failRun(env, { workflow, runId: run.id, stepIndex: pointerIdx, rowId: run.row_id, error: err });
+    }
+  }
+  return healed;
 }
 
 /** Mark the run terminal (completed/rejected/cancelled). */
@@ -773,12 +912,28 @@ export async function markRunComplete(
 async function startStep(
   env: EngineEnv,
   params: { workflow: RecordWorkflow; runId: string; stepIndex: number; rowId: string },
-): Promise<void> {
+): Promise<string | null> {
   try {
     await executeStep(env, params);
+    return null;
   } catch (err) {
     await failRun(env, { ...params, error: err });
+    return failureReason(err);
   }
+}
+
+/**
+ * The index of the step an outcome leads to from `fromIndex`, following the
+ * step's own approve / reject pointer; -1 when it leads to the end of the run
+ * (or to a step that no longer exists).
+ */
+export function targetStepIndex(
+  steps: RecordWorkflowStep[],
+  fromIndex: number,
+  outcome: 'approve' | 'reject',
+): number {
+  const next = resolveNextStep(steps, fromIndex, outcome);
+  return next === 'complete' || next === 'rejected' ? -1 : indexOfStep(steps, next);
 }
 
 /** What the owner is told. A validation sentence is theirs to read; anything else is not quoted. */
@@ -856,8 +1011,10 @@ async function failRun(
   // Already ended by somebody else: it has been said once.
   if (!ended) return;
 
-  // A request an earlier step of this run sent must not stay answerable.
+  // A request an earlier step of this run sent must not stay answerable,
+  // and must not go on reading "Pending" in the signed-in list (C-148).
   try {
+    await cancelRunUpdateRequests(env.DB, runId);
     await env.DB
       .prepare(
         `UPDATE records_workflow_step_runs
@@ -910,7 +1067,7 @@ async function failRun(
     if (!owner?.email) return;
     const tmpl = buildWorkflowStepFailedEmail({
       workflowName: workflow.name,
-      stepName: step?.name ?? `step ${stepIndex + 1}`,
+      stepName: step?.name ?? 'the next part of the workflow',
       reason,
       sheetUrl: `${env.appOrigin}/records/${workflow.sheet_id}`,
     });
@@ -1010,8 +1167,17 @@ export async function handleApprovalResponse(
   } catch (err) {
     // Starting the next step cannot throw (`startStep`); this is the engine
     // itself failing to move the run. The decision stands; the run is stopped
-    // with a reason rather than left in progress with nobody to wait for.
-    await failRun(env, { workflow, runId: sr.run_id, stepIndex: sr.step_index + 1, rowId: run.row_id, error: err });
+    // with a reason rather than left in progress with nobody to wait for. The
+    // step named is the one the decision actually leads to (its approve or
+    // reject target), not "the one after" -- a branching workflow is not a
+    // list (C-149).
+    await failRun(env, {
+      workflow,
+      runId: sr.run_id,
+      stepIndex: targetStepIndex(workflow.steps, sr.step_index, decision),
+      rowId: run.row_id,
+      error: err,
+    });
     return { recorded: true, advanced: false };
   }
   return { recorded: true, advanced: true };
@@ -1062,7 +1228,13 @@ export async function handleUpdateRequestResponse(
       rowId: run.row_id,
     });
   } catch (err) {
-    await failRun(env, { workflow, runId: sr.run_id, stepIndex: sr.step_index + 1, rowId: run.row_id, error: err });
+    await failRun(env, {
+      workflow,
+      runId: sr.run_id,
+      stepIndex: targetStepIndex(workflow.steps, sr.step_index, 'approve'),
+      rowId: run.row_id,
+      error: err,
+    });
   }
 }
 

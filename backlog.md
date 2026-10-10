@@ -7,8 +7,12 @@ Deferred ideas, long-term research, and items not in the daily workflow.
 - **Signed-in joins to `suppliers` / `document_types` by id with no tenant predicate.** The outward
   ones were fixed (C-142: export, order lines, alert landing). The same shape is still in
   `functions/api/spec-unmatched/index.ts`, `spec-checks/index.ts`, `spec-gaps/index.ts`,
-  `functions/lib/intake/already-have.ts`, `functions/lib/search/sample.ts` and
-  `functions/lib/search-coverage.ts`. Reachable only if a document already carries another
+  `functions/lib/intake/already-have.ts`, `functions/lib/search/sample.ts`,
+  `functions/lib/search-coverage.ts`, `functions/lib/holds.ts` (the Holds page: products, lots,
+  users), `functions/api/bundles/` (bundle screens: products, document types, users),
+  `functions/api/orders/[id].ts` and `index.ts` (customers, users, lots) and the `users` joins that
+  name who did something on a signed-in list (order sends, export links, arrivals, renewal sends,
+  brand). Reachable only if a document already carries another
   tenant's `supplier_id`, which no route writes; then a signed-in user would read that supplier's
   name. One pass: add `AND s.tenant_id = d.tenant_id` and a test that points a document next door.
 - **A workflow run has no `failed` status.** A step that cannot be started ends its run `cancelled`

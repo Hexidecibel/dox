@@ -173,9 +173,14 @@ export function isReferenceType(type: RecordColumnType): boolean {
  *   id that is not the tenant's resolves to nothing: neither the id nor the
  *   label stored beside it is shown, because that label came in with the id.
  * - A cell item with NO id is text somebody typed (`{ name, unmatched: true }`
- *   from a public page); it is shown as typed. A bare string is an ID for
- *   every reference type except `contact`, which has no picker: there a bare
- *   string is what a person typed into the cell.
+ *   from a public page); it is shown as typed. A BARE STRING IS AN ID for
+ *   every reference type -- `extractRefIds` (`helpers.ts`) reads it as one,
+ *   and the two must agree. For a `contact` cell, which has no picker and so
+ *   may also hold a name somebody typed, the string is resolved as a user id
+ *   of this tenant FIRST (the name leaves, never the id); only when it is not
+ *   one may it be shown as typed, and then only if it does not look like an
+ *   id (`looksLikeId`) and is not an address (C-144). A string that looks
+ *   like an id and resolves to nothing shows nothing.
  * - A CONTACT IS NEVER AN ADDRESS, whatever shape the cell has (C-134): a
  *   portal user's name that is their email, a bare string that is an email,
  *   an id-less `{ name }` that is an email -- each is left out. The rule is
@@ -199,8 +204,7 @@ async function referenceNames(
     let id: string | null = null;
     let typed: string | null = null;
     if (typeof item === 'string') {
-      if (type === 'contact') typed = item;
-      else id = item;
+      id = item;
     } else if (item && typeof item === 'object') {
       const o = item as { id?: unknown; name?: unknown };
       if (typeof o.id === 'string' && o.id) id = o.id;
@@ -215,11 +219,29 @@ async function referenceNames(
         .bind(id, tenantId)
         .first<{ name: string | null }>();
       name = row?.name ?? null;
+      // A contact cell's bare string that is no user of this tenant: words
+      // somebody typed, unless they have the shape of an id.
+      if (!row && type === 'contact' && typeof item === 'string' && !looksLikeId(item)) name = item;
     }
     if (type === 'contact' && name && name.includes('@')) name = null;
     if (typeof name === 'string' && name.trim()) names.push(name.trim());
   }
   return names;
+}
+
+/**
+ * Does a bare string in a contact cell have the SHAPE of an id rather than
+ * of a name a person typed? Generated ids here are hex strings, UUIDs and
+ * slugs like `user-org-admin`: no spaces, and either a digit, an underscore,
+ * two or more hyphens, or twenty or more characters. "Dana", "Jean-Luc" and
+ * "Dana Typed" are names; `3f2a...`, `user_17` and `user-org-admin` are not
+ * shown. When this is wrong about a real name the cost is a dash on a page;
+ * when it is wrong the other way the cost is an internal id outside.
+ */
+export function looksLikeId(text: string): boolean {
+  const s = text.trim();
+  if (!s || /\s/.test(s)) return false;
+  return /[0-9_]/.test(s) || s.length >= 20 || (s.match(/-/g)?.length ?? 0) >= 2;
 }
 
 /** How many records deep a title may be followed (a record titled by a record). */

@@ -1860,10 +1860,14 @@ type; a value of the wrong shape is a `400`. In a customer / supplier / product 
   not the id exists.
 
 **Uploads.** The type stored for a file is decided from its bytes. A file that claims to be a PNG,
-JPEG, GIF, WebP or PDF and is not, and anything that is markup (SVG, HTML, XML), is a `415`.
+JPEG, GIF, WebP or PDF and is not, a .docx / .xlsx / .pptx that is not a ZIP container, and
+anything that is markup or script (SVG, HTML, XHTML, XML, JavaScript, CSS), is a `415`. Old
+Office files, CSV, text and HEIC keep the type the browser declared and are only ever downloads.
 
 **Titles.** `row_title` / `row.title` is the record's title cell as an outsider may read it: a
-reference is a name, a contact is a name and never an address. It is never an id.
+reference is a name, a contact is a name and never an address. It is never an id: a contact cell
+holding a bare user id shows that user's name, and an id that is not a user of the organization
+shows nothing.
 
 **An update request** returns the requested fields and their `current_values`; a reference is
 shown as its name. Document, record, contact, file and computed columns cannot be requested. A

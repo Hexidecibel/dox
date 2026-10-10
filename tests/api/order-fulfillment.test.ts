@@ -726,6 +726,10 @@ describe('GET /api/orders/:id/send-preview + POST /api/orders/:id/send', () => {
     const order2 = await orderId({ po_number: 'PO-PLANT-2' });
     await pick(order2, [b.id]);
     await pointAtOtherTenant(db, planted, { table: 'documents', id: b.id });
+    // ...and whose order line REFERENCES the other tenant's product: the send
+    // prefers the product's own name for the line.
+    const line = await db.prepare('SELECT id FROM order_items WHERE order_id = ?').bind(order2).first<{ id: string }>();
+    await pointAtOtherTenant(db, planted, { table: 'order_items', id: line!.id, column: 'product_id' });
     const plan2 = await preview(order2);
     expectNothingPlanted(JSON.stringify(plan2), planted);
     const mail2 = stubMail();

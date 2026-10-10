@@ -28,7 +28,7 @@ import {
   errorToResponse,
 } from '../../../../lib/permissions';
 import { downloadFile } from '../../../../lib/r2';
-import { mayServeInline } from '../../../../lib/records/fileType';
+import { attachmentDisposition, mayServeInline } from '../../../../lib/records/fileType';
 import type { Env, User } from '../../../../lib/types';
 import type { RecordRowAttachmentRow } from '../../../../../shared/types';
 
@@ -72,9 +72,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const storedType = (att.mime_type || 'application/octet-stream').toLowerCase().split(';')[0].trim();
     const inline = isPreview && mayServeInline(storedType);
-    // The name was typed or uploaded by somebody; it goes in a quoted header.
-    const safeName = (att.file_name || 'download').replace(/[\r\n"\\]/g, '_');
-    const disposition = inline ? 'inline' : `attachment; filename="${safeName}"`;
+    // The name was typed or uploaded by somebody. A header value must be
+    // Latin-1, so a name in any other script threw here and the download was
+    // a 500. RFC 6266 / 5987: an ASCII `filename` every client understands,
+    // and the real name percent-encoded in `filename*`.
+    const disposition = inline ? 'inline' : attachmentDisposition(att.file_name);
 
     const headers: Record<string, string> = {
       // A type that will not be drawn is sent as a plain download.

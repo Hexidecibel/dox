@@ -56,7 +56,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!row) throw new NotFoundError('Row not found');
 
     const result = await context.env.DB.prepare(
-      `SELECT r.*, u.name as creator_name, rr.display_title as row_display_title
+      `SELECT r.*, u.name as creator_name, rr.display_title as row_display_title,
+              -- 1 when a WORKFLOW sent this request and its link is closed
+              -- because the workflow is paused or archived (C-137). A
+              -- cancelled or failed run sets status = 'cancelled' instead.
+              (SELECT CASE WHEN sr.status = 'awaiting_response' AND run.status = 'in_progress'
+                                AND wf.status = 'active' AND wf.archived = 0 THEN 0 ELSE 1 END
+                 FROM records_workflow_step_runs sr
+                 LEFT JOIN records_workflow_runs run ON run.id = sr.run_id
+                 LEFT JOIN records_workflows wf ON wf.id = run.workflow_id
+                WHERE sr.update_request_id = r.id
+                LIMIT 1) AS closed_by_workflow
          FROM records_update_requests r
          LEFT JOIN users u ON r.created_by_user_id = u.id
          LEFT JOIN records_rows rr ON r.row_id = rr.id
@@ -64,10 +74,23 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          ORDER BY r.created_at DESC`,
     )
       .bind(rowId)
-      .all<RecordUpdateRequestRow & { creator_name: string | null; row_display_title: string | null }>();
+      .all<
+        RecordUpdateRequestRow & {
+          creator_name: string | null;
+          row_display_title: string | null;
+          closed_by_workflow: number | null;
+        }
+      >();
 
     const rows = result.results ?? [];
-    const requests = rows.map((r) => hydrateUpdateRequest(r));
+    // `status` is the stored state. `link_closed` (C-148) is derived: the
+    // request is still "pending" in the table, but its link answers 404
+    // because the workflow that sent it is not running. The enum has no value
+    // for that reversible state, so it is said beside the status, not in it.
+    const requests = rows.map(({ closed_by_workflow, ...r }) => ({
+      ...hydrateUpdateRequest(r),
+      link_closed: r.status === 'pending' && closed_by_workflow === 1,
+    }));
 
     return new Response(
       JSON.stringify({ requests, total: requests.length }),

@@ -6791,8 +6791,10 @@ paths:
         that allows uploads, a file that is too large or of the wrong type is
         the same 404 as anything else. The stored type is decided from the
         file's BYTES: a file that claims to be a PNG / JPEG / GIF / WebP / PDF
-        and is not, and anything that is markup (SVG, HTML, XML), is a 415
-        whatever the form allows. The 415 body does not repeat the type the
+        and is not, a .docx / .xlsx / .pptx that is not a ZIP container, and
+        anything that is markup or script (SVG, HTML, XHTML, XML, JavaScript,
+        CSS), is a 415 whatever the form allows. Old Office files, CSV, text
+        and HEIC keep their declared type and are only ever downloads. The 415 body does not repeat the type the
         client declared. The response names no storage key.
       security: []
       parameters:

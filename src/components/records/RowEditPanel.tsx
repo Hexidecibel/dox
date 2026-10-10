@@ -544,9 +544,9 @@ export function RowEditPanel({
           <SendIcon fontSize="small" sx={{ color: 'text.secondary' }} />
           <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
             Update requests
-            {updateRequests.filter((r) => r.status === 'pending').length > 0 && (
+            {updateRequests.filter((r) => r.status === 'pending' && !r.link_closed).length > 0 && (
               <Box component="span" sx={{ ml: 0.75, color: 'text.secondary', fontWeight: 400 }}>
-                ({updateRequests.filter((r) => r.status === 'pending').length} pending)
+                ({updateRequests.filter((r) => r.status === 'pending' && !r.link_closed).length} pending)
               </Box>
             )}
           </Typography>
@@ -650,6 +650,9 @@ function formatRequestRecipient(req: RecordUpdateRequest): string {
 function formatRequestStatus(req: RecordUpdateRequest): { label: string; color: 'default' | 'success' | 'warning' | 'error' } {
   switch (req.status) {
     case 'pending':
+      // Still open in the table, but its workflow is paused or archived, so
+      // the recipient's link does not work until it is reactivated.
+      if (req.link_closed) return { label: 'Paused with its workflow', color: 'default' };
       return { label: 'Pending', color: 'warning' };
     case 'responded':
       return { label: 'Responded', color: 'success' };

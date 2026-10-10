@@ -5168,6 +5168,13 @@ export interface RecordUpdateRequest extends Omit<RecordUpdateRequestRow, 'token
   creator_name?: string | null;
   /** Title of the row, denormalized for the drawer "pending requests" list. */
   row_display_title?: string | null;
+  /**
+   * List only (C-148). TRUE when `status` is still `pending` but the link
+   * answers 404 because the workflow that sent the request is paused or
+   * archived; it opens again if the workflow is reactivated. A cancelled or
+   * failed run sets `status` to `cancelled` instead.
+   */
+  link_closed?: boolean;
 }
 
 /**

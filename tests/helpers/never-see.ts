@@ -132,23 +132,56 @@ export async function plantNeverSee(db: D1Database, o: PlantOptions): Promise<Pl
     .run();
   planted.other_tenant_id = o.otherTenantId;
 
+  // A product and a document type next door: the names a customer send and a
+  // supplier's renewal request are worded from.
+  const otherProductId = generateTestId();
+  planted.other_tenant_product = `NEVERSEE-OTHER-TENANT-PRODUCT-${tag}`;
+  planted.other_tenant_product_id = otherProductId;
+  await db
+    .prepare('INSERT INTO products (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+    .bind(otherProductId, o.otherTenantId, planted.other_tenant_product, `neversee-p-${tag.toLowerCase()}`)
+    .run();
+  const otherTypeId = generateTestId();
+  planted.other_tenant_type = `NEVERSEE-OTHER-TENANT-TYPE-${tag}`;
+  planted.other_tenant_type_id = otherTypeId;
+  await db
+    .prepare('INSERT INTO document_types (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+    .bind(otherTypeId, o.otherTenantId, planted.other_tenant_type, `neversee-t-${tag.toLowerCase()}`)
+    .run();
+
   return planted;
 }
 
+/** The references a surface under test can be made to follow next door. */
+const CROSS_REFERENCES = {
+  'documents.supplier_id': 'other_tenant_supplier_id',
+  'document_requests.supplier_id': 'other_tenant_supplier_id',
+  'documents.document_type_id': 'other_tenant_type_id',
+  'order_items.product_id': 'other_tenant_product_id',
+} as const;
+
 /**
  * Make one record of the tenant under test point at the OTHER tenant's
- * supplier. `table` is the table whose row the surface reads (`documents`,
- * `document_requests`); only those two are accepted, and the column is always
- * `supplier_id`.
+ * supplier (the default), document type or product. `table` is the table
+ * whose row the surface reads; only the pairs in `CROSS_REFERENCES` are
+ * accepted.
  */
 export async function pointAtOtherTenant(
   db: D1Database,
   planted: Planted,
-  target: { table: 'documents' | 'document_requests'; id: string },
+  target: {
+    table: 'documents' | 'document_requests' | 'order_items';
+    id: string;
+    column?: 'supplier_id' | 'document_type_id' | 'product_id';
+  },
 ): Promise<void> {
+  const column = target.column ?? 'supplier_id';
+  const key = `${target.table}.${column}` as keyof typeof CROSS_REFERENCES;
+  const plantedKey = CROSS_REFERENCES[key];
+  if (!plantedKey) throw new Error(`pointAtOtherTenant: ${key} is not a reference it knows`);
   const res = await db
-    .prepare(`UPDATE ${target.table} SET supplier_id = ? WHERE id = ?`)
-    .bind(planted.other_tenant_supplier_id, target.id)
+    .prepare(`UPDATE ${target.table} SET ${column} = ? WHERE id = ?`)
+    .bind(planted[plantedKey], target.id)
     .run();
   // `changes` counts rows touched by triggers too (the search reindex), so "at least one".
   expect(res.meta?.changes ?? 0).toBeGreaterThanOrEqual(1);

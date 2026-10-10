@@ -51,16 +51,58 @@ export function sniffFileType(head: Uint8Array): SniffedType | null {
   return null;
 }
 
-/** Declared types that are markup or script: a browser may run them. */
+/**
+ * Declared types that are markup or script: a browser may run them.
+ *
+ * AN EXPLICIT LIST, NOT A SUBSTRING (C-143). The first version asked whether
+ * the type "includes xml", which also matched every modern Office type
+ * (`application/vnd.openxmlformats-officedocument...`), so a .docx or .xlsx
+ * was refused on a form whose own builder preset allowed it. An XML DOCUMENT
+ * type is one of the names below or ends in `+xml` (SVG, XHTML, Atom, MathML);
+ * an Office file is a ZIP whose type merely has "xml" in its vendor name.
+ */
+const ACTIVE_TYPES: ReadonlySet<string> = new Set([
+  'text/html',
+  'application/xhtml',
+  'text/xml',
+  'application/xml',
+  'text/xsl',
+  'text/xslt',
+  'application/xslt',
+  'image/svg',
+  'text/javascript',
+  'application/javascript',
+  'application/x-javascript',
+  'text/ecmascript',
+  'application/ecmascript',
+  'text/jscript',
+  'text/vbscript',
+  'text/css',
+  'application/x-shockwave-flash',
+  'application/hta',
+  'message/rfc822',
+  'multipart/related',
+  'application/x-mimearchive',
+]);
+
 function isActiveType(mime: string): boolean {
-  return (
-    mime.includes('svg') ||
-    mime.includes('html') ||
-    mime.includes('xml') ||
-    mime.includes('javascript') ||
-    mime.includes('ecmascript') ||
-    mime === 'text/css'
-  );
+  return ACTIVE_TYPES.has(mime) || mime.endsWith('+xml');
+}
+
+/**
+ * The modern Office types (OOXML). Each is a ZIP container, so a file that
+ * declares one must start like a ZIP; that is decided from the bytes like the
+ * five inline types, not taken on the browser's word.
+ */
+const OOXML_PREFIX = 'application/vnd.openxmlformats-officedocument.';
+const ZIP_SIGNATURES = [
+  [0x50, 0x4b, 0x03, 0x04],
+  [0x50, 0x4b, 0x05, 0x06],
+  [0x50, 0x4b, 0x07, 0x08],
+];
+
+function isZip(head: Uint8Array): boolean {
+  return ZIP_SIGNATURES.some((sig) => startsWith(head, sig));
 }
 
 /**
@@ -71,9 +113,16 @@ function isActiveType(mime: string): boolean {
  *   - the declaration is one of the five and the bytes are not: refused -- it
  *     is not what it says it is;
  *   - the declaration is markup or script (SVG, HTML, XML ...): refused;
- *   - anything else (a HEIC photo, a spreadsheet, a text file) keeps its
- *     declared type. It is never served inline, so the declaration can only
- *     ever name a download.
+ *   - the declaration is a modern Office type (.docx / .xlsx / .pptx): kept
+ *     when the bytes are a ZIP container, which is what such a file is, and
+ *     refused when they are not;
+ *   - anything else (a HEIC photo, an old .doc / .xls, a CSV, a text file)
+ *     keeps its declared type. It is never served inline, so the declaration
+ *     can only ever name a download.
+ *
+ * `tests/api/records-public-adversarial.test.ts` uploads every type every
+ * form-builder preset offers (`shared/formAttachmentPresets.ts`), so a preset
+ * cannot offer a type this function refuses.
  */
 export function storedTypeForUpload(declared: string, head: Uint8Array): string | null {
   const mime = (declared || 'application/octet-stream').toLowerCase().split(';')[0].trim() || 'application/octet-stream';
@@ -81,10 +130,31 @@ export function storedTypeForUpload(declared: string, head: Uint8Array): string 
   if (sniffed) return sniffed;
   if (INLINE_TYPES.includes(mime)) return null;
   if (isActiveType(mime)) return null;
+  if (mime.startsWith(OOXML_PREFIX)) return isZip(head) ? mime : null;
   return mime;
 }
 
 /** May a file stored with this type be drawn in the browser, on our origin? */
 export function mayServeInline(storedMime: string | null | undefined): boolean {
   return INLINE_TYPES.includes((storedMime || '').toLowerCase().split(';')[0].trim());
+}
+
+/**
+ * `attachment; filename="<ascii fallback>"; filename*=UTF-8''<percent-encoded>`
+ * (RFC 6266 / 5987), for a file name somebody typed or uploaded.
+ *
+ * A header value must be Latin-1: a name in any other script made the
+ * download route throw. The fallback keeps letters, digits, space and
+ * `. _ -` and turns everything else (quotes, control characters, any
+ * non-ASCII) into `_`, so nothing in a file name can break out of the quoted
+ * string or the header; the real name travels percent-encoded beside it.
+ */
+export function attachmentDisposition(fileName: string | null | undefined): string {
+  const name = (fileName || '').replace(/[\u0000-\u001f\u007f]/g, '').trim() || 'download';
+  const ascii = name.replace(/[^A-Za-z0-9._ -]/g, '_').slice(0, 150) || 'download';
+  const encoded = encodeURIComponent(name.slice(0, 150)).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }

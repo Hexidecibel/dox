@@ -162,7 +162,7 @@ export async function loadOrderLines(
               l.production_date_source AS production_date_source,
               u.name  AS picked_by_name
          FROM order_items oi
-         LEFT JOIN products p        ON p.id  = oi.product_id
+         LEFT JOIN products p        ON p.id  = oi.product_id AND p.tenant_id = ?
          LEFT JOIN documents d       ON d.id  = oi.coa_document_id AND d.tenant_id = ?
          LEFT JOIN document_types dt ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
          LEFT JOIN suppliers s       ON s.id  = d.supplier_id AND s.tenant_id = d.tenant_id
@@ -173,7 +173,9 @@ export async function loadOrderLines(
         WHERE oi.order_id = ?
         ORDER BY oi.created_at ASC, oi.rowid ASC`,
     )
-    .bind(tenantId, tenantId, orderId)
+    // Every join by id carries the tenant (C-142, C-145): the product's and
+    // the supplier's names go into what a customer is sent.
+    .bind(tenantId, tenantId, tenantId, orderId)
     .all<ApiOrderItem>();
   const rows = res.results ?? [];
 
@@ -284,7 +286,7 @@ async function loadPickLots(db: D1Database, tenantId: string, ids: string[]): Pr
               l.product_id, p.name AS product_name
          FROM document_lots dl
          INNER JOIN lots l ON l.id = dl.lot_id
-         LEFT JOIN products p ON p.id = l.product_id
+         LEFT JOIN products p ON p.id = l.product_id AND p.tenant_id = l.tenant_id
         WHERE l.tenant_id = ? AND dl.document_id IN (${ids.map(() => '?').join(', ')})
         ORDER BY l.lot_number ASC, l.sub_lot_code ASC`,
     )
@@ -305,7 +307,8 @@ async function loadSoleProducts(
     .prepare(
       `SELECT dp.document_id, p.id, p.name
          FROM document_products dp
-         INNER JOIN products p ON p.id = dp.product_id
+         INNER JOIN documents d ON d.id = dp.document_id
+         INNER JOIN products p ON p.id = dp.product_id AND p.tenant_id = d.tenant_id
         WHERE dp.document_id IN (${ids.map(() => '?').join(', ')})`,
     )
     .bind(...ids)

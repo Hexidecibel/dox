@@ -13,6 +13,7 @@ import {
 } from '../../../../../../../lib/permissions';
 import { loadSheetForUser } from '../../../../../../../lib/records/helpers';
 import {
+  healStalledRuns,
   hydrateWorkflow,
   startWorkflowRun,
   type WorkflowDbRow,
@@ -27,6 +28,22 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const rowId = context.params.rowId as string;
 
     await loadSheetForUser(context.env.DB, sheetId, user);
+
+    // A run whose worker died between a decision and the next step is resumed
+    // (or failed with a reason) when its record's runs are next read (C-146).
+    // Never allowed to fail the list.
+    try {
+      await healStalledRuns(
+        {
+          DB: context.env.DB,
+          RESEND_API_KEY: context.env.RESEND_API_KEY ?? null,
+          appOrigin: new URL(context.request.url).origin,
+        },
+        rowId,
+      );
+    } catch (err) {
+      console.error('Healing stalled workflow runs failed:', err);
+    }
 
     const result = await context.env.DB.prepare(
       `SELECT r.*, w.name AS workflow_name, w.steps AS workflow_steps,
@@ -118,10 +135,36 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const workflow = hydrateWorkflow(wfRow);
 
     const origin = new URL(context.request.url).origin;
-    const { runId } = await startWorkflowRun(
+    const { runId, failed } = await startWorkflowRun(
       { DB: context.env.DB, RESEND_API_KEY: context.env.RESEND_API_KEY ?? null, appOrigin: origin },
       { workflow, rowId, triggeredByUserId: user.id },
     );
+
+    // The first step could not be started: the run exists, already ended
+    // `cancelled` with the reason on it. Saying "started" would be a lie the
+    // builder finds out about later (C-147); this is a signed-in person who
+    // can fix the step, so they are told why.
+    if (failed) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        sheet.tenant_id,
+        'records_workflow_run.start_failed',
+        'records_workflow_run',
+        runId,
+        JSON.stringify({ workflow_id: workflow.id, row_id: rowId, reason: failed }),
+        getClientIp(context.request),
+      );
+      return new Response(
+        JSON.stringify({
+          error: `The workflow could not be started. ${failed}`,
+          code: 'workflow_start_failed',
+          run_id: runId,
+          run_status: 'cancelled',
+        }),
+        { status: 422, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
 
     await logAudit(
       context.env.DB,

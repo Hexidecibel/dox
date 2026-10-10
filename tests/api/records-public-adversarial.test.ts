@@ -18,6 +18,11 @@
  *   7. A COMPUTED COLUMN could be offered on a sign-off page.
  *   8. AN UPLOADED SVG (or HTML called an image) was served inline.
  *   9. THE VIEW LIMITER counted by a header the caller writes.
+ *
+ * ROUND 2 (the re-review of c49229c) is the second half of the file: the
+ * upload type check refused the builder's own Office preset; a contact cell's
+ * bare user id was printed; two more outside reads joined by id across
+ * tenants; and what a cancelled or interrupted run left behind.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
@@ -36,14 +41,26 @@ import {
 } from '../../functions/api/workflow-approvals/public/[token]';
 import { onRequestPost as runCancel } from '../../functions/api/records/workflow-runs/[runId]/cancel';
 import { onRequestGet as attachmentDownload } from '../../functions/api/records/attachments/[attachmentId]/download';
+import {
+  onRequestGet as runsList,
+  onRequestPost as runStart,
+} from '../../functions/api/records/sheets/[sheetId]/rows/[rowId]/workflow-runs/index';
+import { onRequestGet as requestsList } from '../../functions/api/records/sheets/[sheetId]/rows/[rowId]/update-requests/index';
 import { computeDisplayTitle } from '../../functions/lib/records/helpers';
 import {
+  advanceWorkflow,
   handleApprovalResponse,
   hydrateWorkflow,
   normalizeWorkflowSteps,
   startWorkflowRun,
+  targetStepIndex,
 } from '../../functions/lib/records/workflows';
-import { sniffFileType, storedTypeForUpload } from '../../functions/lib/records/fileType';
+import { attachmentDisposition, sniffFileType, storedTypeForUpload } from '../../functions/lib/records/fileType';
+import { looksLikeId } from '../../functions/lib/records/publicView';
+import { planRenewalLines } from '../../functions/lib/renewal-requests';
+import { loadOrderLines } from '../../functions/lib/order-items';
+import { FORM_ATTACHMENT_PRESETS } from '../../shared/formAttachmentPresets';
+import { plantNeverSee, expectNothingPlanted, pointAtOtherTenant } from '../helpers/never-see';
 import type { RecordColumnRow } from '../../shared/types';
 
 const db = env.DB;
@@ -595,10 +612,12 @@ describe('FINDING 4: a next step that cannot be started stops the run, visibly (
     const rowId = await makeRow(t, sheetId, { title: 'R' });
     const wf = await makeWorkflow(t, sheetId, [{ id: 's1', type: 'update_request', name: 'Ask', config: { recipient_email: 'x@out.example', fields_requested: ['owner'] } }]);
     const row = await db.prepare('SELECT * FROM records_workflows WHERE id = ?').bind(wf).first<Record<string, unknown>>();
-    const { runId } = await startWorkflowRun({ DB: db, RESEND_API_KEY: null, appOrigin: 'http://portal.test' }, { workflow: hydrateWorkflow(row as never), rowId, triggeredByUserId: seed.orgAdminId });
+    const { runId, failed } = await startWorkflowRun({ DB: db, RESEND_API_KEY: null, appOrigin: 'http://portal.test' }, { workflow: hydrateWorkflow(row as never), rowId, triggeredByUserId: seed.orgAdminId });
     const run = await db.prepare('SELECT status FROM records_workflow_runs WHERE id = ?').bind(runId).first<{ status: string }>();
     expect(run!.status).toBe('cancelled');
     expect(await auditOf(runId)).toHaveLength(1);
+    // And the caller is told, with the reason (C-147).
+    expect(failed).toContain('None of the fields this step asks for can be requested');
   });
 
   it('a mixed step keeps the columns that can still be asked for and goes out', async () => {
@@ -886,5 +905,460 @@ describe('FINDING 9: the limiter does not count by a header the caller writes (C
       if (r.status === 200) ok++;
     }
     expect(ok).toBe(30);
+  });
+});
+
+// ===========================================================================
+// ROUND 2 of the adversarial review (c49229c): one regression, three leaks,
+// and what an interrupted or cancelled run leaves behind (C-143..C-150).
+// ===========================================================================
+
+const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const ZIP_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0, 6, 0, 8, 0, 0, 0, 0x21, 0, 0, 0, 1, 2, 3, 4]);
+const OLE_BYTES = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0, 0, 0, 0, 0, 0, 0]);
+const PNG_HEAD = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+const JPEG_HEAD = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1]);
+const text = (s: string) => new TextEncoder().encode(s);
+
+/**
+ * A real-looking file for every type a form may be set to take. A preset type
+ * with no entry here fails the test below, so a type cannot be offered in the
+ * builder without proof the server takes it.
+ */
+const SAMPLE_FILES: Record<string, { name: string; bytes: Uint8Array; stored?: string }> = {
+  'image/png': { name: 'photo.png', bytes: PNG_HEAD },
+  'image/jpeg': { name: 'photo.jpg', bytes: JPEG_HEAD },
+  'image/gif': { name: 'anim.gif', bytes: text('GIF89a\u0001\u0000\u0001\u0000') },
+  'image/webp': { name: 'photo.webp', bytes: new Uint8Array([0x52, 0x49, 0x46, 0x46, 4, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20]) },
+  'image/heic': { name: 'photo.heic', bytes: new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63]) },
+  'image/heif': { name: 'photo.heif', bytes: new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x69, 0x66, 0x31]) },
+  'image/tiff': { name: 'scan.tiff', bytes: new Uint8Array([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0]) },
+  'image/bmp': { name: 'scan.bmp', bytes: text('BM000000') },
+  'application/pdf': { name: 'cert.pdf', bytes: text('%PDF-1.7\n%âãÏÓ') },
+  [DOCX]: { name: 'report.docx', bytes: ZIP_BYTES },
+  [XLSX]: { name: 'sheet.xlsx', bytes: ZIP_BYTES },
+  [PPTX]: { name: 'deck.pptx', bytes: ZIP_BYTES },
+  'application/msword': { name: 'report.doc', bytes: OLE_BYTES },
+  'application/vnd.ms-excel': { name: 'sheet.xls', bytes: OLE_BYTES },
+  'application/vnd.ms-powerpoint': { name: 'deck.ppt', bytes: OLE_BYTES },
+  'text/csv': { name: 'data.csv', bytes: text('lot,result\n1,2\n') },
+  'text/plain': { name: 'notes.txt', bytes: text('plain words') },
+  'application/zip': { name: 'bundle.zip', bytes: ZIP_BYTES },
+};
+/** What `image/*` means in practice: every image sample above. */
+const expandTypes = (types: string[]) =>
+  types.flatMap((t) => (t.endsWith('/*') ? Object.keys(SAMPLE_FILES).filter((k) => k.startsWith(t.slice(0, -1))) : [t]));
+
+describe('ROUND 2, FINDING 1: every type a form can be set to take is taken (C-143)', () => {
+  async function uploadTo(allowed: string[] | null, type: string, bytes: Uint8Array, name: string) {
+    const t = seed.tenantId;
+    const { sheetId, ids } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }]);
+    const slug = await makeForm(t, sheetId, [{ column_id: ids.title }], { allow_attachments: true, ...(allowed ? { allowed_mime_types: allowed } : {}) });
+    const fd = new FormData();
+    fd.append('file', new File([bytes], name, { type }));
+    return read(await formUpload(ctx(`/api/forms/public/${slug}/upload`, { method: 'POST', params: { slug }, body: fd })));
+  }
+
+  it('EVERY type EVERY builder preset offers uploads, on a form set to exactly that preset', async () => {
+    expect(FORM_ATTACHMENT_PRESETS.length).toBeGreaterThan(0);
+    const failures: string[] = [];
+    for (const preset of FORM_ATTACHMENT_PRESETS) {
+      const types = expandTypes(preset.types);
+      expect(types.length, `preset ${preset.key} names no type`).toBeGreaterThan(0);
+      for (const type of types) {
+        const sample = SAMPLE_FILES[type];
+        // A type added to a preset needs a sample here.
+        if (!sample) {
+          failures.push(`${preset.key}: no sample file for ${type}`);
+          continue;
+        }
+        const res = await uploadTo(preset.types, type, sample.bytes, sample.name);
+        if (res.status !== 200) failures.push(`${preset.key}: ${type} -> ${res.status} ${res.text}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it('the default form (no list set) takes every image type; a form set to them takes pptx, old Office files, csv and text', async () => {
+    for (const type of expandTypes(['image/*'])) {
+      const s = SAMPLE_FILES[type];
+      expect((await uploadTo(null, type, s.bytes, s.name)).status, type).toBe(200);
+    }
+    for (const type of [PPTX, 'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint', 'text/csv', 'text/plain', 'application/zip']) {
+      const s = SAMPLE_FILES[type];
+      const res = await uploadTo([type], type, s.bytes, s.name);
+      expect(res.status, type).toBe(200);
+      expect(res.body.mime_type).toBe(type);
+    }
+  });
+
+  it('a CSV that Windows calls application/vnd.ms-excel is taken as declared', async () => {
+    const res = await uploadTo(['application/vnd.ms-excel'], 'application/vnd.ms-excel', text('a,b\n1,2\n'), 'export.csv');
+    expect(res.status).toBe(200);
+  });
+
+  it('a modern Office type is decided from the bytes: it must be a ZIP container', async () => {
+    for (const type of [DOCX, XLSX, PPTX]) {
+      expect(storedTypeForUpload(type, ZIP_BYTES)).toBe(type);
+      expect(storedTypeForUpload(type, text('<html><script>alert(1)</script>'))).toBeNull();
+      expect((await uploadTo([type], type, text('<html><script>alert(1)</script>'), 'x.docx')).status, type).toBe(415);
+    }
+  });
+
+  it('the active types are a list, and what has "xml" in a vendor name is not on it', () => {
+    for (const refused of ['image/svg+xml', 'text/html', 'application/xhtml+xml', 'text/xml', 'application/xml', 'application/atom+xml', 'application/javascript', 'text/javascript', 'text/css']) {
+      expect(storedTypeForUpload(refused, text('anything at all')), refused).toBeNull();
+    }
+    for (const kept of ['application/vnd.oasis.opendocument.text', 'application/vnd.ms-excel.sheet.macroenabled.12', 'application/json', 'audio/mpeg', 'video/mp4', 'application/x-xmlish']) {
+      expect(storedTypeForUpload(kept, text('anything at all')), kept).toBe(kept);
+    }
+  });
+
+  it('HELD: polyglots -- markup behind a BOM or a prolog, and image magic in front of markup', () => {
+    const head = (s: string) => text(s).slice(0, 16);
+    expect(storedTypeForUpload('image/png', head('﻿<svg onload=1>'))).toBeNull();
+    expect(storedTypeForUpload('image/svg+xml', head('   <?xml version="1"?>'))).toBeNull();
+    expect(storedTypeForUpload('IMAGE/SVG+XML; charset=x', head('<svg>'))).toBeNull();
+    // Stored as the image its bytes say; never drawn as HTML, whatever follows.
+    expect(storedTypeForUpload('text/html', new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 60, 104]))).toBe('image/png');
+    expect(storedTypeForUpload('text/html', head('GIF89a<script>'))).toBe('image/gif');
+  });
+});
+
+describe('ROUND 2, FINDING 2: a bare string in a contact cell is an id first (C-144)', () => {
+  async function signOff(data: Record<string, unknown>, visible: string[], titleKey = 'title') {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [
+      { key: 'title', type: 'text', is_title: titleKey === 'title' },
+      { key: 'owner', type: 'contact', is_title: titleKey === 'owner' },
+      { key: 'others', type: 'contact' },
+    ]);
+    const rowId = await makeRow(t, sheetId, data);
+    const a = await makeApproval(t, sheetId, rowId, [{ id: 's1', type: 'approval', name: 'QA', config: { assignee_email: 'qa@out.example', visible_fields: visible } }]);
+    return { page: await getA(a.token), sheetId, rowId };
+  }
+
+  it("a user id of this tenant leaves as that user's NAME, never as the id", async () => {
+    const { page } = await signOff({ title: 'R', owner: seed.orgAdminId }, ['owner']);
+    expect(page.status).toBe(200);
+    expect(page.body.row.fields).toEqual([{ label: 'OWNER', type: 'contact', value: 'Org Admin' }]);
+    expect(page.text).not.toContain(seed.orgAdminId);
+  });
+
+  it('an id-shaped string that is no user of this tenant shows nothing: another tenant\'s user, a made-up id', async () => {
+    const { page } = await signOff({ title: 'R', owner: seed.orgAdmin2Id, others: ['3f2a9c0d1e4b4a6f8c7d2e1f0a9b8c7d', 'user_17', 'ghost-user-id'] }, ['owner', 'others']);
+    expect(page.body.row.fields.map((f: { value: unknown }) => f.value)).toEqual([null, null]);
+    expect(page.text).not.toContain(seed.orgAdmin2Id);
+    expect(page.text).not.toContain('Org Admin 2');
+    expect(page.text).not.toContain('3f2a9c0d');
+    expect(page.text).not.toContain('user_17');
+    expect(page.text).not.toContain('ghost-user-id');
+  });
+
+  it('in a list: ids resolve, typed names stay, addresses and unresolved ids go', async () => {
+    const { page } = await signOff(
+      { title: 'R', others: [seed.orgAdminId, 'Dana Typed', 'Jean-Luc', 'dave.login@tenant-secret.example', seed.orgAdmin2Id, { id: seed.userId }] },
+      ['others'],
+    );
+    expect(page.body.row.fields[0].value).toBe('Org Admin, Dana Typed, Jean-Luc, Regular User');
+    for (const id of [seed.orgAdminId, seed.orgAdmin2Id, seed.userId]) expect(page.text).not.toContain(id);
+  });
+
+  it('the same on the TITLE path: a contact title that is a bare user id is the name', async () => {
+    const t = seed.tenantId;
+    const { page, sheetId, rowId } = await signOff({ owner: seed.orgAdminId }, [], 'owner');
+    expect(page.body.row.title).toBe('Org Admin');
+    expect(page.text).not.toContain(seed.orgAdminId);
+    const u = await getU(await makeUR(t, sheetId, rowId, ['title']));
+    expect(u.body.request.row_title).toBe('Org Admin');
+    expect(u.text).not.toContain(seed.orgAdminId);
+
+    const foreign = await signOff({ owner: seed.orgAdmin2Id }, [], 'owner');
+    expect(foreign.page.body.row.title).toBeNull();
+    expect(foreign.page.text).not.toContain(seed.orgAdmin2Id);
+  });
+
+  it('what has the shape of an id, and what is a name', () => {
+    for (const id of ['user-org-admin', 'test-tenant-001', '3f2a9c0d1e4b4a6f8c7d2e1f0a9b8c7d', 'user_17', 'a1', 'abcdefghijklmnopqrstuvwxyz']) expect(looksLikeId(id), id).toBe(true);
+    for (const name of ['Dana', 'Dana Typed', 'Jean-Luc', "O'Brien", 'José', 'QA team']) expect(looksLikeId(name), name).toBe(false);
+  });
+});
+
+describe('ROUND 2, FINDING 3: no join by id leaves its tenant on an outside surface (C-145)', () => {
+  it("a renewal request to a SUPPLIER is not worded from another tenant's document type or requirement", async () => {
+    const planted = await plantNeverSee(db, { tenantId: seed.tenantId, otherTenantId: seed.tenantId2, authorId: seed.orgAdminId });
+    const docId = generateTestId();
+    await db.prepare(`INSERT INTO documents (id, tenant_id, title, current_version, status, created_by) VALUES (?, ?, 'Doc', 1, 'active', ?)`).bind(docId, seed.tenantId, seed.orgAdminId).run();
+    await pointAtOtherTenant(db, planted, { table: 'documents', id: docId, column: 'document_type_id' });
+    const byType = await planRenewalLines(db, seed.tenantId, docId);
+    expectNothingPlanted(JSON.stringify(byType), planted);
+    // The fallback wording, since the type is not this tenant's.
+    expect(byType.items).toEqual([{ name: 'Current version of the document on file' }]);
+
+    // The middle rung: the document's OWN type says what it closes, and that
+    // link names a requirement next door.
+    const ownType = generateTestId();
+    await db.prepare('INSERT INTO document_types (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)').bind(ownType, seed.tenantId, 'Own Type', `own-${ownType.slice(0, 8)}`).run();
+    const foreignReq = generateTestId();
+    await db.prepare('INSERT INTO requirements (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)').bind(foreignReq, seed.tenantId2, 'NEVERSEE-OTHER-TENANT-REQUIREMENT', `nsr-${foreignReq.slice(0, 8)}`).run();
+    await db.prepare('INSERT INTO document_type_requirements (tenant_id, document_type_id, requirement_id) VALUES (?, ?, ?)').bind(seed.tenantId, ownType, foreignReq).run();
+    await db.prepare('UPDATE documents SET document_type_id = ? WHERE id = ?').bind(ownType, docId).run();
+    const byRequirement = await planRenewalLines(db, seed.tenantId, docId);
+    expect(JSON.stringify(byRequirement)).not.toContain('NEVERSEE-OTHER-TENANT-REQUIREMENT');
+    expect(JSON.stringify(byRequirement)).not.toContain(foreignReq);
+  });
+
+  it("an order line does not resolve another tenant's product name (what the customer send prefers)", async () => {
+    const planted = await plantNeverSee(db, { tenantId: seed.tenantId, otherTenantId: seed.tenantId2, authorId: seed.orgAdminId });
+    const orderId = generateTestId();
+    await db.prepare(`INSERT INTO orders (id, tenant_id, order_number) VALUES (?, ?, ?)`).bind(orderId, seed.tenantId, `R2-${orderId.slice(0, 8)}`).run();
+    const itemId = generateTestId();
+    await db.prepare(`INSERT INTO order_items (id, order_id, product_name) VALUES (?, ?, 'WMS line')`).bind(itemId, orderId).run();
+    await pointAtOtherTenant(db, planted, { table: 'order_items', id: itemId, column: 'product_id' });
+    const lines = await loadOrderLines(db, env.FILES, seed.tenantId, orderId);
+    expect(lines).toHaveLength(1);
+    // The line's own `product_id` column holds the id that was planted on it;
+    // what must not come back is anything READ from next door.
+    expectNothingPlanted(JSON.stringify(lines).split(planted.other_tenant_product_id).join(''), planted);
+    // The line keeps the name the order itself carries.
+    expect((lines[0] as { product_name?: string }).product_name).toBe('WMS line');
+  });
+});
+
+describe('ROUND 2: an interrupted or cancelled run (C-146)', () => {
+  const engine = { DB: db, RESEND_API_KEY: 'test-resend-key', appOrigin: 'http://portal.test' };
+  async function decidedButNotAdvanced(steps: unknown[]) {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }, { key: 'notes', type: 'text' }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R' });
+    const a = await makeApproval(t, sheetId, rowId, steps);
+    // The decision is recorded, as the claim does it, and the worker dies.
+    await db
+      .prepare(`UPDATE records_workflow_step_runs SET status = 'approved', responded_at = datetime('now', '-10 minutes'), completed_at = datetime('now', '-10 minutes') WHERE id = ?`)
+      .bind(a.stepRunId)
+      .run();
+    return { ...a, sheetId, rowId };
+  }
+  const TWO = [
+    { id: 's1', type: 'approval', name: 'QA', config: { assignee_email: 'qa@out.example' } },
+    { id: 's2', type: 'approval', name: 'Director', config: { assignee_email: 'director@out.example' } },
+  ];
+  const stepRuns = async (run: string) =>
+    (await db.prepare('SELECT step_id, status FROM records_workflow_step_runs WHERE run_id = ? ORDER BY step_index').bind(run).all<{ step_id: string; status: string }>()).results;
+  const runStatus = async (run: string) => (await db.prepare('SELECT status FROM records_workflow_runs WHERE id = ?').bind(run).first<{ status: string }>())!.status;
+  const listRuns = (sheetId: string, rowId: string) =>
+    runsList(ctx(`/api/records/sheets/${sheetId}/rows/${rowId}/workflow-runs`, { params: { sheetId, rowId }, user: admin(), resend: true }));
+
+  it('a cancel landing between the decision and the advance starts NO step and mails nobody a dead link', async () => {
+    const r = await decidedButNotAdvanced(TWO);
+    const cancelled = await runCancel(ctx(`/api/records/workflow-runs/${r.run}/cancel`, { method: 'POST', params: { runId: r.run }, user: admin() }));
+    expect(cancelled.status).toBe(200);
+
+    const wf = hydrateWorkflow((await db.prepare('SELECT * FROM records_workflows WHERE id = ?').bind(r.wf).first()) as never);
+    const moved = await advanceWorkflow(engine, { workflow: wf, runId: r.run, fromStepIndex: 0, outcome: 'approve', rowId: r.rowId });
+    expect(moved).toBe(false);
+    expect((await stepRuns(r.run)).map((s) => s.step_id)).toEqual(['s1']);
+    expect(await runStatus(r.run)).toBe('cancelled');
+    expect(mails).toEqual([]);
+  });
+
+  it('two advances from the same step move the run once', async () => {
+    const r = await decidedButNotAdvanced(TWO);
+    const wf = hydrateWorkflow((await db.prepare('SELECT * FROM records_workflows WHERE id = ?').bind(r.wf).first()) as never);
+    const go = () => advanceWorkflow(engine, { workflow: wf, runId: r.run, fromStepIndex: 0, outcome: 'approve', rowId: r.rowId });
+    const moved = await Promise.all([go(), go(), go()]);
+    expect(moved.filter(Boolean)).toHaveLength(1);
+    expect((await stepRuns(r.run)).filter((s) => s.step_id === 's2')).toHaveLength(1);
+  });
+
+  it('a run left decided-but-not-advanced is RESUMED the next time its record\'s runs are read', async () => {
+    const r = await decidedButNotAdvanced(TWO);
+    expect((await stepRuns(r.run)).map((s) => s.step_id)).toEqual(['s1']);
+    expect((await listRuns(r.sheetId, r.rowId)).status).toBe(200);
+    expect(await stepRuns(r.run)).toEqual([
+      { step_id: 's1', status: 'approved' },
+      { step_id: 's2', status: 'awaiting_response' },
+    ]);
+    expect(await runStatus(r.run)).toBe('in_progress');
+    // Reading again does not start it twice.
+    await listRuns(r.sheetId, r.rowId);
+    expect((await stepRuns(r.run)).filter((s) => s.step_id === 's2')).toHaveLength(1);
+  });
+
+  it('a run moved to a step it never began is resumed too; a last decision that ends the workflow completes it', async () => {
+    const moved = await decidedButNotAdvanced(TWO);
+    await db.prepare(`UPDATE records_workflow_runs SET current_step_id = 's2' WHERE id = ?`).bind(moved.run).run();
+    await listRuns(moved.sheetId, moved.rowId);
+    expect((await stepRuns(moved.run)).map((s) => [s.step_id, s.status])).toEqual([['s1', 'approved'], ['s2', 'awaiting_response']]);
+
+    const last = await decidedButNotAdvanced([TWO[0]]);
+    await listRuns(last.sheetId, last.rowId);
+    expect(await runStatus(last.run)).toBe('completed');
+  });
+
+  it('a decision recorded a moment ago is being processed and is left alone', async () => {
+    const r = await decidedButNotAdvanced(TWO);
+    await db.prepare(`UPDATE records_workflow_step_runs SET completed_at = datetime('now'), responded_at = datetime('now') WHERE id = ?`).bind(r.stepRunId).run();
+    await listRuns(r.sheetId, r.rowId);
+    expect((await stepRuns(r.run)).map((s) => s.step_id)).toEqual(['s1']);
+  });
+
+  it('a stalled run that cannot be resumed is FAILED with a reason, not left in progress', async () => {
+    const r = await decidedButNotAdvanced([
+      TWO[0],
+      { id: 's2', type: 'update_request', name: 'Ask', config: { recipient_email: 'x@out.example', fields_requested: ['gone'] } },
+    ]);
+    await listRuns(r.sheetId, r.rowId);
+    expect(await runStatus(r.run)).toBe('cancelled');
+    const audit = await db.prepare(`SELECT details FROM audit_log WHERE action = 'records_workflow_run.step_failed' AND resource_id = ?`).bind(r.run).all<{ details: string }>();
+    expect(audit.results).toHaveLength(1);
+  });
+});
+
+describe('ROUND 2: a failure names the step the decision really leads to (C-149)', () => {
+  const BRANCHING = [
+    { id: 's1', type: 'approval', name: 'QA', config: { assignee_email: 'qa@out.example' }, on_approve_next: 's3', on_reject_next: 's2' },
+    { id: 's2', type: 'approval', name: 'Rework review', config: { assignee_email: 'rework@out.example' } },
+    { id: 's3', type: 'update_request', name: 'Ask for the certificate', config: { recipient_email: 'x@out.example', fields_requested: ['owner'] } },
+  ];
+
+  it('targetStepIndex follows the approve / reject pointer, not the array', () => {
+    expect(targetStepIndex(BRANCHING as never, 0, 'approve')).toBe(2);
+    expect(targetStepIndex(BRANCHING as never, 0, 'reject')).toBe(1);
+    expect(targetStepIndex(BRANCHING as never, 1, 'approve')).toBe(2);
+    // The end of the run is not a step.
+    expect(targetStepIndex(BRANCHING as never, 2, 'approve')).toBe(-1);
+    expect(targetStepIndex(BRANCHING as never, 1, 'reject')).toBe(-1);
+  });
+
+  it('an approval that branches to a step that cannot be sent names THAT step to the owner', async () => {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }, { key: 'owner', type: 'contact' }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R' });
+    const a = await makeApproval(t, sheetId, rowId, BRANCHING);
+    expect((await postA(a.token, { decision: 'approve' }, { resend: true })).status).toBe(200);
+    const audit = await db.prepare(`SELECT details FROM audit_log WHERE action = 'records_workflow_run.step_failed' AND resource_id = ?`).bind(a.run).first<{ details: string }>();
+    expect(JSON.parse(audit!.details)).toMatchObject({ step_id: 's3', step_name: 'Ask for the certificate' });
+    const toOwner = mails.filter((m) => [m.to].flat().includes('orgadmin@test.com'));
+    expect(toOwner[0].html).toContain('Ask for the certificate');
+    expect(toOwner[0].html).not.toContain('Rework review');
+    const failed = await db.prepare(`SELECT step_id FROM records_workflow_step_runs WHERE run_id = ? AND status = 'skipped'`).bind(a.run).all<{ step_id: string }>();
+    expect(failed.results.map((s) => s.step_id)).toEqual(['s3']);
+  });
+});
+
+describe("ROUND 2: a closed request says so in the signed-in list (C-148)", () => {
+  async function workflowRequest() {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }, { key: 'notes', type: 'text' }, { key: 'owner', type: 'contact' }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R', notes: 'before' });
+    const wf = await makeWorkflow(t, sheetId, [
+      { id: 's1', type: 'update_request', name: 'Ask', config: { recipient_email: 'x@out.example', fields_requested: ['notes'] } },
+      { id: 's2', type: 'update_request', name: 'Ask again', config: { recipient_email: 'y@out.example', fields_requested: ['owner'] } },
+    ]);
+    const row = await db.prepare('SELECT * FROM records_workflows WHERE id = ?').bind(wf).first<Record<string, unknown>>();
+    const { runId } = await startWorkflowRun({ DB: db, RESEND_API_KEY: null, appOrigin: 'http://portal.test' }, { workflow: hydrateWorkflow(row as never), rowId, triggeredByUserId: seed.orgAdminId });
+    const ur = await db.prepare('SELECT id, token FROM records_update_requests WHERE sheet_id = ?').bind(sheetId).first<{ id: string; token: string }>();
+    return { sheetId, rowId, wf, runId, requestId: ur!.id, token: ur!.token };
+  }
+  async function listed(sheetId: string, rowId: string) {
+    const res = await read(await requestsList(ctx(`/api/records/sheets/${sheetId}/rows/${rowId}/update-requests`, { params: { sheetId, rowId }, user: admin() })));
+    expect(res.status).toBe(200);
+    return res.body.requests as Array<{ id: string; status: string; link_closed: boolean; token?: string }>;
+  }
+
+  it('a healthy request is pending and open; nothing in the list is its token', async () => {
+    const w = await workflowRequest();
+    const rows = await listed(w.sheetId, w.rowId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: w.requestId, status: 'pending', link_closed: false });
+    expect(JSON.stringify(rows)).not.toContain(w.token);
+  });
+
+  it('cancelling the run sets it CANCELLED, not left pending behind a dead link', async () => {
+    const w = await workflowRequest();
+    await runCancel(ctx(`/api/records/workflow-runs/${w.runId}/cancel`, { method: 'POST', params: { runId: w.runId }, user: admin() }));
+    expect((await listed(w.sheetId, w.rowId))[0]).toMatchObject({ status: 'cancelled', link_closed: false });
+    expect((await getU(w.token)).status).toBe(404);
+  });
+
+  it('pausing the workflow leaves it pending but SAYS the link is closed, and reactivating clears that', async () => {
+    const w = await workflowRequest();
+    await db.prepare(`UPDATE records_workflows SET status = 'draft' WHERE id = ?`).bind(w.wf).run();
+    expect((await listed(w.sheetId, w.rowId))[0]).toMatchObject({ status: 'pending', link_closed: true });
+    expect((await getU(w.token)).status).toBe(404);
+    await db.prepare(`UPDATE records_workflows SET status = 'active' WHERE id = ?`).bind(w.wf).run();
+    expect((await listed(w.sheetId, w.rowId))[0]).toMatchObject({ status: 'pending', link_closed: false });
+    expect((await getU(w.token)).status).toBe(200);
+  });
+
+  it('a request sent by hand is never reported closed by a workflow', async () => {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R' });
+    await makeUR(t, sheetId, rowId, ['title']);
+    expect((await listed(sheetId, rowId))[0]).toMatchObject({ status: 'pending', link_closed: false });
+  });
+});
+
+describe('ROUND 2: starting a workflow that cannot start says so (C-147)', () => {
+  const start = async (sheetId: string, rowId: string, workflowId: string) =>
+    read(await runStart(ctx(`/api/records/sheets/${sheetId}/rows/${rowId}/workflow-runs`, { method: 'POST', params: { sheetId, rowId }, user: admin(), json: { workflow_id: workflowId } })));
+
+  it('a first step that cannot be sent is a 422 with the reason and the cancelled run, not "started"', async () => {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }, { key: 'owner', type: 'contact' }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R' });
+    const wf = await makeWorkflow(t, sheetId, [{ id: 's1', type: 'update_request', name: 'Ask', config: { recipient_email: 'x@out.example', fields_requested: ['owner'] } }]);
+    const res = await start(sheetId, rowId, wf);
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('workflow_start_failed');
+    expect(res.body.run_status).toBe('cancelled');
+    // A signed-in builder is told why.
+    expect(res.body.error).toContain('None of the fields this step asks for can be requested');
+    const run = await db.prepare('SELECT status FROM records_workflow_runs WHERE id = ?').bind(res.body.run_id).first<{ status: string }>();
+    expect(run!.status).toBe('cancelled');
+    const audits = await db.prepare(`SELECT action FROM audit_log WHERE resource_id = ?`).bind(res.body.run_id).all<{ action: string }>();
+    expect(audits.results.map((a) => a.action).sort()).toEqual(['records_workflow_run.start_failed', 'records_workflow_run.step_failed']);
+  });
+
+  it('a workflow that starts is still a 201 with its run', async () => {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R' });
+    const wf = await makeWorkflow(t, sheetId, [{ id: 's1', type: 'approval', name: 'QA', config: { assignee_email: 'qa@out.example' } }]);
+    const res = await start(sheetId, rowId, wf);
+    expect(res.status).toBe(201);
+    expect(Object.keys(res.body)).toEqual(['run_id']);
+  });
+});
+
+describe('ROUND 2: a file name in any script downloads (C-150)', () => {
+  it('Content-Disposition carries an ASCII fallback and the real name percent-encoded', () => {
+    expect(attachmentDisposition('证书 2026.pdf')).toBe("attachment; filename=\"__ 2026.pdf\"; filename*=UTF-8''%E8%AF%81%E4%B9%A6%202026.pdf");
+    expect(attachmentDisposition('Ünïcödé "quoted"\r\n.pdf')).toBe("attachment; filename=\"_n_c_d_ _quoted_.pdf\"; filename*=UTF-8''%C3%9Cn%C3%AFc%C3%B6d%C3%A9%20%22quoted%22.pdf");
+    expect(attachmentDisposition("it's (1)*.txt")).toBe("attachment; filename=\"it_s _1__.txt\"; filename*=UTF-8''it%27s%20%281%29%2A.txt");
+    expect(attachmentDisposition(null)).toBe("attachment; filename=\"download\"; filename*=UTF-8''download");
+    expect(attachmentDisposition('плохо')).toMatch(/^attachment; filename="_____"; filename\*=UTF-8''%D0/);
+  });
+
+  it('the download route answers 200 for a name that is not Latin-1', async () => {
+    const t = seed.tenantId;
+    const { sheetId } = await makeSheet(t, [{ key: 'title', type: 'text', is_title: true }]);
+    const rowId = await makeRow(t, sheetId, { title: 'R' });
+    const id = generateTestId();
+    await env.FILES.put(`records/adv/${id}/stored`, 'bytes');
+    await db
+      .prepare(`INSERT INTO records_row_attachments (id, tenant_id, row_id, r2_key, file_name, file_size, mime_type) VALUES (?, ?, ?, ?, ?, 5, 'text/csv')`)
+      .bind(id, t, rowId, `records/adv/${id}/stored`, '检验报告 — 批次 42.csv')
+      .run();
+    const res = await attachmentDownload(ctx(`/api/records/attachments/${id}/download`, { params: { attachmentId: id }, user: admin() }));
+    expect(res.status).toBe(200);
+    const disposition = res.headers.get('Content-Disposition') ?? '';
+    expect(disposition).toContain("filename*=UTF-8''%E6%A3%80%E9%AA%8C");
+    expect(disposition).toMatch(/filename="[\x20-\x7e]*"/);
+    expect(await res.text()).toBe('bytes');
   });
 });

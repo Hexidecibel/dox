@@ -130,7 +130,8 @@ export async function resolveOwnerRoute(
         `SELECT COALESCE(u.email, r.email) AS email,
                 COALESCE(u.name, r.owner_label) AS name
            FROM owner_routes r
-           LEFT JOIN users u ON u.id = r.user_id
+           LEFT JOIN users u
+                  ON u.id = r.user_id AND (u.tenant_id = r.tenant_id OR u.role = 'super_admin')
           WHERE r.tenant_id = ?
             AND r.owner_key = ?
             AND r.active = 1
@@ -162,7 +163,8 @@ export async function resolveAssignmentOwners(
       .prepare(
         `SELECT u.email, u.name
            FROM assignments a
-           JOIN users u ON u.id = a.owner_user_id
+           JOIN users u
+             ON u.id = a.owner_user_id AND (u.tenant_id = a.tenant_id OR u.role = 'super_admin')
           WHERE a.tenant_id = ? AND a.supplier_id = ? AND a.document_type_id = ?
             AND u.active = 1 AND u.email IS NOT NULL`
       )

@@ -68,6 +68,7 @@ import type {
   RecordFormSettings,
 } from '../../../shared/types';
 import { FORM_ATTACHMENT_DEFAULTS } from '../../../shared/types';
+import { FORM_ATTACHMENT_PRESETS } from '../../../shared/formAttachmentPresets';
 import { DEFAULT_BRAND_COLOR, formAccentOrNull, normalizeFormAccent } from '../../../shared/tenantBrand';
 
 type EntityKind = 'customer' | 'supplier' | 'product';
@@ -1186,20 +1187,10 @@ interface AttachmentSettingsPanelProps {
   onChange: (patch: Partial<RecordFormSettings>) => void;
 }
 
-const MIME_PRESETS: Array<{ key: string; label: string; types: string[] }> = [
-  { key: 'images', label: 'Images', types: ['image/*'] },
-  { key: 'pdf', label: 'PDF', types: ['application/pdf'] },
-  {
-    key: 'office',
-    label: 'Office docs',
-    types: [
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'application/msword',
-      'application/vnd.ms-excel',
-    ],
-  },
-];
+// The presets live in `shared/formAttachmentPresets.ts` so the upload route's
+// test can upload every type they offer: a preset must never offer a type the
+// server refuses.
+const MIME_PRESETS = FORM_ATTACHMENT_PRESETS;
 
 function AttachmentSettingsPanel({ settings, onChange }: AttachmentSettingsPanelProps) {
   const allowed = settings.allowed_mime_types ?? [...FORM_ATTACHMENT_DEFAULTS.allowed_mime_types];
